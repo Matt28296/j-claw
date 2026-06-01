@@ -1,23 +1,45 @@
 # J-Claw Harness — Setup Guide
 
-## 1. Install Ollama
+## Requirements
 
-Download and install from https://ollama.com/download/windows  
-After install, pull the worker model:
+- Windows 10/11
+- Python 3.10+
+- [Ollama](https://ollama.com/download/windows) (local worker)
+- Anthropic API key (for automated orchestrator) — optional, see step 4
+
+---
+
+## 1. Clone the repo
 
 ```
-ollama pull qwen2.5-coder:7b
+git clone https://github.com/Matt28296/j-claw.git
+cd j-claw
 ```
 
-Verify it's running:
+## 2. Install Ollama and pull the worker model
+
+Download from https://ollama.com/download/windows and install.
+
+Then pull the code worker model (choose one):
+
+```
+ollama pull qwen2.5-coder:7b      # fits comfortably in 8 GB VRAM
+ollama pull qwen2.5-coder:14b     # better quality, fits in 8 GB at Q4
+```
+
+Verify:
 ```
 ollama list
 ```
 
-## 2. Python environment
+## 3. Python environment
 
-Requires Python 3.10+.
+Allow script execution (run once in PowerShell):
+```
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
 
+Then create the virtual environment:
 ```
 cd harness
 python -m venv .venv
@@ -25,40 +47,41 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## 3. API key
+## 4. Configure .env
 
 ```
 copy .env.example .env
 ```
 
-Edit `.env` and set your Anthropic API key:
+Edit `.env` with your settings:
+
+| Variable               | Default                   | Description                                  |
+|------------------------|---------------------------|----------------------------------------------|
+| `ANTHROPIC_API_KEY`    | (required for auto mode)  | Your Anthropic API key                       |
+| `ORCHESTRATOR_MODEL`   | `claude-sonnet-4-6`       | Claude model used for orchestration          |
+| `WORKER_MODEL`         | `qwen2.5-coder:7b`        | Ollama model for code writing                |
+| `PROJECTS_DIR`         | `./projects`              | Where generated project files are written    |
+| `MAX_RETRIES_PER_TASK` | `3`                       | EXECUTION_ERROR retries before halting       |
+| `MAX_FORMAT5_DEPTH`    | `3`                       | Max recursion depth for oversize sub-projects|
+| `OLLAMA_HOST`          | `http://localhost:11434`  | Ollama API endpoint                          |
+
+## 5. Run
+
+From the **project root** (`j-claw/`), not from inside `harness/`:
+
+**Automated mode** (requires API key):
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+.\run.bat
 ```
 
-## 4. Run
-
+**Manual mode** (you act as the orchestrator — no API key needed):
 ```
-python main.py "A simple to-do web app"
-```
-
-Or pass intent as a flag:
-```
-python main.py "A CLI tool that renames files by date" -o ./projects/renamer
+.\run.bat --manual
 ```
 
-## Configuration
+The pipeline will prompt you to describe your project, then generate a spec for your approval before executing.
 
-All options live in `.env`:
-
-| Variable              | Default                  | Description                          |
-|-----------------------|--------------------------|--------------------------------------|
-| `ANTHROPIC_API_KEY`   | (required)               | Your Anthropic API key               |
-| `WORKER_MODEL`        | `qwen2.5-coder:7b`       | Ollama model for code writing        |
-| `PROJECTS_DIR`        | `./projects`             | Where generated project files go     |
-| `MAX_RETRIES_PER_TASK`| `3`                      | EXECUTION_ERROR retries before halt  |
-| `MAX_FORMAT5_DEPTH`   | `3`                      | Max recursion depth for sub-projects |
-| `OLLAMA_HOST`         | `http://localhost:11434` | Ollama API endpoint                  |
+---
 
 ## How it works
 
@@ -77,10 +100,19 @@ User intent
     │   on failure → EXECUTION_ERROR → FORMAT 3 refinement → retry
     │
     ▼ PROJECT_REVIEW
-  FORMAT 4 pass/needs_followup
+  FORMAT 4 pass / needs_followup
     │ (pass)
-    ▼ done — files in ./projects/<name>/
+    ▼ done — output in projects/<name>/
 ```
 
-If any phase produces a FORMAT 5 (oversize), the project is split into sequential
-sub-projects and each is run as its own pipeline.
+If any phase produces FORMAT 5 (oversize), the project splits into sequential
+sub-projects each run as their own pipeline instance.
+
+## Supported stacks
+
+| Stack        | Use case                          | Requirements          |
+|--------------|-----------------------------------|-----------------------|
+| `vanilla`    | Static web apps, Tailwind CDN     | None (browser only)   |
+| `fastapi`    | Python REST API + SQLite backend  | pip install           |
+| `phaser`     | Browser games (Phaser 3 CDN)      | None (browser only)   |
+| `react-vite` | React + Vite + Tailwind frontend  | Node.js + npm         |
