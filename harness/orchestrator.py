@@ -6,7 +6,10 @@ import anthropic
 from rich.console import Console
 from rich.syntax import Syntax
 
-from config import ORCHESTRATOR_MODEL, ANTHROPIC_API_KEY, ORCHESTRATOR_PROMPT_PATH
+from config import (
+    ORCHESTRATOR_MODEL, ANTHROPIC_API_KEY, ORCHESTRATOR_PROMPT_PATH,
+    ORCHESTRATOR_API_MODEL, ORCHESTRATOR_FALLBACK_MODELS, OPENROUTER_API_KEY,
+)
 from validator import validate_response, OrchestratorOutputError
 
 console = Console()
@@ -94,6 +97,78 @@ class Orchestrator:
                     time.sleep(1 + attempt)
 
         raise RuntimeError(f"Orchestrator failed after {max_retries + 1} attempts: {last_error}") from last_error
+
+
+class OpenRouterOrchestrator:
+    def __init__(self) -> None:
+        if not OPENROUTER_API_KEY:
+            raise RuntimeError("OPENROUTER_API_KEY is not set. Add it to harness/.env.")
+        from openai import OpenAI
+        self._client = OpenAI(
+            api_key=OPENROUTER_API_KEY,
+            base_url="https://openrouter.ai/api/v1",
+            default_headers={"X-Title": "J-Claw"},
+        )
+        self._system_prompt = ORCHESTRATOR_PROMPT_PATH.read_text(encoding="utf-8")
+
+    def call(self, payload: dict, max_retries: int = 3) -> dict:
+        from openai import RateLimitError
+        state = payload.get("system_state", "INIT")
+        user_message = json.dumps(payload)
+        last_error: Exception | None = None
+
+        model_chain = [ORCHESTRATOR_API_MODEL] + ORCHESTRATOR_FALLBACK_MODELS
+        current_model = model_chain[0]
+        model_idx = 0
+
+        for attempt in range(max_retries + 1):
+            try:
+                response = self._client.chat.completions.create(
+                    model=current_model,
+                    max_tokens=8096,
+                    messages=[
+                        {"role": "system", "content": self._system_prompt},
+                        {"role": "user", "content": user_message},
+                    ],
+                    response_format={"type": "json_object"},
+                )
+                text = response.choices[0].message.content.strip()
+                text = _strip_fences(text)
+                parsed = json.loads(text)
+                validate_response(state, parsed)
+                return parsed
+
+            except RateLimitError as exc:
+                last_error = exc
+                # Try next fallback model before waiting
+                model_idx += 1
+                if model_idx < len(model_chain):
+                    current_model = model_chain[model_idx]
+                    console.print(f"[yellow]Orchestrator rate limited — switching to fallback: {current_model}[/yellow]")
+                else:
+                    # All models exhausted for this attempt — wait then reset
+                    model_idx = 0
+                    current_model = model_chain[0]
+                    try:
+                        wait = int(exc.response.json()["error"]["metadata"]["retry_after_seconds"]) + 2
+                    except Exception:
+                        wait = 35 * (attempt + 1)
+                    console.print(f"[yellow]All orchestrator models rate limited — waiting {wait}s (attempt {attempt + 1}/{max_retries + 1})…[/yellow]")
+                    if attempt < max_retries:
+                        time.sleep(wait)
+
+            except (json.JSONDecodeError, OrchestratorOutputError) as exc:
+                last_error = exc
+                if attempt < max_retries:
+                    console.print(
+                        f"[yellow]Orchestrator output invalid (attempt {attempt + 1}/{max_retries + 1}): "
+                        f"{exc}  — retrying...[/yellow]"
+                    )
+                    time.sleep(2 + attempt)
+
+        raise RuntimeError(
+            f"OpenRouterOrchestrator failed after {max_retries + 1} attempts: {last_error}"
+        ) from last_error
 
 
 def _sanitize(text: str) -> str:

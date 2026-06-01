@@ -11,15 +11,16 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 
-from config import PROJECTS_DIR, MAX_FORMAT5_DEPTH
-from orchestrator import Orchestrator, ManualOrchestrator
+from config import PROJECTS_DIR, MAX_FORMAT5_DEPTH, ORCHESTRATOR_PROVIDER
+from orchestrator import Orchestrator, ManualOrchestrator, OpenRouterOrchestrator
+from state_writer import writer as sw
 from project import ProjectInstance
 from scheduler import Scheduler
 
 console = Console()
 
 
-def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = False) -> None:
+def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = False, auto_accept: bool = False) -> None:
     """Run one project instance from intent to completion (recursive for FORMAT 5)."""
     if depth > MAX_FORMAT5_DEPTH:
         console.print(
@@ -30,11 +31,20 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
 
     console.print(Panel(f"[bold cyan]{intent}[/bold cyan]", title=f"J-Claw {'Sub-project ' + str(depth) if depth else 'Project'}"))
 
-    orch = ManualOrchestrator() if manual else Orchestrator()
+    if manual:
+        orch = ManualOrchestrator()
+    elif ORCHESTRATOR_PROVIDER == "openrouter":
+        orch = OpenRouterOrchestrator()
+    else:
+        orch = Orchestrator()
+
+    sw.on_project_start(intent, str(output_dir))
 
     # ── INIT ──────────────────────────────────────────────────────────────────
     console.print("\n[bold]Generating project spec…[/bold]")
+    sw.on_agent_call("orchestrator", "openrouter/auto", "INIT")
     spec = orch.call({"system_state": "INIT", "user_intent": intent})
+    sw.on_agent_done()
 
     if spec.get("oversize"):
         _handle_oversize(spec, output_dir, depth, orch)
@@ -44,7 +54,9 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     while True:
         console.print("\n[bold]Proposed spec:[/bold]")
         console.print_json(json.dumps(spec, indent=2))
-        if Confirm.ask("\n[bold green]Accept this spec?[/bold green]"):
+        if auto_accept or Confirm.ask("\n[bold green]Accept this spec?[/bold green]"):
+            if auto_accept:
+                console.print("[dim]Auto-accepting spec (--yes mode)[/dim]")
             break
         feedback = Prompt.ask("[bold yellow]Revision feedback[/bold yellow]")
         spec = orch.call({
@@ -57,8 +69,11 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
             return
 
     # ── SPEC_ACCEPTED ─────────────────────────────────────────────────────────
+    sw.on_spec_accepted(spec)
     console.print("\n[bold]Generating task DAG…[/bold]")
+    sw.on_agent_call("orchestrator", "openrouter/auto", "SPEC_ACCEPTED")
     dag_response = orch.call({"system_state": "SPEC_ACCEPTED", "accepted_spec": spec})
+    sw.on_agent_done()
 
     if dag_response.get("oversize"):
         _handle_oversize(dag_response, output_dir, depth, orch)
@@ -66,6 +81,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
 
     instance = ProjectInstance(output_dir)
     instance.spec = spec
+    sw.on_dag_loaded(dag_response["tasks"])
     instance.load_tasks(dag_response["tasks"])
 
     console.print(f"\n[bold]Executing {len(instance.tasks)} task(s)…[/bold]")
@@ -103,6 +119,8 @@ def main() -> None:
     parser.add_argument("--output", "-o", help="Output directory (default: ./projects/<slug>)")
     parser.add_argument("--manual", action="store_true",
                         help="You act as the orchestrator — no API key required")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Auto-accept the first spec without prompting")
     args = parser.parse_args()
 
     intent: str = args.intent or Prompt.ask("[bold]Describe your project[/bold]")
@@ -116,7 +134,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        run_project(intent, output_dir, manual=args.manual)
+        run_project(intent, output_dir, manual=args.manual, auto_accept=args.yes)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
         sys.exit(1)
