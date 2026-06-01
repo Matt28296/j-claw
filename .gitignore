@@ -1,28 +1,23 @@
+# Generated project output
+projects/
+
+# Runtime pipeline state
+mission_control.json
+harness/mission_control.json
+orchestrator_input.json
+orchestrator_response.json
+
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
-*.pyd
-.Python
+.venv/
+venv/
+*.egg-info/
 
-# Virtual environment
-harness/.venv/
-
-# Secrets — never commit the real .env
+# Environment secrets
 harness/.env
-
-# Runtime files generated each pipeline run
-harness/orchestrator_input.json
-harness/orchestrator_response.json
-
-# Generated project outputs (pipeline results)
-harness/projects/
-
-# SQLite databases created by test projects
-*.db
-
-# Claude Code local config (machine-specific)
-.claude/
+.env
 
 # OS
 .DS_Store
