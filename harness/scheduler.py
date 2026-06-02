@@ -144,6 +144,7 @@ class Scheduler:
         console.print(f"  {review['summary']}")
 
         if result == "pass":
+            sw.on_project_done(result, review["summary"])
             return
 
         followups = review.get("followup_tasks", [])

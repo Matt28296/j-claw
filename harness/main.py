@@ -16,6 +16,7 @@ from orchestrator import Orchestrator, ManualOrchestrator, OpenRouterOrchestrato
 from state_writer import writer as sw
 from project import ProjectInstance
 from scheduler import Scheduler
+from final_review import run_final_review
 
 console = Console()
 
@@ -88,6 +89,11 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     Scheduler(instance, orch).run()
 
     console.print(f"\n[bold green]Project output written to: {output_dir}[/bold green]")
+
+    if not manual:
+        passed = run_final_review(output_dir, instance.spec)
+        if not passed:
+            sys.exit(1)
 
 
 def _handle_oversize(response: dict, base_dir: Path, depth: int, orch) -> None:
