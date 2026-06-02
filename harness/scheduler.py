@@ -6,6 +6,7 @@ from project import ProjectInstance, Task
 from worker import execute_task
 from verification import run_verification
 from validator import validate_dag, OrchestratorOutputError
+from state_writer import writer as sw
 
 console = Console()
 
