@@ -1,18 +1,13 @@
 from __future__ import annotations
-import re
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
 
-from config import MAX_RETRIES_PER_TASK, MAX_PARALLEL_WORKERS
+from config import MAX_RETRIES_PER_TASK, WORKER_MODEL
 from project import ProjectInstance, Task
 from worker import execute_task
 from verification import run_verification
 from validator import validate_dag, OrchestratorOutputError
-from state_writer import writer as sw
 
 console = Console()
-_print_lock = threading.Lock()
 
 
 class Scheduler:
@@ -29,31 +24,20 @@ class Scheduler:
                 failed = self.instance.failed_tasks()
                 pending = [t for t in self.instance.tasks.values() if t.status == "pending"]
                 if failed:
-                    with _print_lock:
-                        console.print(f"\n[red]Scheduler stalled: {len(failed)} task(s) failed with no retries left.[/red]")
-                        for t in failed:
-                            console.print(f"  • {t.id}: {t.error_log[:200]}")
+                    console.print(
+                        f"\n[red]Scheduler stalled: {len(failed)} task(s) failed with no retries left.[/red]"
+                    )
+                    for t in failed:
+                        console.print(f"  • {t.id}: {t.error_log[:200]}")
                 elif pending:
-                    with _print_lock:
-                        console.print("[red]Scheduler deadlock: tasks are pending but none are ready (unsatisfied dependencies?).[/red]")
+                    console.print(
+                        "[red]Scheduler deadlock: tasks are pending but none are ready "
+                        "(unsatisfied dependencies?).[/red]"
+                    )
                 break
 
-            if MAX_PARALLEL_WORKERS > 1 and len(ready) > 1:
-                # Mark all ready tasks as running before dispatching
-                for task in ready:
-                    task.status = "running"
-                with ThreadPoolExecutor(max_workers=MAX_PARALLEL_WORKERS) as pool:
-                    futures = {pool.submit(self._run_task, task): task for task in ready}
-                    for future in as_completed(futures):
-                        try:
-                            future.result()
-                        except Exception as exc:
-                            task = futures[future]
-                            with _print_lock:
-                                console.print(f"[red]Unexpected error in {task.id}: {exc}[/red]")
-            else:
-                for task in ready:
-                    self._run_task(task)
+            for task in ready:
+                self._run_task(task)
 
         if self.instance.all_tasks_done():
             self._project_review()
@@ -61,13 +45,11 @@ class Scheduler:
     # ── task execution ────────────────────────────────────────────────────────
 
     def _run_task(self, task: Task) -> None:
-        with _print_lock:
-            console.print(
-                f"\n[bold cyan]▶ {task.id}[/bold cyan] [{task.type}]  "
-                f"{task.objective[:90]}{'…' if len(task.objective) > 90 else ''}"
-            )
+        console.print(
+            f"\n[bold cyan]▶ {task.id}[/bold cyan] [{task.type}]  "
+            f"{task.objective[:90]}{'…' if len(task.objective) > 90 else ''}"
+        )
         task.status = "running"
-        sw.on_task_start(task.id)
 
         dep_files = self.instance.get_dependency_files(task)
 
@@ -79,24 +61,16 @@ class Scheduler:
             passed, log = run_verification(task, self.instance.output_dir)
             if passed:
                 task.status = "done"
-                model = result.get("_model_used", "unknown")
-                sw.on_task_done(task.id, model)
-                for path in task.output_files:
-                    sw.on_file_written(path, task.id)
-                with _print_lock:
-                    console.print(f"  [green]✓ done[/green]  [dim]via {model}[/dim]")
+                console.print(f"  [green]✓ done[/green]  [dim](worker: {WORKER_MODEL})[/dim]")
             else:
                 task.status = "failed"
                 task.error_log = f"Verification ({task.verification}) failed:\n{log}"
-                sw.on_task_failed(task.id, task.error_log, task.retry_count)
                 self._handle_error(task)
 
         except Exception as exc:  # noqa: BLE001
             task.status = "failed"
             task.error_log = str(exc)
-            sw.on_task_failed(task.id, str(exc), task.retry_count)
-            with _print_lock:
-                console.print(f"  [red]✗ error: {exc}[/red]")
+            console.print(f"  [red]✗ error: {exc}[/red]")
             self._handle_error(task)
 
     # ── error handling ────────────────────────────────────────────────────────
@@ -138,8 +112,6 @@ class Scheduler:
         if action == "split":
             existing = self.instance.tasks_as_list()
             new_tasks = refinement["updated_tasks"][1:]  # first keeps original id
-            new_tasks = _remap_duplicate_ids(new_tasks, existing)
-            refinement["updated_tasks"] = [refinement["updated_tasks"][0]] + new_tasks
             try:
                 validate_dag(new_tasks, existing)
             except OrchestratorOutputError as exc:
@@ -170,7 +142,6 @@ class Scheduler:
         color = "green" if result == "pass" else "yellow"
         console.print(f"\n  Review result: [bold {color}]{result}[/bold {color}]")
         console.print(f"  {review['summary']}")
-        sw.on_project_done(result, review["summary"])
 
         if result == "pass":
             return
@@ -197,6 +168,8 @@ class Scheduler:
         # Loop back into run() naturally — caller will re-invoke if needed.
         # We just return; the while loop in run() will pick up the new tasks.
 
+    # ── helpers ───────────────────────────────────────────────────────────────
+
     def _ready_tasks(self) -> list[Task]:
         """Tasks whose dependencies are all done/deprecated and which are still pending."""
         ready = []
@@ -211,40 +184,3 @@ class Scheduler:
             if deps_resolved:
                 ready.append(task)
         return ready
-
-
-def _remap_duplicate_ids(new_tasks: list[dict], existing: list[dict]) -> list[dict]:
-    """Rename any new task IDs that clash with existing DAG IDs to fresh unique IDs."""
-    existing_ids: set[str] = {t["id"] for t in existing}
-    claimed: set[str] = set(existing_ids)
-
-    # Find the highest existing task number
-    max_num = 0
-    for t in existing:
-        m = re.match(r"task-(\d+)$", t["id"])
-        if m:
-            max_num = max(max_num, int(m.group(1)))
-
-    id_map: dict[str, str] = {}
-    counter = max_num + 1
-    for task in new_tasks:
-        if task["id"] in existing_ids:
-            new_id = f"task-{counter:03d}"
-            while new_id in claimed:
-                counter += 1
-                new_id = f"task-{counter:03d}"
-            id_map[task["id"]] = new_id
-            claimed.add(new_id)
-            counter += 1
-
-    if not id_map:
-        return new_tasks
-
-    result = []
-    for task in new_tasks:
-        t = dict(task)
-        t["id"] = id_map.get(t["id"], t["id"])
-        t["dependencies"] = [id_map.get(d, d) for d in t.get("dependencies", [])]
-        result.append(t)
-    console.print(f"  [dim]Auto-remapped duplicate split IDs: {id_map}[/dim]")
-    return result

@@ -212,13 +212,17 @@ def _run_cmd(cmd: list[str], cwd: Path, timeout: int) -> tuple[bool, str]:
             return False, "npm not found — install Node.js to enable this verification"
         cmd = [npm] + cmd[1:]
     console.print(f"  [dim]$ {' '.join(cmd)}[/dim]")
+    # On Windows, .cmd wrappers (npm.cmd, npx.cmd) require shell=True to be found
+    use_shell = sys.platform == "win32"
+    cmd_arg = " ".join(cmd) if use_shell else cmd
     try:
         result = subprocess.run(
-            cmd,
+            cmd_arg,
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout,
+            shell=use_shell,
         )
     except subprocess.TimeoutExpired:
         return False, f"Timed out after {timeout}s"
