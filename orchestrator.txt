@@ -484,6 +484,14 @@ Input provides the completed task results. Decide pass/fail against the spec goa
    reference prior content by saying "keep" or "unchanged". The worker is a transcription
    engine, not a diff engine — treat it as such.
 
+8. **Never create a manual browser verification task for bare HTML projects.** When the
+   spec stack is `vanilla` or `phaser` and there is no `package.json`, do NOT create a
+   QA task whose objective is "open in a browser and confirm" — and do NOT assign
+   `verification: "manual"` to any task. Assign `verification: "none"` for all tasks in
+   these projects. The harness runs an automatic HTML structure check, and the post-pipeline
+   Claude Code review covers content quality. Reserve `manual` only for genuinely
+   un-automatable checks (audio output, device peripheral integration, physical hardware).
+
 ---
 
 ## OPERATOR / HARNESS NOTES (not part of the system prompt — do not paste into the model)

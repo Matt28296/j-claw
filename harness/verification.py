@@ -80,6 +80,10 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
         return True, ""
 
     if method == "manual":
+        # Auto-handle bare HTML tasks — no package.json means no npm runner.
+        # final_review.py still does a full content check at the end.
+        if _is_bare_html_task(task, project_dir):
+            return _run_html_auto(project_dir)
         return _run_manual(task)
 
     ecosystem = detect_ecosystem(project_dir)
@@ -99,13 +103,12 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
 
     if ecosystem == "phaser":
         # If package.json exists, treat as node so npm scripts (including Playwright) run.
-        # Falls back to manual only if still no package.json present.
+        # Falls back to auto HTML check if still no package.json present.
         pkg = project_dir / "package.json"
         if pkg.exists():
             ecosystem = "node"
         else:
-            console.print("  [yellow]Phaser game (no package.json) — falling back to manual gate.[/yellow]")
-            return _run_manual(task, prompt="Open index.html in your browser. Does the game load and run correctly?")
+            return _run_html_auto(project_dir)
 
     cmd = _COMMANDS.get(ecosystem, _COMMANDS["unknown"]).get(method)
 
@@ -238,6 +241,33 @@ def _run_cmd(cmd: list[str], cwd: Path, timeout: int) -> tuple[bool, str]:
         console.print(f"  [red]Failed (exit {result.returncode}):[/red]")
         console.print(f"  [dim]{log[-1500:]}[/dim]")
     return result.returncode == 0, log
+
+
+_STATIC_EXTS = {".html", ".css", ".js", ".ts", ".jsx", ".tsx", ".svg", ".ico"}
+
+
+def _is_bare_html_task(task, project_dir: Path) -> bool:
+    """True when the task only touches static web files and there is no npm runner."""
+    if (project_dir / "package.json").exists():
+        return False
+    return all(Path(f).suffix.lower() in _STATIC_EXTS for f in task.files)
+
+
+def _run_html_auto(project_dir: Path) -> tuple[bool, str]:
+    """Headless structure check for bare HTML projects (no package.json)."""
+    html_files = list(project_dir.glob("*.html"))
+    if not html_files:
+        return False, "No .html files found in project directory"
+    issues = []
+    for f in html_files:
+        content = f.read_text(encoding="utf-8", errors="replace").lower()
+        for tag in ("<html", "<body"):
+            if tag not in content:
+                issues.append(f"{f.name}: missing {tag} tag")
+    if issues:
+        return False, "; ".join(issues)
+    console.print("  [green]HTML structure check passed (headless).[/green]")
+    return True, "html structure valid"
 
 
 def _run_manual(task, prompt: str | None = None) -> tuple[bool, str]:
