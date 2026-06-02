@@ -127,6 +127,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
                 break
 
             instance.apply_format4_followups(followups)
+            sw.on_tasks_added(followups)
             console.print(f"  Added {len(followups)} fix task(s). Re-running…\n")
             Scheduler(instance, orch).run()
 

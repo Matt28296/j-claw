@@ -122,6 +122,20 @@ class StateWriter:
         self._event(f"  📄 {path}")
         self._write()
 
+    def on_tasks_added(self, new_tasks: list[dict]) -> None:
+        for t in new_tasks:
+            self._state["tasks"].append({
+                "id": t["id"],
+                "type": t["type"],
+                "objective": t["objective"][:120],
+                "status": "pending",
+                "retry_count": 0,
+                "files": t.get("files", []),
+                "model_used": None,
+            })
+        self._event(f"Heal tasks added — {len(new_tasks)} fix task(s) queued")
+        self._write()
+
     def on_verification_result(self, task_id: str, method: str, ecosystem: str,
                                passed: bool, log: str) -> None:
         if method == "none":

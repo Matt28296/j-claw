@@ -448,6 +448,15 @@ Respond with FORMAT 4. Rules:
 - Task ids continue the existing sequence — never reuse an id already in `completed_tasks`.
 - Each fix task should have `verification: "none"` unless a test runner is already set up.
 - Do not create new features — only fix the specific issues listed in `review_issues`.
+- **Fix files in place — never change a file's path.** If a path mismatch exists between
+  two files (e.g. index.html references `GameScene.js` but the file was written to
+  `js/GameScene.js`), always fix the referencing file (index.html) to match the existing
+  path — do NOT move the source file. Moving files creates duplicate dead copies and
+  causes DAG validation failures.
+- **Fix tasks that rewrite an existing file MUST declare the original task's id in their
+  `dependencies` list.** Look up the original task id from `completed_tasks` for each file
+  you are rewriting. This is required — without it the DAG validator will reject the fix
+  tasks and they will be silently dropped.
 
 Example input fragment:
 ```json
