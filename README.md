@@ -422,6 +422,20 @@ When `final_review` returns `ISSUES FOUND`, `main.py` parses the `ISSUES:` bulle
 ### 7. HANDOFF.md + OpenClaw Stamp
 `handoff.py` always runs at pipeline end. It writes `HANDOFF.md` with the run summary, test results (pulled from `mission_control.json`), review verdict, and heal cycle count. If `claude` is on PATH, it invokes `claude --print` in the project directory with a quality-check prompt. The verdict (`OPENCLAW: APPROVED` or `OPENCLAW: ISSUES FOUND`) is appended to `HANDOFF.md` and shown in the dashboard's OpenClaw banner.
 
+### 8. Self-Healing Loop — Battle Tested
+Ran a Phaser 3 snake game end-to-end. The final code review caught a real bug (path mismatch: `index.html` referenced `GameScene.js` at root but task-003 wrote it to `js/GameScene.js`). The healing loop fired automatically, generated 3 fix tasks, the worker rewrote the files, and the review passed on the second cycle. The game shipped zero-touch.
+
+Discovered and fixed three bugs during this test:
+- Heal-cycle fix tasks were invisible in the dashboard (added `on_tasks_added()` hook to state_writer, called from main.py)
+- Orchestrator's fix tasks conflicted with the DAG validator (added rule: fix tasks must declare the original task as a dependency when rewriting an existing file)
+- Fix tasks were moving files to new paths instead of fixing the referencing file (added orchestrator rule: always fix in place, never change a file's path)
+
+### 9. Output Directory Cleanup
+`run_project()` now wipes the output directory at the start of every run via `shutil.rmtree`. Without this, stale files from a previous run on the same slug contaminated the new run's final review — a re-run of the snake game left `main.js` and root-level `GameScene.js` from the first run, causing the review to flag them as orphan files even though the new run never wrote them.
+
+### 10. HANDOFF.md Excluded from Review
+Added `HANDOFF.md` to `final_review.py`'s `_SKIP_FILES` set so the review never reads a previous run's handoff report as a project source file.
+
 ---
 
 ## Roadmap
@@ -434,8 +448,14 @@ When `final_review` returns `ISSUES FOUND`, `main.py` parses the `ISSUES:` bulle
 | Mission Control live dashboard | ✓ Done |
 | Test results panel in dashboard | ✓ Done |
 | Work log panel in dashboard | ✓ Done |
+| Copy Logs button in dashboard | ✓ Done |
 | Final code review (Claude API) after pipeline completes | ✓ Done |
 | Self-healing loop — auto-fix issues flagged by final review | ✓ Done |
+| Self-healing loop — battle tested on Phaser 3 snake game | ✓ Done — loop caught real path mismatch, fixed and passed |
+| Heal-cycle fix tasks visible in dashboard | ✓ Done — on_tasks_added() hook |
+| DAG conflict prevention for heal tasks | ✓ Done — orchestrator prompt rules |
+| Output directory cleanup before each run | ✓ Done — shutil.rmtree at run start |
+| HANDOFF.md excluded from final code review | ✓ Done |
 | HANDOFF.md pipeline completion report | ✓ Done |
 | OpenClaw autonomous stamp via claude CLI | ✓ Done (requires claude CLI on PATH) |
 | OpenRouter orchestrator support with fallback models | ✓ Done |
@@ -445,18 +465,18 @@ When `final_review` returns `ISSUES FOUND`, `main.py` parses the `ISSUES:` bulle
 
 | # | Issue | Impact |
 |---|-------|--------|
-| — | **Test self-healing loop with a real multi-file failure** — the loop has been built and verified with simple projects but not yet stress-tested on a Phaser game or React app where the worker is more likely to produce stubs in complex files | Healing loop may not trigger correctly on larger DAGs |
-| — | **OpenClaw stamp requires claude CLI** — `try_claude_stamp` silently skips if `claude` is not on PATH; most users won't have it | Final autonomous verdict is optional rather than guaranteed |
-| — | **Worker produces stubs when modifying existing files** — if a fix task says "update X" instead of "rewrite X completely", the model sometimes emits `// existing logic unchanged` placeholder comments. The orchestrator prompt discourages this but doesn't fully eliminate it | A self-healed file may itself need another heal cycle |
-| — | **Playwright browser testing for game projects** — headless HTML check confirms file structure but cannot run the game loop, check canvas rendering, or detect runtime JS errors | Full correctness testing of Phaser/vanilla games requires a browser |
-| — | **Parallel task execution** — `MAX_PARALLEL_WORKERS` is configurable but the scheduler currently runs tasks sequentially; parallelism is stubbed | Pipeline is slower than it needs to be on multi-task DAGs with no inter-task dependencies |
+| — | **Dashboard CSS redesign** — current styling is functional but plain; needs pipeline stage tracker, task progress bar, heal cycle badge, and a visual refresh | Dashboard is harder to read at a glance during long runs |
+| — | **Playwright browser testing for game projects** — headless HTML check confirms file structure but cannot run the game loop, check canvas rendering, or detect runtime JS errors | Full correctness testing of Phaser/vanilla games requires a real browser |
+| — | **Stub detection pre-check** — add a post-write scanner in `scheduler.py` that checks for known stub patterns before verification runs; fail the task immediately instead of waiting for the final review to catch it | Stub output wastes a full review cycle before being caught |
+| — | **Parallel task execution** — `MAX_PARALLEL_WORKERS` is configurable but the scheduler runs tasks sequentially; independent DAG branches could run concurrently | Pipeline is slower than necessary on multi-task DAGs with no inter-task dependencies |
+| — | **OpenClaw stamp without CLI** — `try_claude_stamp` silently skips if `claude` is not on PATH; a direct Anthropic API fallback would give all users the autonomous verdict | Final quality stamp is optional rather than guaranteed |
 
 ### Priority Order
 
-1. **Stress test with Phaser 3 game** — run `.\run.bat --yes "A Phaser 3 snake game with score tracking and a game over screen"` and trace the healing loop in action if the worker stubs anything. This validates the whole pipeline end-to-end.
-2. **Playwright integration** — add a headless Chromium check that loads `index.html`, waits for canvas render, and checks for console errors. This is the last quality gap for game projects.
-3. **Parallel scheduler** — wire `MAX_PARALLEL_WORKERS` into the scheduler's task dispatch so independent tasks run concurrently. Reduces wall time by 30–50% on larger DAGs.
-4. **Stub detection enforcement** — add a post-write scanner in `scheduler.py` that checks for known stub patterns (`// existing logic`, `// TODO`, `pass  # stub`) before running verification. Fail the task immediately instead of letting it reach the final review.
+1. **Dashboard redesign** — visual refresh + stage tracker + progress bar + heal badge makes the dashboard actually informative at a glance.
+2. **Playwright integration** — add headless Chromium check for game projects; the last quality gap for zero-touch game verification.
+3. **Stub detection** — post-write scan catches hollow output before it wastes a review cycle.
+4. **Parallel scheduler** — wire `MAX_PARALLEL_WORKERS` into actual concurrent dispatch; 30–50% wall time reduction on larger DAGs.
 
 ---
 
