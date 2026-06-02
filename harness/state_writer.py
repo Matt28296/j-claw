@@ -44,6 +44,7 @@ class StateWriter:
         self._state["tasks"] = []
         self._state["output_files"] = []
         self._state["events"] = []
+        self._state["work_log"] = []
         self._state["started_at"] = _ts()
         self._event(f"Project started: {intent[:80]}")
         self._write()
@@ -52,8 +53,11 @@ class StateWriter:
         self._state["pipeline_state"] = "SPEC_ACCEPTED"
         self._state["project"]["goal"] = spec.get("goal", "")
         self._state["project"]["complexity"] = spec.get("complexity", "")
-        self._state["project"]["stack"] = spec.get("architecture", {}).get("stack", "")
+        stack = spec.get("architecture", {}).get("stack", "")
+        self._state["project"]["stack"] = stack
         self._event("Spec accepted — generating task DAG")
+        self._work_log("orchestrator", self._orch_model(), "SPEC",
+                       f"Generated spec: {spec.get('goal', '')[:80]}")
         self._write()
 
     def on_dag_loaded(self, tasks: list[dict]) -> None:
@@ -71,6 +75,8 @@ class StateWriter:
             for t in tasks
         ]
         self._event(f"DAG loaded — {len(tasks)} task(s) queued")
+        self._work_log("orchestrator", self._orch_model(), "DAG",
+                       f"Planned {len(tasks)} task(s)")
         self._write()
 
     def on_task_start(self, task_id: str) -> None:
@@ -81,11 +87,17 @@ class StateWriter:
     def on_task_done(self, task_id: str, model_used: str) -> None:
         self._update_task(task_id, status="done", model_used=model_used)
         self._event(f"✓ {task_id} done  [{model_used}]")
+        obj = self._task_objective(task_id)
+        self._work_log("worker", model_used, task_id,
+                       obj, status="done")
         self._write()
 
     def on_task_failed(self, task_id: str, error: str, retry_count: int) -> None:
         self._update_task(task_id, status="failed", retry_count=retry_count)
         self._event(f"✗ {task_id} failed (attempt {retry_count}): {error[:120]}")
+        model = self._active_model()
+        self._work_log("worker", model, task_id,
+                       error[:100], status="failed", attempt=retry_count)
         self._write()
 
     def on_agent_call(self, agent: str, model: str, state: str) -> None:
@@ -113,6 +125,8 @@ class StateWriter:
         self._state["pipeline_state"] = "DONE" if result == "pass" else "NEEDS_FOLLOWUP"
         self._state["active_agent"] = None
         self._event(f"Project complete — {result}: {summary[:120]}")
+        self._work_log("orchestrator", self._orch_model(), "REVIEW",
+                       summary[:120], status=result)
         self._write()
 
     # ── Internals ─────────────────────────────────────────────────────────────
@@ -122,6 +136,37 @@ class StateWriter:
             if t["id"] == task_id:
                 t.update(kwargs)
                 return
+
+    def _task_objective(self, task_id: str) -> str:
+        for t in self._state["tasks"]:
+            if t["id"] == task_id:
+                return t.get("objective", "")[:80]
+        return ""
+
+    def _orch_model(self) -> str:
+        aa = self._state.get("active_agent")
+        if aa and aa.get("agent") == "orchestrator":
+            return aa.get("model", "orchestrator")
+        return "orchestrator"
+
+    def _active_model(self) -> str:
+        aa = self._state.get("active_agent")
+        return aa.get("model", "worker") if aa else "worker"
+
+    def _work_log(self, agent: str, model: str, action: str,
+                  detail: str, status: str = "ok", attempt: int = 0) -> None:
+        entry: dict = {
+            "ts": _ts(),
+            "agent": agent,
+            "model": model,
+            "action": action,
+            "detail": detail,
+            "status": status,
+        }
+        if attempt:
+            entry["attempt"] = attempt
+        wl = self._state.setdefault("work_log", [])
+        wl.append(entry)
 
     def _event(self, message: str) -> None:
         self._state["events"].insert(0, {"ts": _ts(), "msg": message})
