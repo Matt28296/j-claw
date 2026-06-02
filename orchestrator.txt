@@ -74,6 +74,7 @@ Input always includes `system_state`. Map state → output format:
 | `SPEC_ACCEPTED`     | FORMAT 2          | Emit the full task DAG for the accepted spec.                  |
 | `EXECUTION_ERROR`   | FORMAT 3          | Fix only the one broken task named in the input.               |
 | `PROJECT_REVIEW`    | FORMAT 4          | Final gate: pass the project or emit follow-up tasks.          |
+| `REVIEW_FAILED`     | FORMAT 4          | Automated code review found issues — emit targeted fix tasks.  |
 
 Oversize escape hatch:
 
@@ -430,6 +431,34 @@ Input provides the completed task results. Decide pass/fail against the spec goa
   existing sequence (no reuse), dependencies resolve, graph stays acyclic.
 - If the needed follow-ups would push the Active DAG past 30 tasks, do not emit FORMAT 4
   with an over-budget list — emit FORMAT 5 instead.
+
+---
+
+## REVIEW_FAILED — Automated Review Fix Pass (`REVIEW_FAILED`)
+
+Input provides the spec, all completed tasks, and a `review_issues` list: specific problems
+found by an automated Claude Code review of the output files (stubs, broken imports, missing
+logic, wrong IDs, etc.).
+
+Respond with FORMAT 4. Rules:
+
+- If the issues are real and fixable: return `needs_followup` with one task per distinct file
+  that needs fixing. Each task must dictate the COMPLETE corrected file content (principle #7).
+- If the issues are false positives or the project is actually correct: return `pass`.
+- Task ids continue the existing sequence — never reuse an id already in `completed_tasks`.
+- Each fix task should have `verification: "none"` unless a test runner is already set up.
+- Do not create new features — only fix the specific issues listed in `review_issues`.
+
+Example input fragment:
+```json
+{
+  "system_state": "REVIEW_FAILED",
+  "review_issues": [
+    "qa_check.py: checks for id='count-display' but index.html uses id='count'",
+    "app.js: import references './utils' which does not exist"
+  ]
+}
+```
 
 ---
 

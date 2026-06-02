@@ -104,6 +104,7 @@ _STATE_SCHEMA = {
     "SPEC_ACCEPTED":   _FORMAT2_SCHEMA,
     "EXECUTION_ERROR": _FORMAT3_SCHEMA,
     "PROJECT_REVIEW":  _FORMAT4_SCHEMA,
+    "REVIEW_FAILED":   _FORMAT4_SCHEMA,  # same response shape as PROJECT_REVIEW
 }
 
 
@@ -126,7 +127,7 @@ def validate_response(state: str, data: dict) -> None:
         validate_dag(data["tasks"], existing=[])
     elif state == "EXECUTION_ERROR":
         _validate_format3_rules(data)
-    elif state == "PROJECT_REVIEW" and data["review_result"] == "needs_followup":
+    elif state in ("PROJECT_REVIEW", "REVIEW_FAILED") and data["review_result"] == "needs_followup":
         for t in data["followup_tasks"]:
             _check(t, _TASK_SCHEMA, "followup task")
 

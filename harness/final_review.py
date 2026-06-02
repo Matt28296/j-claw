@@ -109,6 +109,25 @@ def run_final_review(output_dir: Path, spec: dict) -> bool:
     return passed
 
 
+def parse_review_issues(review_path: Path) -> list[str]:
+    """Extract the bullet-point issue lines from a REVIEW.md ISSUES section."""
+    if not review_path.exists():
+        return []
+    issues: list[str] = []
+    in_issues = False
+    for line in review_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped == "ISSUES:":
+            in_issues = True
+            continue
+        if in_issues:
+            if stripped.startswith("- "):
+                issues.append(stripped[2:].strip())
+            elif stripped and not stripped.startswith("-"):
+                break  # hit a non-bullet line — end of section
+    return issues
+
+
 def _collect_files(output_dir: Path) -> list[tuple[str, str]]:
     """Return [(relative_path, content)] for all reviewable files, sorted by path."""
     results = []

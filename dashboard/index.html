@@ -79,6 +79,14 @@ body {
 .rv-pass  { display: flex !important; background: #0f2c0f; color: var(--green);  border-bottom: 1px solid #238636; }
 .rv-fail  { display: flex !important; background: #2c0f0f; color: var(--red);    border-bottom: 1px solid var(--red); }
 
+#openclaw-banner {
+  display: none; padding: 7px 18px; font-size: 12px;
+  font-weight: bold; flex-shrink: 0;
+}
+.oc-approved { display: flex !important; background: #1a0d33; color: var(--purple); border-bottom: 1px solid #6e40c9; }
+.oc-issues   { display: flex !important; background: #2e1b00; color: var(--amber);  border-bottom: 1px solid var(--amber); }
+.oc-pending  { display: flex !important; background: #21262d; color: #8b949e;       border-bottom: 1px solid var(--border); }
+
 /* ── Main Grid ───────────────────────────────────────────── */
 .main {
   display: grid;
@@ -246,6 +254,7 @@ body {
 </div>
 
 <div id="review-banner"></div>
+<div id="openclaw-banner"></div>
 
 <div class="main">
   <!-- LEFT -->
@@ -293,9 +302,10 @@ body {
 <script>
 'use strict';
 
-let lastFetch   = Date.now();
-let agentEpoch  = null;
-let reviewDone  = false;
+let lastFetch    = Date.now();
+let agentEpoch   = null;
+let reviewDone   = false;
+let lastState    = null;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -317,6 +327,15 @@ const ICONS = { done: '✓', running: '▶', failed: '✗', pending: '○', depr
 
 function render(d) {
   const state = d.pipeline_state || 'IDLE';
+  // Reset review banners when a new pipeline run starts
+  if (state === 'INIT' && lastState !== 'INIT') {
+    reviewDone = false;
+    document.getElementById('review-banner').className = '';
+    document.getElementById('review-banner').textContent = '';
+    document.getElementById('openclaw-banner').className = '';
+    document.getElementById('openclaw-banner').textContent = '';
+  }
+  lastState = state;
 
   // Header — state badge
   const badge = document.getElementById('state-badge');
@@ -336,10 +355,13 @@ function render(d) {
   // Header — elapsed
   document.getElementById('elapsed').textContent = fmt(d.elapsed_s || 0);
 
-  // Review banner (fetch once on DONE)
+  // Review banner + OpenClaw banner (fetch once on DONE)
   if ((state === 'DONE' || state === 'NEEDS_FOLLOWUP') && d.project?.output_url && !reviewDone) {
     reviewDone = true;
-    fetch('/' + d.project.output_url + '/REVIEW.md?t=' + Date.now())
+    const base = '/' + d.project.output_url;
+
+    // REVIEW.md
+    fetch(base + '/REVIEW.md?t=' + Date.now())
       .then(r => r.ok ? r.text() : null)
       .then(txt => {
         if (!txt) return;
@@ -351,6 +373,31 @@ function render(d) {
         el.textContent = (pass ? '✓' : '✗') + ' Final Review: ' + line.trim();
       })
       .catch(() => {});
+
+    // HANDOFF.md — show OpenClaw verdict if present
+    const ocBanner = document.getElementById('openclaw-banner');
+    ocBanner.className = 'oc-pending';
+    ocBanner.textContent = '◌ OpenClaw: awaiting handoff…';
+    fetch(base + '/HANDOFF.md?t=' + Date.now())
+      .then(r => r.ok ? r.text() : null)
+      .then(txt => {
+        if (!txt) { ocBanner.style.display = 'none'; return; }
+        const verdictMatch = txt.match(/## Claude Code Verdict\n+([\s\S]+)/);
+        if (verdictMatch) {
+          const verdict = verdictMatch[1].trim();
+          const approved = verdict.includes('OPENCLAW: APPROVED');
+          ocBanner.className = approved ? 'oc-approved' : 'oc-issues';
+          const lastLine = verdict.split('\n').reverse().find(l => l.trim()) || verdict;
+          ocBanner.textContent = (approved ? '⬡ ' : '⚠ ') + 'OpenClaw: ' + lastLine.trim();
+        } else {
+          // HANDOFF.md exists but no Claude verdict yet
+          const statusMatch = txt.match(/\*\*Status:\*\* (.+)/);
+          const status = statusMatch ? statusMatch[1] : 'Handoff written';
+          ocBanner.className = 'oc-pending';
+          ocBanner.textContent = '◌ OpenClaw: ' + status;
+        }
+      })
+      .catch(() => { ocBanner.style.display = 'none'; });
   }
 
   // Active agent

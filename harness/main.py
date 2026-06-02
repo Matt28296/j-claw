@@ -11,12 +11,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 
-from config import PROJECTS_DIR, MAX_FORMAT5_DEPTH, ORCHESTRATOR_PROVIDER
+from config import PROJECTS_DIR, MAX_FORMAT5_DEPTH, ORCHESTRATOR_PROVIDER, ORCHESTRATOR_MODEL
 from orchestrator import Orchestrator, ManualOrchestrator, OpenRouterOrchestrator
 from state_writer import writer as sw
 from project import ProjectInstance
 from scheduler import Scheduler
-from final_review import run_final_review
+from final_review import run_final_review, parse_review_issues
+from handoff import write_handoff, try_claude_stamp
 
 console = Console()
 
@@ -91,7 +92,47 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     console.print(f"\n[bold green]Project output written to: {output_dir}[/bold green]")
 
     if not manual:
-        passed = run_final_review(output_dir, instance.spec)
+        _MAX_HEAL = 2
+        passed = False
+        heal_cycle = 0
+        for heal_cycle in range(_MAX_HEAL + 1):
+            passed = run_final_review(output_dir, instance.spec)
+            if passed or heal_cycle == _MAX_HEAL:
+                break
+
+            issues = parse_review_issues(output_dir / "REVIEW.md")
+            if not issues:
+                console.print("  [yellow]No parseable issues in REVIEW.md — stopping heal loop.[/yellow]")
+                break
+
+            console.print(
+                f"\n[yellow]Review flagged {len(issues)} issue(s) — requesting fix tasks "
+                f"(heal cycle {heal_cycle + 1}/{_MAX_HEAL})…[/yellow]"
+            )
+            for i, issue in enumerate(issues, 1):
+                console.print(f"  {i}. {issue}")
+
+            sw.on_agent_call("orchestrator", ORCHESTRATOR_MODEL, "REVIEW_FAILED")
+            fix_resp = orch.call({
+                "system_state": "REVIEW_FAILED",
+                "accepted_spec": instance.spec,
+                "completed_tasks": instance.tasks_as_list(),
+                "review_issues": issues,
+            })
+            sw.on_agent_done()
+
+            followups = fix_resp.get("followup_tasks", [])
+            if not followups:
+                console.print("  [yellow]Orchestrator returned no fix tasks — stopping.[/yellow]")
+                break
+
+            instance.apply_format4_followups(followups)
+            console.print(f"  Added {len(followups)} fix task(s). Re-running…\n")
+            Scheduler(instance, orch).run()
+
+        handoff_path = write_handoff(output_dir, instance.spec, passed, heal_cycle)
+        try_claude_stamp(handoff_path, output_dir)
+
         if not passed:
             sys.exit(1)
 
