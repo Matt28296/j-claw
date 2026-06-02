@@ -98,10 +98,14 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
         return _run_fastapi_install(project_dir)
 
     if ecosystem == "phaser":
-        console.print(
-            "  [yellow]Phaser game detected — automated verification not possible.[/yellow]"
-        )
-        return _run_manual(task, prompt="Open index.html in your browser. Does the game load and run correctly?")
+        # If package.json exists, treat as node so npm scripts (including Playwright) run.
+        # Falls back to manual only if still no package.json present.
+        pkg = project_dir / "package.json"
+        if pkg.exists():
+            ecosystem = "node"
+        else:
+            console.print("  [yellow]Phaser game (no package.json) — falling back to manual gate.[/yellow]")
+            return _run_manual(task, prompt="Open index.html in your browser. Does the game load and run correctly?")
 
     cmd = _COMMANDS.get(ecosystem, _COMMANDS["unknown"]).get(method)
 
