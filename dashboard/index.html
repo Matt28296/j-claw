@@ -235,6 +235,33 @@ body {
 .wl-status-failed { color: var(--red); }
 .wl-attempt { color: var(--amber); font-size: 10px; margin-left: 2px; }
 
+/* ── Text selectability ──────────────────────────────────── */
+.event-msg, .wl-detail, .error-msg, .test-log,
+.task-obj, .file-name, .output-file-name,
+.agent-name, .agent-model { user-select: text; }
+
+/* ── Copy button ─────────────────────────────────────────── */
+.copy-btn {
+  background: #21262d; border: 1px solid var(--border);
+  color: #8b949e; border-radius: 5px;
+  padding: 4px 10px; font-size: 11px; cursor: pointer;
+  font-family: inherit; transition: background .15s, color .15s;
+  white-space: nowrap;
+}
+.copy-btn:hover { background: #30363d; color: var(--text); }
+.copy-btn.copied { background: #0f2c0f; color: var(--green); border-color: #238636; }
+
+/* ── Toast ───────────────────────────────────────────────── */
+#copy-toast {
+  position: fixed; bottom: 18px; right: 18px;
+  background: #161b22; border: 1px solid #238636; color: var(--green);
+  padding: 7px 14px; border-radius: 6px; font-size: 12px;
+  opacity: 0; pointer-events: none;
+  transition: opacity .2s;
+  z-index: 999;
+}
+#copy-toast.show { opacity: 1; }
+
 .empty { color: var(--muted); font-size: 11px; font-style: italic; padding: 4px 0; }
 </style>
 </head>
@@ -251,7 +278,9 @@ body {
   <span id="badge-stack" class="badge" style="display:none"></span>
   <span id="badge-complexity" class="badge" style="display:none"></span>
   <span id="elapsed" class="elapsed">0:00</span>
+  <button class="copy-btn" id="copy-btn" onclick="copyLogs()" title="Copy all logs to clipboard">📋 Copy Logs</button>
 </div>
+<div id="copy-toast">Logs copied to clipboard</div>
 
 <div id="review-banner"></div>
 <div id="openclaw-banner"></div>
@@ -512,6 +541,91 @@ function render(d) {
   }).join('') || '<div class="empty">No files written yet.</div>';
 }
 
+// ── Copy logs to clipboard ────────────────────────────────────────────────────
+
+let _lastData = null; // keep a reference to the latest poll result
+
+function copyLogs() {
+  if (!_lastData) { showToast('No data yet — run a pipeline first.'); return; }
+  const d = _lastData;
+  const lines = [];
+
+  lines.push('=== J-CLAW PIPELINE LOG ===');
+  lines.push(`State:   ${d.pipeline_state || 'IDLE'}`);
+  lines.push(`Project: ${d.project?.goal || d.project?.intent || '—'}`);
+  lines.push(`Stack:   ${d.project?.stack || '—'} · ${d.project?.complexity || '—'}`);
+  lines.push(`Elapsed: ${fmt(d.elapsed_s || 0)}`);
+  lines.push('');
+
+  // Tasks
+  const tasks = d.tasks || [];
+  if (tasks.length) {
+    lines.push('=== TASKS ===');
+    tasks.forEach(t => {
+      const retry = t.retry_count > 0 ? ` [attempt ${t.retry_count}]` : '';
+      lines.push(`${(ICONS[t.status]||'○')} ${t.id} [${t.type}]${retry}: ${t.objective}`);
+    });
+    lines.push('');
+  }
+
+  // Test results
+  if ((d.test_results || []).length) {
+    lines.push('=== TEST RESULTS ===');
+    d.test_results.forEach(t => {
+      lines.push(`${t.passed ? 'PASS' : 'FAIL'}  [${t.method}/${t.ecosystem}] ${t.task_id}  (${t.ts})`);
+      if (t.log) {
+        t.log.split('\n').slice(0, 30).forEach(l => { if (l.trim()) lines.push('  ' + l); });
+      }
+      lines.push('');
+    });
+  }
+
+  // Errors
+  const failed = tasks.filter(t => t.status === 'failed');
+  if (failed.length) {
+    lines.push('=== ERRORS ===');
+    failed.forEach(t => {
+      lines.push(`${t.id} (attempt ${t.retry_count}):`);
+      (t.error_log || '').split('\n').forEach(l => lines.push('  ' + l));
+      lines.push('');
+    });
+  }
+
+  // Work log
+  if ((d.work_log || []).length) {
+    lines.push('=== WORK LOG ===');
+    d.work_log.forEach(e => {
+      const attempt = e.attempt ? ` (attempt ${e.attempt})` : '';
+      lines.push(`${e.ts}  [${e.agent}/${e.model}] ${e.action}${attempt}: ${e.detail}`);
+    });
+    lines.push('');
+  }
+
+  // Events
+  if ((d.events || []).length) {
+    lines.push('=== EVENTS ===');
+    [...d.events].reverse().forEach(e => lines.push(`${e.ts}  ${e.msg}`));
+  }
+
+  const text = lines.join('\n');
+  navigator.clipboard.writeText(text)
+    .then(() => {
+      showToast('Logs copied to clipboard ✓');
+      const btn = document.getElementById('copy-btn');
+      btn.classList.add('copied');
+      btn.textContent = '✓ Copied';
+      setTimeout(() => { btn.classList.remove('copied'); btn.textContent = '📋 Copy Logs'; }, 2000);
+    })
+    .catch(() => showToast('Clipboard blocked — select text manually'));
+}
+
+function showToast(msg) {
+  const el = document.getElementById('copy-toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2500);
+}
+
 // ── Test log renderer ─────────────────────────────────────────────────────────
 // Parses Playwright / vitest / pytest output into coloured lines.
 // Falls back to plain truncated text for unknown formats.
@@ -572,6 +686,7 @@ async function poll() {
     const r = await fetch('/mission_control.json?t=' + Date.now());
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
+    _lastData = data;
     lastFetch = Date.now();
     // restore live indicator
     const dot = document.getElementById('live-dot');
