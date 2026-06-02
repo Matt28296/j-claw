@@ -247,10 +247,15 @@ _STATIC_EXTS = {".html", ".css", ".js", ".ts", ".jsx", ".tsx", ".svg", ".ico"}
 
 
 def _is_bare_html_task(task, project_dir: Path) -> bool:
-    """True when the task only touches static web files and there is no npm runner."""
-    if (project_dir / "package.json").exists():
-        return False
-    return all(Path(f).suffix.lower() in _STATIC_EXTS for f in task.files)
+    """True when ALL task files are static web types.
+
+    Deliberately ignores package.json presence — a task that only writes .html/.css/.js
+    is a static task by definition; stale package.json from previous runs in the same
+    directory should not promote it to a manual gate.
+    """
+    return bool(task.files) and all(
+        Path(f).suffix.lower() in _STATIC_EXTS for f in task.files
+    )
 
 
 def _run_html_auto(project_dir: Path) -> tuple[bool, str]:
