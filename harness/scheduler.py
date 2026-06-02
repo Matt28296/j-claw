@@ -1,7 +1,8 @@
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
 
-from config import MAX_RETRIES_PER_TASK, WORKER_MODEL
+from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, MAX_PARALLEL_WORKERS
 from project import ProjectInstance, Task
 from worker import execute_task
 from verification import run_verification, detect_ecosystem
@@ -9,6 +10,31 @@ from validator import validate_dag, OrchestratorOutputError
 from state_writer import writer as sw
 
 console = Console()
+
+_STUB_PATTERNS = [
+    "// existing logic",
+    "// existing code",
+    "// implementation unchanged",
+    "// keep existing",
+    "// ... existing",
+    "// TODO: implement",
+    "# TODO: implement",
+    "pass  # stub",
+    "raise NotImplementedError",
+    "/* existing",
+    "// placeholder",
+    "# placeholder",
+]
+
+
+def _scan_for_stubs(output_files: dict) -> str | None:
+    """Return the first stub pattern found across all written files, or None."""
+    for path, content in output_files.items():
+        lower = content.lower()
+        for pat in _STUB_PATTERNS:
+            if pat.lower() in lower:
+                return f"{path}: contains '{pat}'"
+    return None
 
 
 class Scheduler:
@@ -37,8 +63,17 @@ class Scheduler:
                     )
                 break
 
-            for task in ready:
-                self._run_task(task)
+            if MAX_PARALLEL_WORKERS <= 1 or len(ready) == 1:
+                for task in ready:
+                    self._run_task(task)
+            else:
+                workers = min(MAX_PARALLEL_WORKERS, len(ready))
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {pool.submit(self._run_task, task): task for task in ready}
+                    for fut in as_completed(futures):
+                        exc = fut.exception()
+                        if exc:
+                            console.print(f"  [red]Worker thread raised: {exc}[/red]")
 
         if self.instance.all_tasks_done():
             self._project_review()
@@ -61,6 +96,10 @@ class Scheduler:
             self.instance.write_task_files(task)
             for path in task.output_files:
                 sw.on_file_written(path, task.id)
+
+            stub_hit = _scan_for_stubs(task.output_files)
+            if stub_hit:
+                raise ValueError(f"Stub detected in output: {stub_hit}")
 
             ecosystem = detect_ecosystem(self.instance.output_dir)
             passed, log = run_verification(task, self.instance.output_dir)

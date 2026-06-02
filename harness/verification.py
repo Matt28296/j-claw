@@ -1,3 +1,5 @@
+# Playwright is optional. Install with: pip install playwright && playwright install chromium
+# If not installed, headless checks fall back to HTML structure validation only.
 from __future__ import annotations
 import shutil
 import subprocess
@@ -83,7 +85,7 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
         # Auto-handle bare HTML tasks — no package.json means no npm runner.
         # final_review.py still does a full content check at the end.
         if _is_bare_html_task(task, project_dir):
-            return _run_html_auto(project_dir)
+            return _run_playwright_check(project_dir)
         return _run_manual(task)
 
     ecosystem = detect_ecosystem(project_dir)
@@ -108,7 +110,7 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
         if pkg.exists():
             ecosystem = "node"
         else:
-            return _run_html_auto(project_dir)
+            return _run_playwright_check(project_dir)
 
     cmd = _COMMANDS.get(ecosystem, _COMMANDS["unknown"]).get(method)
 
@@ -256,6 +258,89 @@ def _is_bare_html_task(task, project_dir: Path) -> bool:
     return bool(task.files) and all(
         Path(f).suffix.lower() in _STATIC_EXTS for f in task.files
     )
+
+
+def _run_playwright_check(project_dir: Path) -> tuple[bool, str]:
+    """Headless Chromium check for bare HTML/Phaser projects.
+
+    Launches a real browser, captures console errors, and verifies a <canvas>
+    element is present. Falls back to _run_html_auto() if playwright is not
+    installed or the browser binary hasn't been downloaded yet.
+    """
+    # Check that playwright is importable first.
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
+    except ImportError:
+        console.print(
+            "  [yellow]playwright not installed — falling back to HTML structure check. "
+            "Install with: pip install playwright && playwright install chromium[/yellow]"
+        )
+        return _run_html_auto(project_dir)
+
+    # Locate index.html
+    index_html = project_dir / "index.html"
+    if not index_html.exists():
+        # No index.html — delegate to the basic check which scans all *.html
+        console.print("  [yellow]No index.html found — falling back to HTML structure check.[/yellow]")
+        return _run_html_auto(project_dir)
+
+    url = index_html.as_uri()
+    console.print(f"  [dim]Playwright headless check: {url}[/dim]")
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            console_issues: list[str] = []
+
+            def _on_console(msg):
+                if msg.type in ("error", "warning"):
+                    console_issues.append(f"[{msg.type.upper()}] {msg.text}")
+
+            page.on("console", _on_console)
+
+            page.goto(url)
+
+            # Wait for network idle; ignore timeout (static file:// pages finish instantly)
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass  # Static pages may not fire networkidle — that's fine
+
+            # Check for <canvas>
+            canvas_count = page.locator("canvas").count()
+            if canvas_count == 0:
+                console.print(
+                    "  [yellow]Warning: no <canvas> element found on page. "
+                    "Expected for a Phaser game.[/yellow]"
+                )
+
+            # Check page title
+            title = page.title()
+            if not title:
+                console.print("  [yellow]Warning: page title is empty.[/yellow]")
+
+            browser.close()
+
+        if console_issues:
+            summary = "\n".join(console_issues)
+            console.print(f"  [red]Playwright: {len(console_issues)} console error(s) detected.[/red]")
+            for issue in console_issues:
+                console.print(f"  [dim]{issue}[/dim]")
+            return False, f"Playwright console errors:\n{summary}"
+
+        canvas_note = f" ({canvas_count} canvas element(s) found)" if canvas_count else " (no canvas)"
+        console.print(f"  [green]Playwright check passed{canvas_note}.[/green]")
+        return True, f"playwright check passed{canvas_note}"
+
+    except Exception as exc:
+        console.print(
+            f"  [yellow]Playwright check failed ({exc!r}) — "
+            "falling back to HTML structure check. "
+            "Run 'playwright install chromium' if the browser binary is missing.[/yellow]"
+        )
+        return _run_html_auto(project_dir)
 
 
 def _run_html_auto(project_dir: Path) -> tuple[bool, str]:
