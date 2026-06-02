@@ -14,7 +14,7 @@ console = Console()
 
 _SKIP_DIRS = {"node_modules", ".venv", "__pycache__", ".git", "dist", ".playwright"}
 _REVIEW_EXTS = {".js", ".py", ".html", ".css", ".ts", ".jsx", ".tsx", ".json", ".md"}
-_SKIP_FILES = {"REVIEW.md", "package-lock.json", "yarn.lock"}
+_SKIP_FILES = {"REVIEW.md", "HANDOFF.md", "package-lock.json", "yarn.lock"}
 _MAX_TOTAL_CHARS = 120_000  # stay well under token limits
 
 _SYSTEM = """\

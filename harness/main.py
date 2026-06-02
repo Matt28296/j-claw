@@ -3,6 +3,7 @@
 from __future__ import annotations
 import sys
 import json
+import shutil
 import argparse
 from pathlib import Path
 from graphlib import TopologicalSorter
@@ -32,6 +33,12 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
         return
 
     console.print(Panel(f"[bold cyan]{intent}[/bold cyan]", title=f"J-Claw {'Sub-project ' + str(depth) if depth else 'Project'}"))
+
+    # Wipe any output from a previous run so stale files don't contaminate
+    # the new run's review or verification steps.
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     if manual:
         orch = ManualOrchestrator()
