@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>J-Claw Mission Control</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:       #0d1117;
+  --surface:  #161b22;
+  --border:   #30363d;
+  --text:     #c9d1d9;
+  --muted:    #484f58;
+  --green:    #3fb950;
+  --blue:     #58a6ff;
+  --yellow:   #d29922;
+  --red:      #f85149;
+  --amber:    #e3b341;
+  --purple:   #bc8cff;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 13px;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Header ──────────────────────────────────────────────── */
+.header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.logo { font-size: 15px; font-weight: bold; color: var(--blue); letter-spacing: 2px; }
+
+.live-wrap { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #8b949e; }
+.live-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+  animation: pulse 2s ease-in-out infinite;
+}
+.live-dot.stale { background: var(--amber); animation: none; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+.state-badge {
+  padding: 3px 10px; border-radius: 12px;
+  font-size: 11px; font-weight: bold; letter-spacing: .5px;
+}
+.s-IDLE         { background: #21262d; color: #8b949e; }
+.s-INIT         { background: #2e1b00; color: var(--amber); }
+.s-SPEC_ACCEPTED{ background: #0d2449; color: var(--blue); }
+.s-EXECUTING    { background: #0d2449; color: var(--blue); }
+.s-DONE         { background: #0f2c0f; color: var(--green); }
+.s-NEEDS_FOLLOWUP{ background: #2e1b00; color: var(--amber); }
+
+.goal { flex: 1; color: #8b949e; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.badge {
+  background: #21262d; border: 1px solid var(--border);
+  border-radius: 10px; padding: 2px 8px;
+  font-size: 11px; color: #8b949e;
+}
+.elapsed { color: #8b949e; font-size: 12px; min-width: 55px; text-align: right; }
+
+/* ── Review Banner ───────────────────────────────────────── */
+#review-banner {
+  display: none; padding: 7px 18px; font-size: 12px;
+  font-weight: bold; flex-shrink: 0;
+}
+.rv-pass  { display: flex !important; background: #0f2c0f; color: var(--green);  border-bottom: 1px solid #238636; }
+.rv-fail  { display: flex !important; background: #2c0f0f; color: var(--red);    border-bottom: 1px solid var(--red); }
+
+/* ── Main Grid ───────────────────────────────────────────── */
+.main {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ── Left Panel ──────────────────────────────────────────── */
+.left { border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+.agent-section { border-bottom: 1px solid var(--border); padding: 12px 14px; flex-shrink: 0; }
+.tasks-section  { flex: 1; overflow-y: auto; padding: 12px 14px; }
+
+.panel-title {
+  font-size: 10px; font-weight: bold; letter-spacing: 1px;
+  color: #8b949e; text-transform: uppercase; margin-bottom: 9px;
+}
+
+.agent-box {
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 10px 12px; min-height: 56px;
+}
+.agent-box.active { border-color: var(--blue); background: #0d1b2e; }
+.agent-name  { font-size: 13px; font-weight: bold; color: var(--blue); }
+.agent-model { font-size: 11px; color: #8b949e; margin-top: 2px; }
+.agent-timer { font-size: 22px; font-weight: bold; color: var(--text); margin-top: 6px; font-variant-numeric: tabular-nums; }
+
+.task-count { font-size: 11px; color: #8b949e; margin-bottom: 7px; }
+
+.task-row {
+  border-left: 3px solid var(--muted);
+  padding: 5px 8px; margin-bottom: 4px;
+  border-radius: 0 4px 4px 0;
+}
+.task-row.pending    { border-left-color: var(--muted); }
+.task-row.running    { border-left-color: var(--blue);  background: #0d1b2e; }
+.task-row.done       { border-left-color: var(--green); }
+.task-row.failed     { border-left-color: var(--red);   background: #200d0d; }
+.task-row.deprecated { border-left-color: var(--muted); opacity: .45; }
+
+.task-header { display: flex; align-items: center; gap: 4px; }
+.task-id { font-size: 11px; font-weight: bold; color: #8b949e; }
+.task-id.running { color: var(--blue); }
+.task-id.done    { color: var(--green); }
+.task-id.failed  { color: var(--red); }
+.task-type { font-size: 10px; color: var(--muted); }
+.retry-badge {
+  background: #2e1b00; color: var(--amber);
+  border-radius: 3px; padding: 1px 5px; font-size: 10px;
+}
+.task-obj {
+  font-size: 11px; color: var(--text); margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 290px;
+}
+.task-files { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 3px; }
+.file-pill {
+  background: #21262d; border-radius: 3px;
+  padding: 1px 5px; font-size: 10px; color: #8b949e;
+}
+
+/* ── Right Panel ─────────────────────────────────────────── */
+.right { display: grid; grid-template-rows: 1fr 1fr; overflow: hidden; }
+
+.events-section { border-bottom: 1px solid var(--border); overflow-y: auto; padding: 12px 14px; }
+
+.bottom-row { display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; }
+.errors-section { border-right: 1px solid var(--border); overflow-y: auto; padding: 12px 14px; }
+.files-section  { overflow-y: auto; padding: 12px 14px; }
+
+.event-row {
+  display: flex; gap: 8px; padding: 2px 0;
+  border-bottom: 1px solid #1c2128; font-size: 11px;
+}
+.event-ts  { color: var(--muted); min-width: 56px; flex-shrink: 0; }
+.event-msg { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.error-card {
+  background: #200d0d; border: 1px solid #5c1d1d;
+  border-radius: 4px; padding: 8px 10px; margin-bottom: 6px;
+}
+.error-task { color: var(--red); font-weight: bold; font-size: 11px; margin-bottom: 4px; }
+.error-msg  { color: #f0a0a0; font-size: 10px; white-space: pre-wrap; word-break: break-all; }
+
+.file-row {
+  display: flex; gap: 6px; align-items: center;
+  padding: 3px 0; font-size: 11px;
+  border-bottom: 1px solid #1c2128;
+}
+.file-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.file-task { color: var(--muted); font-size: 10px; flex-shrink: 0; }
+
+.empty { color: var(--muted); font-size: 11px; font-style: italic; padding: 4px 0; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <span class="logo">J-CLAW</span>
+  <div class="live-wrap">
+    <span class="live-dot" id="live-dot"></span>
+    <span id="live-label">LIVE</span>
+  </div>
+  <span id="state-badge" class="state-badge s-IDLE">IDLE</span>
+  <span id="goal" class="goal">Waiting for pipeline…</span>
+  <span id="badge-stack" class="badge" style="display:none"></span>
+  <span id="badge-complexity" class="badge" style="display:none"></span>
+  <span id="elapsed" class="elapsed">0:00</span>
+</div>
+
+<div id="review-banner"></div>
+
+<div class="main">
+  <!-- LEFT -->
+  <div class="left">
+    <div class="agent-section">
+      <div class="panel-title">Active Agent</div>
+      <div id="agent-box" class="agent-box">
+        <div class="empty">No agent running</div>
+      </div>
+    </div>
+    <div class="tasks-section">
+      <div class="panel-title">Tasks</div>
+      <div id="task-count" class="task-count">—</div>
+      <div id="task-list"></div>
+    </div>
+  </div>
+
+  <!-- RIGHT -->
+  <div class="right">
+    <div class="events-section">
+      <div class="panel-title">Live Events</div>
+      <div id="event-list"><div class="empty">No events yet.</div></div>
+    </div>
+    <div class="bottom-row">
+      <div class="errors-section">
+        <div class="panel-title">Errors</div>
+        <div id="error-list"><div class="empty">No errors.</div></div>
+      </div>
+      <div class="files-section">
+        <div class="panel-title">Output Files</div>
+        <div id="file-list"><div class="empty">No files written yet.</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+let lastFetch   = Date.now();
+let agentEpoch  = null;
+let reviewDone  = false;
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function fmt(s) {
+  s = Math.max(0, Math.floor(s));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+const ICONS = { done: '✓', running: '▶', failed: '✗', pending: '○', deprecated: '–' };
+
+// ── Render ───────────────────────────────────────────────────────────────────
+
+function render(d) {
+  const state = d.pipeline_state || 'IDLE';
+
+  // Header — state badge
+  const badge = document.getElementById('state-badge');
+  badge.textContent = state;
+  badge.className = 'state-badge s-' + state;
+
+  // Header — goal
+  document.getElementById('goal').textContent =
+    d.project?.goal || d.project?.intent || 'Waiting for pipeline…';
+
+  // Header — stack / complexity badges
+  const bStack = document.getElementById('badge-stack');
+  const bComp  = document.getElementById('badge-complexity');
+  if (d.project?.stack)      { bStack.textContent = d.project.stack;      bStack.style.display = ''; }
+  if (d.project?.complexity) { bComp.textContent  = d.project.complexity; bComp.style.display  = ''; }
+
+  // Header — elapsed
+  document.getElementById('elapsed').textContent = fmt(d.elapsed_s || 0);
+
+  // Review banner (fetch once on DONE)
+  if ((state === 'DONE' || state === 'NEEDS_FOLLOWUP') && d.project?.output_url && !reviewDone) {
+    reviewDone = true;
+    fetch('/' + d.project.output_url + '/REVIEW.md?t=' + Date.now())
+      .then(r => r.ok ? r.text() : null)
+      .then(txt => {
+        if (!txt) return;
+        const line = txt.split('\n').find(l => l.startsWith('VERDICT:'));
+        if (!line) return;
+        const pass = line.includes('PASS');
+        const el = document.getElementById('review-banner');
+        el.className = pass ? 'rv-pass' : 'rv-fail';
+        el.textContent = (pass ? '✓' : '✗') + ' Final Review: ' + line.trim();
+      })
+      .catch(() => {});
+  }
+
+  // Active agent
+  const agentBox = document.getElementById('agent-box');
+  if (d.active_agent) {
+    agentEpoch = d.active_agent.started_epoch;
+    const elapsed = Math.max(0, Date.now() / 1000 - agentEpoch);
+    agentBox.className = 'agent-box active';
+    agentBox.innerHTML =
+      `<div class="agent-name">${esc(d.active_agent.agent)}</div>` +
+      `<div class="agent-model">${esc(d.active_agent.model)} · ${esc(d.active_agent.state)}</div>` +
+      `<div class="agent-timer" id="agent-timer">${fmt(elapsed)}</div>`;
+  } else {
+    agentEpoch = null;
+    agentBox.className = 'agent-box';
+    agentBox.innerHTML = '<div class="empty">No agent running</div>';
+  }
+
+  // Tasks
+  const tasks = d.tasks || [];
+  const doneN = tasks.filter(t => t.status === 'done').length;
+  document.getElementById('task-count').textContent =
+    tasks.length ? `${doneN} / ${tasks.length} completed` : '—';
+
+  document.getElementById('task-list').innerHTML = tasks.map(t => {
+    const icon  = ICONS[t.status] || '○';
+    const retry = t.retry_count > 0
+      ? `<span class="retry-badge">attempt ${t.retry_count}</span>` : '';
+    const pills = (t.files || [])
+      .map(f => `<span class="file-pill">${esc(f.split('/').pop())}</span>`)
+      .join('');
+    return `<div class="task-row ${t.status}">
+      <div class="task-header">
+        <span class="task-id ${t.status}">${icon} ${esc(t.id)}</span>
+        <span class="task-type">[${esc(t.type)}]</span>
+        ${retry}
+      </div>
+      <div class="task-obj" title="${esc(t.objective)}">${esc(t.objective)}</div>
+      ${pills ? `<div class="task-files">${pills}</div>` : ''}
+    </div>`;
+  }).join('') || '<div class="empty">No tasks yet.</div>';
+
+  // Events
+  const events = (d.events || []).slice(0, 50);
+  document.getElementById('event-list').innerHTML = events.map(e =>
+    `<div class="event-row">
+      <span class="event-ts">${esc(e.ts)}</span>
+      <span class="event-msg" title="${esc(e.msg)}">${esc(e.msg)}</span>
+    </div>`
+  ).join('') || '<div class="empty">No events yet.</div>';
+
+  // Errors
+  const failed = tasks.filter(t => t.status === 'failed');
+  document.getElementById('error-list').innerHTML = failed.map(t =>
+    `<div class="error-card">
+      <div class="error-task">✗ ${esc(t.id)} · attempt ${t.retry_count}</div>
+      <div class="error-msg">${esc((t.error_log || '').slice(0, 400))}</div>
+    </div>`
+  ).join('') || '<div class="empty">No errors.</div>';
+
+  // Output files
+  const files = d.output_files || [];
+  document.getElementById('file-list').innerHTML = files.slice(0, 40).map(f => {
+    const name = String(f.path).replace(/\\/g, '/').split('/').pop();
+    return `<div class="file-row">
+      <span>📄</span>
+      <span class="file-name" title="${esc(f.path)}">${esc(name)}</span>
+      <span class="file-task">${esc(f.task_id)}</span>
+    </div>`;
+  }).join('') || '<div class="empty">No files written yet.</div>';
+}
+
+// ── Live agent timer (ticks every second independently of poll) ───────────────
+
+setInterval(() => {
+  if (agentEpoch === null) return;
+  const el = document.getElementById('agent-timer');
+  if (el) el.textContent = fmt(Date.now() / 1000 - agentEpoch);
+}, 1000);
+
+// ── Poll loop ─────────────────────────────────────────────────────────────────
+
+async function poll() {
+  try {
+    const r = await fetch('/mission_control.json?t=' + Date.now());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    lastFetch = Date.now();
+    // restore live indicator
+    const dot = document.getElementById('live-dot');
+    dot.className = 'live-dot';
+    document.getElementById('live-label').textContent = 'LIVE';
+    render(data);
+  } catch (_) {
+    const age = Math.floor((Date.now() - lastFetch) / 1000);
+    if (age > 8) {
+      const dot = document.getElementById('live-dot');
+      dot.className = 'live-dot stale';
+      document.getElementById('live-label').textContent = `STALE ${age}s`;
+    }
+  }
+}
+
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

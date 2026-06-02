@@ -34,8 +34,13 @@ class StateWriter:
 
     def on_project_start(self, intent: str, output_dir: str) -> None:
         self._start_time = _now()
+        # Compute a relative URL path so the dashboard can fetch output files
+        try:
+            output_url = Path(output_dir).relative_to(_STATE_FILE.parent).as_posix()
+        except ValueError:
+            output_url = None
         self._state["pipeline_state"] = "INIT"
-        self._state["project"] = {"intent": intent, "output_dir": output_dir}
+        self._state["project"] = {"intent": intent, "output_dir": output_dir, "output_url": output_url}
         self._state["tasks"] = []
         self._state["output_files"] = []
         self._state["events"] = []

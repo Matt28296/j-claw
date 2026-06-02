@@ -51,6 +51,7 @@ class Scheduler:
             f"{task.objective[:90]}{'…' if len(task.objective) > 90 else ''}"
         )
         task.status = "running"
+        sw.on_task_start(task.id)
 
         dep_files = self.instance.get_dependency_files(task)
 
@@ -58,20 +59,25 @@ class Scheduler:
             result = execute_task(task, self.instance.spec, dep_files)
             task.output_files = {f["path"]: f["content"] for f in result["files"]}
             self.instance.write_task_files(task)
+            for path in task.output_files:
+                sw.on_file_written(path, task.id)
 
             passed, log = run_verification(task, self.instance.output_dir)
             if passed:
                 task.status = "done"
+                sw.on_task_done(task.id, WORKER_MODEL)
                 console.print(f"  [green]✓ done[/green]  [dim](worker: {WORKER_MODEL})[/dim]")
             else:
                 task.status = "failed"
                 task.error_log = f"Verification ({task.verification}) failed:\n{log}"
+                sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
                 self._handle_error(task)
 
         except Exception as exc:  # noqa: BLE001
             task.status = "failed"
             task.error_log = str(exc)
             console.print(f"  [red]✗ error: {exc}[/red]")
+            sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
             self._handle_error(task)
 
     # ── error handling ────────────────────────────────────────────────────────
