@@ -268,9 +268,29 @@ The stack is set in the FORMAT 1 spec's `architecture` section. The worker recei
 ## Known Limitations
 
 - **14B models produce stubs when asked to "keep existing logic"** — The worker will replace full implementations with `// Existing draw logic` placeholder comments if the objective says to preserve parts of a file. Fix: always write the complete new file content in the objective. Never say "keep existing."
-- **No parallel task execution yet** — Tasks run sequentially even when DAG branches are independent. The architecture supports it; the scheduler doesn't implement it.
 - **Phaser verification is manual** — Browser game correctness can't be checked automatically without a headless browser. A Playwright integration would close this gap.
 - **Projects directory is gitignored** — Generated output is local only and not committed to this repo.
+
+---
+
+## Roadmap
+
+These are the open issues blocking fully autonomous, unattended operation. See [GitHub Issues](https://github.com/Matt28296/j-claw/issues) for full details.
+
+| # | Issue | Impact |
+|---|-------|--------|
+| [#1](https://github.com/Matt28296/j-claw/issues/1) | **unit.js tests 1–4 are placeholder stubs** — suite exits 0 even when code is broken | Broken code ships as "passing" through `unit_test` verification |
+| [#2](https://github.com/Matt28296/j-claw/issues/2) | **smoke.js does not detect stub placeholder comments** | `// Existing draw logic` stubs pass smoke; silent failure undetected until manual play |
+| [#3](https://github.com/Matt28296/j-claw/issues/3) | **Phaser verification falls back to manual gate** — pauses pipeline for human input | Game projects cannot run unattended; every task requires human browser check |
+| [#4](https://github.com/Matt28296/j-claw/issues/4) | **Worker model produces stubs when modifying existing files** | Root cause of repeated hollow output; needs orchestrator rule + validator enforcement |
+
+### Priority order
+
+1. **Issues #1 + #2** (one pipeline run, 2 tasks) — fix unit tests and add stub detection. After this, the QA layer catches hollow output automatically and routes it back as `EXECUTION_ERROR`.
+2. **Issue #4** (orchestrator rule + validator warning) — prevents the problem at the source, before stubs are even written.
+3. **Issue #3** (Playwright integration) — eliminates the last manual gate and makes game projects fully autonomous.
+
+Once all four are resolved, the pipeline can build, verify, detect failures, and self-correct for all supported stacks without any human intervention.
 
 ---
 
