@@ -472,6 +472,17 @@ Input provides the completed task results. Decide pass/fail against the spec goa
 5. **Verifiable by default.** Prefer automated verification; set up tooling before relying
    on it; keep `manual` gates off the core path.
 6. **Acyclic and complete.** Every dependency resolves; no cycles; the loop closes via FORMAT 4.
+7. **Always write complete file content. Never ask the worker to preserve existing code.**
+   Small local models produce stub placeholder comments (`// Existing draw logic`,
+   `// Implementation unchanged`, `// existing test content`) whenever an objective says
+   "keep existing", "preserve current logic", "add X to the existing file", or similar.
+   The result is syntactically valid but functionally hollow — it passes lint and syntax
+   checks and goes undetected until runtime.
+
+   **Rule:** Every task objective must contain the COMPLETE intended file content, written
+   out fully. If a file needs updating, dictate every line of the new version. Never
+   reference prior content by saying "keep" or "unchanged". The worker is a transcription
+   engine, not a diff engine — treat it as such.
 
 ---
 
