@@ -45,6 +45,7 @@ class StateWriter:
         self._state["output_files"] = []
         self._state["events"] = []
         self._state["work_log"] = []
+        self._state["test_results"] = []
         self._state["started_at"] = _ts()
         self._event(f"Project started: {intent[:80]}")
         self._write()
@@ -119,6 +120,22 @@ class StateWriter:
     def on_file_written(self, path: str, task_id: str) -> None:
         self._state["output_files"].append({"path": path, "task_id": task_id, "written_at": _ts()})
         self._event(f"  📄 {path}")
+        self._write()
+
+    def on_verification_result(self, task_id: str, method: str, ecosystem: str,
+                               passed: bool, log: str) -> None:
+        if method == "none":
+            return  # skip trivial auto-passes — nothing useful to show
+        icon = "✓" if passed else "✗"
+        self._state.setdefault("test_results", []).append({
+            "ts": _ts(),
+            "task_id": task_id,
+            "method": method,
+            "ecosystem": ecosystem,
+            "passed": passed,
+            "log": log[:1200],
+        })
+        self._event(f"{icon} [{method}/{ecosystem}] {task_id}: {'passed' if passed else 'FAILED'}")
         self._write()
 
     def on_project_done(self, result: str, summary: str) -> None:

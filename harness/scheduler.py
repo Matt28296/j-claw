@@ -4,7 +4,7 @@ from rich.console import Console
 from config import MAX_RETRIES_PER_TASK, WORKER_MODEL
 from project import ProjectInstance, Task
 from worker import execute_task
-from verification import run_verification
+from verification import run_verification, detect_ecosystem
 from validator import validate_dag, OrchestratorOutputError
 from state_writer import writer as sw
 
@@ -62,7 +62,9 @@ class Scheduler:
             for path in task.output_files:
                 sw.on_file_written(path, task.id)
 
+            ecosystem = detect_ecosystem(self.instance.output_dir)
             passed, log = run_verification(task, self.instance.output_dir)
+            sw.on_verification_result(task.id, task.verification, ecosystem, passed, log)
             if passed:
                 task.status = "done"
                 sw.on_task_done(task.id, WORKER_MODEL)
