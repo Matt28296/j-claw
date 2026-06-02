@@ -36,7 +36,7 @@ class StateWriter:
         self._start_time = _now()
         # Compute a relative URL path so the dashboard can fetch output files
         try:
-            output_url = Path(output_dir).relative_to(_STATE_FILE.parent).as_posix()
+            output_url = Path(output_dir).resolve().relative_to(_STATE_FILE.parent.resolve()).as_posix()
         except ValueError:
             output_url = None
         self._state["pipeline_state"] = "INIT"
