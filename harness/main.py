@@ -26,7 +26,7 @@ from scheduler import Scheduler
 from final_review import run_final_review, parse_review_issues
 from handoff import write_handoff, try_claude_stamp, git_commit_project, deploy_project
 from verification import detect_ecosystem, run_playwright_project_check
-from e2e_generator import generate_e2e_tests
+from e2e_generator import generate_e2e_tests, run_e2e_tests
 from creative_director import CreativeDirector
 from technical_architect import TechnicalArchitect
 
@@ -243,6 +243,8 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
             generate_e2e_tests(output_dir, instance.spec, instance.tasks_as_list(), ecosystem)
         except Exception as _e2e_exc:
             console.print(f"  [yellow]E2E test generation skipped ({_e2e_exc})[/yellow]")
+        e2e_passed, e2e_log = run_e2e_tests(output_dir)
+        sw.on_verification_result("e2e", "playwright", ecosystem, e2e_passed, e2e_log)
 
     # Project-level Playwright check for phaser/vanilla — runs regardless of
     # task verification settings (which are always "none" for these stacks).

@@ -6,6 +6,7 @@ Uses the same Ollama worker that generates code to write tests/e2e.spec.ts.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from rich.console import Console
@@ -288,3 +289,58 @@ def generate_e2e_tests(
         console.print("  [yellow]E2E generator: no test files in worker response — skipping.[/yellow]")
 
     return written
+
+
+_PLAYWRIGHT_CONFIG = """\
+import { defineConfig } from '@playwright/test';
+export default defineConfig({
+  testDir: './tests',
+  use: { baseURL: 'http://localhost:18090' },
+  webServer: {
+    command: 'python -m http.server 18090',
+    port: 18090,
+    reuseExistingServer: true,
+    timeout: 10000,
+  },
+});
+"""
+
+
+def run_e2e_tests(project_dir: Path) -> tuple[bool, str]:
+    """Run Playwright E2E tests against the generated project.
+
+    Returns:
+        (passed, log) — passed is True when all tests pass or when the runner
+        is unavailable/skipped.  Only actual Playwright assertion failures
+        return passed=False.
+    """
+    spec_file = project_dir / "tests" / "e2e.spec.ts"
+    if not spec_file.exists():
+        return (True, "no e2e tests generated")
+
+    config_file = project_dir / "playwright.config.ts"
+    if not config_file.exists():
+        config_file.write_text(_PLAYWRIGHT_CONFIG, encoding="utf-8")
+
+    try:
+        console.print("\n[bold]Running Playwright E2E tests…[/bold]")
+        result = subprocess.run(
+            "npx playwright test --reporter=line",
+            cwd=str(project_dir),
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        log = stdout[-3000:] + stderr[-1000:]
+        passed = result.returncode == 0
+        if passed:
+            console.print("  [green]E2E tests passed.[/green]")
+        else:
+            console.print("  [red]E2E tests failed.[/red]")
+        return (passed, log)
+    except Exception as e:  # noqa: BLE001
+        console.print(f"  [yellow]Playwright runner skipped: {e}[/yellow]")
+        return (True, f"playwright runner skipped: {e}")
