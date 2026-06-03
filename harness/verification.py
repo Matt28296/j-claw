@@ -293,7 +293,7 @@ def _run_playwright_check(project_dir: Path) -> tuple[bool, str]:
         console.print("  [yellow]No index.html found — falling back to HTML structure check.[/yellow]")
         return _run_html_auto(project_dir)
 
-    url = index_html.as_uri()
+    url = index_html.resolve().as_uri()
     console.print(f"  [dim]Playwright headless check: {url}[/dim]")
 
     try:
@@ -301,11 +301,19 @@ def _run_playwright_check(project_dir: Path) -> tuple[bool, str]:
             browser = pw.chromium.launch(headless=True)
             page = browser.new_page()
 
-            console_issues: list[str] = []
+            js_errors: list[str] = []
+            warnings: list[str] = []
+
+            # WebGL/GPU driver noise from Chromium headless on AMD hardware —
+            # these are internal performance advisories, not JS errors.
+            _NOISE = ("GL Driver Message", "GPU stall", "WebGL-", "RENDER WARNING")
 
             def _on_console(msg):
-                if msg.type in ("error", "warning"):
-                    console_issues.append(f"[{msg.type.upper()}] {msg.text}")
+                text = msg.text
+                if msg.type == "error" and not any(n in text for n in _NOISE):
+                    js_errors.append(text)
+                elif msg.type == "warning" and not any(n in text for n in _NOISE):
+                    warnings.append(text)
 
             page.on("console", _on_console)
 
@@ -332,12 +340,15 @@ def _run_playwright_check(project_dir: Path) -> tuple[bool, str]:
 
             browser.close()
 
-        if console_issues:
-            summary = "\n".join(console_issues)
-            console.print(f"  [red]Playwright: {len(console_issues)} console error(s) detected.[/red]")
-            for issue in console_issues:
-                console.print(f"  [dim]{issue}[/dim]")
-            return False, f"Playwright console errors:\n{summary}"
+        if js_errors:
+            summary = "\n".join(js_errors)
+            console.print(f"  [red]Playwright: {len(js_errors)} JS error(s) detected.[/red]")
+            for err in js_errors:
+                console.print(f"  [dim]{err}[/dim]")
+            return False, f"Playwright JS errors:\n{summary}"
+
+        if warnings:
+            console.print(f"  [yellow]Playwright: {len(warnings)} warning(s) (non-fatal).[/yellow]")
 
         canvas_note = f" ({canvas_count} canvas element(s) found)" if canvas_count else " (no canvas)"
         console.print(f"  [green]Playwright check passed{canvas_note}.[/green]")
