@@ -530,6 +530,13 @@ Example input fragment:
    Claude Code review covers content quality. Reserve `manual` only for genuinely
    un-automatable checks (audio output, device peripheral integration, physical hardware).
 
+9. **Never use ES modules (`type="module"` or `import`/`export`) in `phaser` or `vanilla` stack projects.**
+   These stacks serve files via `file://` protocol, where browsers block cross-origin ES module
+   imports with a CORS error — making the game/app completely non-functional. Always use plain
+   `<script src="...">` tags (no `type="module"`). All classes must be globals (assigned to
+   `window.*` or declared at the top level). Never write `import` or `export` statements in
+   any JS file for these stacks. If the spec describes "ES modules", ignore it and use globals.
+
 ---
 
 ## OPERATOR / HARNESS NOTES (not part of the system prompt — do not paste into the model)

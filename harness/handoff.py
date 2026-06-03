@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import anthropic
@@ -76,9 +77,10 @@ output directory. The project goal is:
 
 def try_claude_stamp(handoff_path: Path, output_dir: Path) -> None:
     """Invoke the claude CLI (preferred) or Anthropic API (fallback) for a final verdict."""
-    if shutil.which("claude"):
-        _stamp_via_cli(handoff_path, output_dir)
-    elif ANTHROPIC_API_KEY:
+    cli_ok = shutil.which("claude") and _stamp_via_cli(handoff_path, output_dir)
+    if cli_ok:
+        return
+    if ANTHROPIC_API_KEY:
         _stamp_via_api(handoff_path, output_dir)
     else:
         console.print(
@@ -91,8 +93,8 @@ def try_claude_stamp(handoff_path: Path, output_dir: Path) -> None:
 
 # ── CLI path ──────────────────────────────────────────────────────────────────
 
-def _stamp_via_cli(handoff_path: Path, output_dir: Path) -> None:
-    """Run the claude CLI subprocess for the final verdict."""
+def _stamp_via_cli(handoff_path: Path, output_dir: Path) -> bool:
+    """Run the claude CLI subprocess for the final verdict. Returns True if verdict was written."""
     console.print("\n[bold]Running OpenClaw final stamp (claude CLI)…[/bold]")
     prompt = (
         "You are doing a final autonomous quality check for a software project. "
@@ -102,27 +104,32 @@ def _stamp_via_cli(handoff_path: Path, output_dir: Path) -> None:
         "If there are remaining issues, list them briefly. "
         "End with either OPENCLAW: APPROVED or OPENCLAW: ISSUES FOUND."
     )
+    # On Windows, .cmd wrappers require shell=True to be invokable
+    use_shell = sys.platform == "win32"
+    cmd: str | list = f'claude --print "{prompt}"' if use_shell else ["claude", "--print", prompt]
     try:
         result = subprocess.run(
-            ["claude", "--print", prompt],
+            cmd,
             capture_output=True,
             text=True,
             timeout=180,
             cwd=output_dir,
             env={**os.environ, "PYTHONUTF8": "1"},
+            shell=use_shell,
         )
         verdict = result.stdout.strip() or result.stderr.strip()
         if not verdict:
-            console.print("  [yellow]claude returned no output — skipping stamp.[/yellow]")
-            return
+            console.print("  [yellow]claude CLI returned no output — trying API stamp.[/yellow]")
+            return False
     except subprocess.TimeoutExpired:
-        console.print("  [yellow]claude CLI timed out — skipping stamp.[/yellow]")
-        return
+        console.print("  [yellow]claude CLI timed out — trying API stamp.[/yellow]")
+        return False
     except FileNotFoundError:
-        console.print("  [yellow]claude CLI not found — skipping stamp.[/yellow]")
-        return
+        console.print("  [yellow]claude CLI not executable — trying API stamp.[/yellow]")
+        return False
 
     _append_verdict(handoff_path, verdict)
+    return True
 
 
 # ── API path ──────────────────────────────────────────────────────────────────
