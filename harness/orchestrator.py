@@ -9,6 +9,7 @@ from rich.syntax import Syntax
 from config import (
     ORCHESTRATOR_MODEL, ANTHROPIC_API_KEY, ORCHESTRATOR_PROMPT_PATH,
     ORCHESTRATOR_API_MODEL, ORCHESTRATOR_FALLBACK_MODELS, OPENROUTER_API_KEY,
+    ORCHESTRATOR_MAX_TOKENS,
 )
 from validator import validate_response, OrchestratorOutputError
 
@@ -77,7 +78,7 @@ class Orchestrator:
             try:
                 response = self._client.messages.create(
                     model=ORCHESTRATOR_MODEL,
-                    max_tokens=8096,
+                    max_tokens=ORCHESTRATOR_MAX_TOKENS,
                     system=self._system_prompt,
                     messages=[{"role": "user", "content": user_message}],
                 )
@@ -125,7 +126,7 @@ class OpenRouterOrchestrator:
             try:
                 response = self._client.chat.completions.create(
                     model=current_model,
-                    max_tokens=8096,
+                    max_tokens=ORCHESTRATOR_MAX_TOKENS,
                     messages=[
                         {"role": "system", "content": self._system_prompt},
                         {"role": "user", "content": user_message},

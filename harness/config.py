@@ -58,6 +58,7 @@ DEPLOY_TIMEOUT: int = int(os.getenv("DEPLOY_TIMEOUT", "120"))  # seconds
 PROJECTS_DIR: Path = Path(os.getenv("PROJECTS_DIR", "./projects"))
 MAX_RETRIES_PER_TASK: int = int(os.getenv("MAX_RETRIES_PER_TASK", "3"))
 MAX_TASKS: int = int(os.getenv("MAX_TASKS", "50"))
+ORCHESTRATOR_MAX_TOKENS: int = int(os.getenv("ORCHESTRATOR_MAX_TOKENS", "16384"))
 MAX_FORMAT5_DEPTH: int = int(os.getenv("MAX_FORMAT5_DEPTH", "3"))
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
