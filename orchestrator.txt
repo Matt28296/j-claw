@@ -681,6 +681,12 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
 
 19. **FastAPI database schema** — always use Alembic migrations, never `Base.metadata.create_all()` or raw CREATE TABLE. Every fastapi and full-stack project must include: `alembic.ini`, `migrations/env.py` (with `target_metadata = Base.metadata`), `migrations/versions/0001_initial.py` (with `upgrade()` and `downgrade()`). The backend's startup lifespan must run `alembic upgrade head` via subprocess. Add `alembic` to `requirements.txt`.
 
+20. **Audio generation tasks** have `type: "audio"` and list `.wav` or `.mp3` files.
+   - Use `type: "audio"` on any task whose sole output is audio files (sound effects, music, TTS).
+   - The harness routes audio tasks to the local Coqui TTS server automatically.
+   - If Coqui TTS is not running, silent WAV placeholders are written (pipeline continues).
+   - Phaser and socket-io game projects that mention sound/music should include one audio task.
+
 ---
 
 ## OPERATOR / HARNESS NOTES (not part of the system prompt — do not paste into the model)

@@ -56,6 +56,7 @@ JWT_SECRET: str = os.getenv(
 )
 SD_API_URL: str = os.getenv("SD_API_URL", "http://localhost:7860")   # AUTOMATIC1111 / Forge / ComfyUI
 ASSET_PROVIDER: str = os.getenv("ASSET_PROVIDER", "sd")  # "sd" | "none"
+COQUI_API_URL: str = os.getenv("COQUI_API_URL", "http://localhost:5002")
 
 # Optional deployment hook: command to run in the output dir after git commit.
 # Example: "vercel --prod --yes" or "netlify deploy --prod --dir=dist"

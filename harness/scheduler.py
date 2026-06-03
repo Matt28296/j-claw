@@ -101,6 +101,16 @@ class Scheduler:
             console.print(f"  [green]✓ asset done[/green]  [dim]({len(written)} file(s) written)[/dim]")
             return
 
+        # Audio tasks: route to audio_worker instead of code worker
+        if task.type == "audio":
+            from audio_worker import generate_audio, can_generate as audio_can_generate
+            written = generate_audio(task, self.instance.spec, self.instance.output_dir)
+            result = {"files": [], "model_used": "coqui-tts" if audio_can_generate() else "silent-placeholder"}
+            task.status = "done"
+            sw.on_task_done(task.id, result["model_used"])
+            console.print(f"  [green]✓ audio done[/green]  [dim]({len(written)} file(s) written)[/dim]")
+            return
+
         try:
             result = execute_task(task, self.instance.spec, dep_files)
             task.output_files = {f["path"]: f["content"] for f in result["files"]}
