@@ -47,6 +47,12 @@ _COMMANDS: dict[str, dict[str, list[str] | None]] = {
         "build":     None,  # handled specially in run_verification
         "smoke":     None,
     },
+    "web3": {
+        "lint":      None,
+        "unit_test": None,  # handled specially in run_verification
+        "build":     None,  # handled specially in run_verification
+        "smoke":     None,
+    },
     "phaser": {
         "lint": None, "unit_test": None, "build": None, "smoke": None,
     },
@@ -61,6 +67,10 @@ def detect_ecosystem(project_dir: Path) -> str:
     has_pyproj  = (project_dir / "pyproject.toml").exists()
     has_vite    = (project_dir / "vite.config.js").exists() or (project_dir / "vite.config.ts").exists()
     has_pkg     = (project_dir / "package.json").exists()
+
+    # Web3 / Hardhat: hardhat.config.js present
+    if (project_dir / "hardhat.config.js").exists() or (project_dir / "hardhat.config.ts").exists():
+        return "web3"
 
     # Full-stack: both a Python backend and a React/Node frontend present
     if (has_req or has_pyproj) and (has_vite or has_pkg):
@@ -103,6 +113,12 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
         return _run_manual(task)
 
     ecosystem = detect_ecosystem(project_dir)
+
+    # Web3: Hardhat compile + test
+    if ecosystem == "web3":
+        if method in ("build", "unit_test"):
+            return _run_hardhat_build(project_dir)
+        return True, f"auto-passed: no {method} command for web3"
 
     # Full-stack: run frontend build + backend install together
     if ecosystem == "full-stack" and method == "build":
@@ -256,6 +272,33 @@ def _run_fullstack_build(project_dir: Path) -> tuple[bool, str]:
             break
 
     return True, "\n".join(logs)
+
+
+def _run_hardhat_build(project_dir: Path) -> tuple[bool, str]:
+    """npm install + npx hardhat compile + npx hardhat test for Web3/Hardhat projects."""
+    npm = _npm_cmd()
+    if npm is None:
+        console.print("  [yellow]npm not found — skipping Web3 build. Install Node.js to enable.[/yellow]")
+        missing = [f for f in ["hardhat.config.js", "package.json"] if not (project_dir / f).exists()]
+        if missing:
+            return False, f"Missing required files: {missing}"
+        return True, "auto-passed: npm not available, files present"
+
+    console.print("  [dim]Web3/Hardhat: npm install && npx hardhat compile && npx hardhat test[/dim]")
+    ok, log = _run_cmd([npm, "install"], project_dir, _TIMEOUT_BUILD)
+    if not ok:
+        return False, f"npm install failed:\n{log}"
+
+    ok2, log2 = _run_cmd(["npx", "hardhat", "compile"], project_dir, _TIMEOUT_BUILD)
+    if not ok2:
+        return False, f"hardhat compile failed:\n{log2}"
+
+    ok3, log3 = _run_cmd(["npx", "hardhat", "test"], project_dir, _TIMEOUT_DEFAULT)
+    if not ok3:
+        return False, f"hardhat test failed:\n{log3}"
+
+    console.print("  [green]Hardhat compile + test passed.[/green]")
+    return True, "\n".join([log, log2, log3])
 
 
 def _run_cmd(cmd: list[str], cwd: Path, timeout: int) -> tuple[bool, str]:

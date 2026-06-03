@@ -80,6 +80,21 @@ Stack: Phaser 3 browser game (vanilla HTML + JS, no build step)
 - Scene transitions: use this.scene.start('SceneName', data) to switch scenes.
 - Graphics: use scene.add.graphics() then fillStyle()/fillRect()/fillCircle()/fillTriangle() — no textures unless preloaded.
 """,
+
+    "web3": """\
+Stack: Solidity smart contracts + Hardhat + ethers.js
+- Project layout: contracts/*.sol, scripts/deploy.js, test/*.js, hardhat.config.js, package.json
+- package.json: devDependencies must include hardhat, @nomicfoundation/hardhat-toolbox, ethers; scripts: "compile": "hardhat compile", "test": "hardhat test", "deploy": "hardhat run scripts/deploy.js --network localhost"
+- hardhat.config.js: require("@nomicfoundation/hardhat-toolbox"); solidity version "0.8.24"; networks.localhost = { url: "http://127.0.0.1:8545" }
+- Contracts: every .sol file must start with // SPDX-License-Identifier: MIT and pragma solidity ^0.8.24;
+- For ERC-20 tokens: install @openzeppelin/contracts and extend ERC20; for NFTs extend ERC721
+- Deployment script: scripts/deploy.js — use ethers from hardhat; deploy with await ContractFactory.deploy(...); console.log("Deployed to:", contract.target)
+- Tests: test/*.js — use chai expect; import { ethers } from "hardhat"; deploy fresh instance in beforeEach; cover constructor, state reads, state writes, error cases
+- Frontend (if requested): frontend/index.html + frontend/app.js — load ethers UMD via CDN: <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
+- Frontend JS: use window.ethers (UMD global, NOT import); connect via window.ethereum (MetaMask); hardcode contract ABI as a JS const; use placeholder "DEPLOYED_CONTRACT_ADDRESS" for user to fill after deploy
+- NEVER use ES modules in the frontend (no import/export, no type="module") — use UMD CDN only
+- README.md: include setup steps: npm install, npx hardhat compile, npx hardhat test, npx hardhat node (terminal 1), npx hardhat run scripts/deploy.js --network localhost (terminal 2)
+""",
 }
 
 

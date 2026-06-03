@@ -141,7 +141,7 @@ browser, etc.). That tooling setup must itself be a task. Never assume tooling e
   "features": ["feature as a short phrase"],
   "constraints": ["every assumption and limit made for missing info, stated explicitly"],
   "architecture": {
-    "stack": "vanilla | react-vite | fastapi | phaser | full-stack",
+    "stack": "vanilla | react-vite | fastapi | phaser | full-stack | web3",
     "frontend": "framework or 'none'",
     "backend": "framework or 'none'",
     "database": "type or 'none'",
@@ -177,6 +177,7 @@ Choose `architecture.stack` based on project requirements:
 | `react-vite` | Complex UI, component hierarchy, modern UX        | npm build, React, Tailwind via PostCSS  |
 | `fastapi`    | Needs a real backend API or database              | Python, FastAPI, SQLite, uvicorn        |
 | `phaser`     | Browser-based video game                          | Phaser 3 CDN, plain JS, game loop       |
+| `web3`       | Solidity smart contracts, DApps, token/NFT        | Hardhat, ethers.js, OpenZeppelin        |
 
 For full-stack projects (frontend + backend), use TWO separate project instances via FORMAT 5 decomposition, or include both in one DAG where backend tasks are independent of frontend tasks (no shared files). The `stack` field refers to the dominant worker mode; multi-stack DAGs should set `stack` to the frontend stack and note the backend in the `constraints`.
 
@@ -542,6 +543,16 @@ Example input fragment:
    - Include `requirements.txt` at project root.
    - Assign `verification: "build"` to the frontend scaffold task and `verification: "build"` to the
      backend setup task so both are verified end-to-end.
+
+11. **Web3 / DApp projects (`stack: "web3"`)** use Hardhat + Solidity + ethers.js.
+   - Project layout: `contracts/*.sol`, `scripts/deploy.js`, `test/*.js`, `hardhat.config.js`, `package.json`.
+   - Every Solidity file: `// SPDX-License-Identifier: MIT` + `pragma solidity ^0.8.24;`
+   - package.json devDependencies: `hardhat`, `@nomicfoundation/hardhat-toolbox`; optionally `@openzeppelin/contracts` for ERC-20/721.
+   - Deployment script must log the deployed contract address via `console.log`.
+   - Tests must use chai `expect` and deploy a fresh contract instance in `beforeEach`.
+   - If a frontend is requested, put it in `frontend/` and load ethers.js via UMD CDN (not npm). Never use ES modules in the frontend.
+   - Assign `verification: "build"` to the Hardhat scaffold task — the harness runs `npm install && npx hardhat compile && npx hardhat test`.
+   - Always include a `README.md` with setup and run instructions.
 
 10. **Never use ES modules (`type="module"` or `import`/`export`) in `phaser` or `vanilla` stack projects.**
    These stacks serve files via `file://` protocol, where browsers block cross-origin ES module
