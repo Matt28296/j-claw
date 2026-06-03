@@ -287,15 +287,19 @@ Start with `.\bot.bat` after setting `TELEGRAM_BOT_TOKEN` in `.env`:
 | Create Telegram bot (@JarvisClaw96bot) + add token | ✅ Done |
 | Telegram account paired | ✅ Done |
 | Switch OpenClaw agent to Anthropic Haiku (no VRAM conflict) | ✅ Done |
-| Start OpenClaw gateway | ⬜ Run `openclaw gateway` to activate |
+| Start OpenClaw gateway | ✅ Done (running, PID managed by watchdog) |
+| OpenClaw auto-restart watchdog | ✅ Done (`C:\Users\Tyler\openclaw-watchdog.ps1`) |
 
 ### To activate
 
-Run in a separate PowerShell window (leave it running):
+The gateway is managed by a watchdog script that auto-restarts on crash with exponential back-off:
 
 ```powershell
-openclaw gateway
+# Start gateway with auto-restart watchdog
+C:\Users\Tyler\start-openclaw.bat
 ```
+
+To update the Windows Task Scheduler entry: point it to `C:\Users\Tyler\start-openclaw.bat` with `-WindowStyle Hidden` so it runs silently on login.
 
 Startup should show: `agent model: anthropic/claude-haiku-4-5-20251001`
 
