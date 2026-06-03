@@ -95,6 +95,37 @@ Stack: Solidity smart contracts + Hardhat + ethers.js
 - NEVER use ES modules in the frontend (no import/export, no type="module") — use UMD CDN only
 - README.md: include setup steps: npm install, npx hardhat compile, npx hardhat test, npx hardhat node (terminal 1), npx hardhat run scripts/deploy.js --network localhost (terminal 2)
 """,
+
+    "react-native": """\
+Stack: React Native + Expo (mobile app, no native build required)
+- Init pattern: write app.json, App.js (or App.tsx), package.json for Expo managed workflow.
+- package.json: dependencies must include expo, react, react-native, react-native-safe-area-context; scripts: "start": "expo start", "android": "expo run:android", "ios": "expo run:ios"
+- app.json: include expo.name, expo.slug, expo.version ("1.0.0"), expo.platforms (["ios","android","web"]), expo.sdkVersion ("51.0.0")
+- Styling: use React Native StyleSheet.create() — NO Tailwind, NO CSS files, NO className props.
+- Navigation: if multiple screens needed, use @react-navigation/native + @react-navigation/native-stack. Include NavigationContainer from @react-navigation/native and createNativeStackNavigator.
+- State: useState / useEffect hooks only — no Redux, no Zustand unless explicitly requested.
+- Components: use View, Text, TextInput, TouchableOpacity, FlatList, ScrollView, Image from react-native.
+- Never use <div>, <p>, <span>, <button>, <input> — those are web HTML, not React Native.
+- AsyncStorage: use @react-native-async-storage/async-storage for local persistence.
+- Entry point: App.js must export default a single React component (functional).
+- Include README.md with: npm install, npx expo start, how to run on iOS/Android via Expo Go app.
+""",
+
+    "socket-io": """\
+Stack: Socket.io real-time multiplayer (Node.js server + vanilla browser client)
+- Server: server.js using express + socket.io; listen on PORT (default 3000).
+- package.json: dependencies = express, socket.io; scripts: "start": "node server.js", "dev": "nodemon server.js"
+- Client: public/index.html loading Socket.io client via CDN <script src="/socket.io/socket.io.js"></script>
+- Client JS: public/app.js — use io() to connect; NO ES module syntax (no import/export, no type="module").
+- All client JS must be plain <script src="app.js"> (no bundler, no module system).
+- Server emits events to all connected clients via io.emit('event', data) or to one via socket.emit('event', data).
+- Client listens with socket.on('event', callback) and sends with socket.emit('event', data).
+- Game loop (if applicable): run on the server side with setInterval; broadcast state to all clients each tick.
+- Player management: track connected players in a Map keyed by socket.id; remove on 'disconnect'.
+- Static files: serve public/ via express.static so index.html and app.js are reachable at /.
+- CORS: if needed, configure cors origin in the Socket.io server constructor.
+- Include README.md: npm install, node server.js, open http://localhost:3000 in multiple tabs.
+""",
 }
 
 

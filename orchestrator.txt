@@ -141,7 +141,7 @@ browser, etc.). That tooling setup must itself be a task. Never assume tooling e
   "features": ["feature as a short phrase"],
   "constraints": ["every assumption and limit made for missing info, stated explicitly"],
   "architecture": {
-    "stack": "vanilla | react-vite | fastapi | phaser | full-stack | web3",
+    "stack": "vanilla | react-vite | fastapi | phaser | full-stack | web3 | react-native | socket-io",
     "frontend": "framework or 'none'",
     "backend": "framework or 'none'",
     "database": "type or 'none'",
@@ -178,6 +178,8 @@ Choose `architecture.stack` based on project requirements:
 | `fastapi`    | Needs a real backend API or database              | Python, FastAPI, SQLite, uvicorn        |
 | `phaser`     | Browser-based video game                          | Phaser 3 CDN, plain JS, game loop       |
 | `web3`       | Solidity smart contracts, DApps, token/NFT        | Hardhat, ethers.js, OpenZeppelin        |
+| `react-native` | Mobile app (iOS/Android), Expo managed workflow   | Expo SDK, React Native, AsyncStorage    |
+| `socket-io`    | Real-time multiplayer games/apps, WebSocket       | Node.js, Socket.io, Express             |
 
 For full-stack projects (frontend + backend), use TWO separate project instances via FORMAT 5 decomposition, or include both in one DAG where backend tasks are independent of frontend tasks (no shared files). The `stack` field refers to the dominant worker mode; multi-stack DAGs should set `stack` to the frontend stack and note the backend in the `constraints`.
 
@@ -553,6 +555,23 @@ Example input fragment:
    - If a frontend is requested, put it in `frontend/` and load ethers.js via UMD CDN (not npm). Never use ES modules in the frontend.
    - Assign `verification: "build"` to the Hardhat scaffold task — the harness runs `npm install && npx hardhat compile && npx hardhat test`.
    - Always include a `README.md` with setup and run instructions.
+
+12. **React Native projects (`stack: "react-native"`)** use Expo managed workflow.
+   - Use React Native primitives (View, Text, TouchableOpacity, FlatList) — never HTML tags.
+   - Styling: StyleSheet.create() only — no Tailwind, no CSS.
+   - Navigation: @react-navigation/native + createNativeStackNavigator for multi-screen apps.
+   - Persistence: @react-native-async-storage/async-storage (no localStorage).
+   - app.json must include expo block with sdkVersion "51.0.0".
+   - Verification: "build" runs `npm install` (simulator cannot run in pipeline).
+   - Include README.md with Expo Go instructions for testing on a physical device.
+
+13. **Socket.io multiplayer projects (`stack: "socket-io"`)** use a Node.js server with real-time clients.
+   - Server: server.js with Express + Socket.io listening on PORT 3000.
+   - Client: public/index.html + public/app.js — load socket.io client via CDN from /socket.io/socket.io.js.
+   - NEVER use ES modules in client JS (no import/export, no type="module").
+   - Game loop runs server-side with setInterval; state broadcast to all clients each tick.
+   - Player map keyed by socket.id; clean up on 'disconnect'.
+   - Verification: "build" runs `npm install`.
 
 10. **Never use ES modules (`type="module"` or `import`/`export`) in `phaser` or `vanilla` stack projects.**
    These stacks serve files via `file://` protocol, where browsers block cross-origin ES module

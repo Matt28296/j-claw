@@ -53,6 +53,18 @@ _COMMANDS: dict[str, dict[str, list[str] | None]] = {
         "build":     None,  # handled specially in run_verification
         "smoke":     None,
     },
+    "react-native": {
+        "lint":      None,
+        "unit_test": None,
+        "build":     None,  # handled specially in run_verification
+        "smoke":     None,
+    },
+    "socket-io": {
+        "lint":      None,
+        "unit_test": None,
+        "build":     ["npm", "install"],
+        "smoke":     None,
+    },
     "phaser": {
         "lint": None, "unit_test": None, "build": None, "smoke": None,
     },
@@ -71,6 +83,27 @@ def detect_ecosystem(project_dir: Path) -> str:
     # Web3 / Hardhat: hardhat.config.js present
     if (project_dir / "hardhat.config.js").exists() or (project_dir / "hardhat.config.ts").exists():
         return "web3"
+
+    # React Native / Expo: app.json with expo block
+    if (project_dir / "app.json").exists():
+        try:
+            import json as _json
+            content = _json.loads((project_dir / "app.json").read_text(encoding="utf-8"))
+            if "expo" in content:
+                return "react-native"
+        except Exception:
+            pass
+
+    # Socket.io multiplayer server: server.js present + socket.io in package.json
+    if (project_dir / "server.js").exists() and has_pkg:
+        try:
+            import json as _json
+            pkg = _json.loads((project_dir / "package.json").read_text(encoding="utf-8"))
+            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            if "socket.io" in deps:
+                return "socket-io"
+        except Exception:
+            pass
 
     # Full-stack: both a Python backend and a React/Node frontend present
     if (has_req or has_pyproj) and (has_vite or has_pkg):
@@ -119,6 +152,10 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
         if method in ("build", "unit_test"):
             return _run_hardhat_build(project_dir)
         return True, f"auto-passed: no {method} command for web3"
+
+    # React Native / Expo: npm install only (can't run iOS simulator in CI)
+    if ecosystem == "react-native" and method == "build":
+        return _run_react_native_install(project_dir)
 
     # Full-stack: run frontend build + backend install together
     if ecosystem == "full-stack" and method == "build":
@@ -272,6 +309,22 @@ def _run_fullstack_build(project_dir: Path) -> tuple[bool, str]:
             break
 
     return True, "\n".join(logs)
+
+
+def _run_react_native_install(project_dir: Path) -> tuple[bool, str]:
+    """npm install for Expo/React Native projects. Can't run simulator in CI."""
+    npm = _npm_cmd()
+    if npm is None:
+        missing = [f for f in ["app.json", "package.json"] if not (project_dir / f).exists()]
+        if missing:
+            return False, f"Missing required files: {missing}"
+        return True, "auto-passed: npm not available, files present"
+    console.print("  [dim]React Native/Expo: npm install[/dim]")
+    ok, log = _run_cmd([npm, "install"], project_dir, _TIMEOUT_BUILD)
+    if not ok:
+        return False, f"npm install failed:\n{log}"
+    console.print("  [green]Expo dependencies installed.[/green]")
+    return True, log
 
 
 def _run_hardhat_build(project_dir: Path) -> tuple[bool, str]:
