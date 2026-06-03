@@ -57,8 +57,8 @@ Hard constraints:
 - **Active DAG** = every task created for the current project instance — the FORMAT 2 task
   list, plus any FORMAT 3 `split` additions and FORMAT 4 follow-ups — regardless of whether
   a task has completed. Completed tasks still count.
-- **Task budget** = a hard cap of **30 tasks total for the project instance's lifetime**
-  (the size of the Active DAG can never exceed 30). Work that needs more must be decomposed
+- **Task budget** = a hard cap of **50 tasks total for the project instance's lifetime**
+  (the size of the Active DAG can never exceed 50). Work that needs more must be decomposed
   via FORMAT 5; you never raise the cap by completing tasks.
 
 ---
@@ -79,9 +79,9 @@ Input always includes `system_state`. Map state → output format:
 Oversize escape hatch:
 
 - Under `INIT`, `SPEC_REVISION`, or `SPEC_ACCEPTED`, if the work cannot fit in the
-  30-task budget, do not truncate or hallucinate — emit **FORMAT 5** instead of the
+  50-task budget, do not truncate or hallucinate — emit **FORMAT 5** instead of the
   format above, decomposing into sequential sub-projects.
-- Under `PROJECT_REVIEW`, if required follow-ups would push the Active DAG past 30 tasks,
+- Under `PROJECT_REVIEW`, if required follow-ups would push the Active DAG past 50 tasks,
   emit FORMAT 5 instead of FORMAT 4.
 - FORMAT 5 is never emitted from `EXECUTION_ERROR` (a single-task fix cannot exceed budget).
 
@@ -154,7 +154,7 @@ browser, etc.). That tooling setup must itself be a task. Never assume tooling e
     "32gb_ram",
     "rocm_or_vulkan_backend",
     "models_up_to_14b_4bit",
-    "max_30_tasks",
+    "max_50_tasks",
     "max_3_files_per_task",
     "sequential_or_dual_worker"
   ],
@@ -164,7 +164,7 @@ browser, etc.). That tooling setup must itself be a task. Never assume tooling e
 }
 ```
 
-If the spec cannot be built within the 30-task budget, do not emit FORMAT 1 — emit
+If the spec cannot be built within the 50-task budget, do not emit FORMAT 1 — emit
 FORMAT 5 instead.
 
 ### Stack selection guide
@@ -199,7 +199,7 @@ For full-stack projects (frontend + backend), use TWO separate project instances
   "hardware_aware": true,
   "local_constraints": [
     "rx9070xt_16gb_vram", "ryzen9_5950x_16core", "32gb_ram", "rocm_or_vulkan_backend",
-    "models_up_to_14b_4bit", "max_30_tasks", "max_3_files_per_task", "sequential_or_dual_worker"
+    "models_up_to_14b_4bit", "max_50_tasks", "max_3_files_per_task", "sequential_or_dual_worker"
   ],
   "modules": [
     { "name": "ui_shell", "responsibility": "page layout and task list rendering" },
@@ -252,7 +252,7 @@ When the backend sub-project runs as its own INIT, its spec should use `"stack":
   "hardware_aware": true,
   "local_constraints": [
     "rx9070xt_16gb_vram", "ryzen9_5950x_16core", "32gb_ram", "rocm_or_vulkan_backend",
-    "models_up_to_14b_4bit", "max_30_tasks", "max_3_files_per_task", "sequential_or_dual_worker"
+    "models_up_to_14b_4bit", "max_50_tasks", "max_3_files_per_task", "sequential_or_dual_worker"
   ],
   "modules": [
     { "name": "game_scene", "responsibility": "main game loop: snake movement, food, collision, score" },
@@ -284,7 +284,7 @@ When the backend sub-project runs as its own INIT, its spec should use `"stack":
 ```
 
 Rules:
-- Max 30 tasks (Active-DAG budget). Each task touches ≤3 files.
+- Max 50 tasks (Active-DAG budget). Each task touches ≤3 files.
 - Write `objective` for a small local coder (~14B): concrete, narrow, no ambiguity, no
   design decisions left open.
 - If any task uses `unit_test` or `smoke`, an earlier task must install and configure that
@@ -429,7 +429,7 @@ Input provides the completed task results. Decide pass/fail against the spec goa
 - On `needs_followup`: populate `followup_tasks` using the FORMAT 2 task schema. These are
   appended to the Active DAG and must obey the DAG integrity rules — ids continue the
   existing sequence (no reuse), dependencies resolve, graph stays acyclic.
-- If the needed follow-ups would push the Active DAG past 30 tasks, do not emit FORMAT 4
+- If the needed follow-ups would push the Active DAG past 50 tasks, do not emit FORMAT 4
   with an over-budget list — emit FORMAT 5 instead.
 
 ---
@@ -471,12 +471,12 @@ Example input fragment:
 
 ---
 
-## FORMAT 5 — Oversize Decomposition (when the 30-task budget is exceeded)
+## FORMAT 5 — Oversize Decomposition (when the 50-task budget is exceeded)
 
 ```json
 {
   "oversize": true,
-  "reason": "why the work exceeds the 30-task budget",
+  "reason": "why the work exceeds the 50-task budget",
   "sub_projects": [
     {
       "name": "unique_sub_project_name",
@@ -490,11 +490,11 @@ Example input fragment:
 - `name`s are unique within this decomposition; `depends_on` references must name
   sub-projects in this same list and must not form a cycle.
 - Each sub-project is fed back through `INIT` as its own **project instance**, in
-  dependency order, with a fresh task-id namespace and its own 30-task budget.
+  dependency order, with a fresh task-id namespace and its own 50-task budget.
 - **Recursion is allowed:** a sub-project, once running as its own instance, may itself
   emit FORMAT 5 and decompose further. The harness bounds recursion depth.
 - Guard against runaway splitting: if a single atomic feature still cannot fit within a
-  30-task budget, that is a scoping error to surface in `reason`, not grounds to keep
+  50-task budget, that is a scoping error to surface in `reason`, not grounds to keep
   decomposing indefinitely.
 
 ---
@@ -572,7 +572,7 @@ These are things the prompt cannot enforce on its own. Implement them in the sur
 - **Namespace task ids by project instance**, and validate every emitted task graph
   (FORMAT 2, FORMAT 3 splits, FORMAT 4 follow-ups, FORMAT 5 sub-projects): dependency/
   `depends_on` ids exist, no self-deps, topological sort confirms acyclicity, and the
-  Active-DAG task count stays ≤30 per instance.
+  Active-DAG task count stays ≤50 per instance.
 - **Reject duplicate file writers** that lack a dependency edge between them.
 - **Track the id high-water mark** per instance so follow-ups and splits never reuse a number.
 - **Bound FORMAT 5 recursion depth** and flag pathological decomposition (a sub-project that

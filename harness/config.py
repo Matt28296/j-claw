@@ -49,6 +49,7 @@ GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY: str | None = os.getenv("OPENROUTER_API_KEY")
 PROJECTS_DIR: Path = Path(os.getenv("PROJECTS_DIR", "./projects"))
 MAX_RETRIES_PER_TASK: int = int(os.getenv("MAX_RETRIES_PER_TASK", "3"))
+MAX_TASKS: int = int(os.getenv("MAX_TASKS", "50"))
 MAX_FORMAT5_DEPTH: int = int(os.getenv("MAX_FORMAT5_DEPTH", "3"))
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 

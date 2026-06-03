@@ -15,7 +15,7 @@ It runs entirely on your local machine. The worker model is a local Ollama LLM. 
     Orchestrator generates a project spec (FORMAT 1)
             │  (auto-accepted with --yes, or you review and revise)
             ▼  SPEC_ACCEPTED
-    Orchestrator emits a task DAG (FORMAT 2) — up to 30 tasks
+    Orchestrator emits a task DAG (FORMAT 2) — up to 50 tasks
             │
             ▼  Execute tasks in topological order
             │   └─ Worker (Ollama) writes each file
@@ -144,7 +144,7 @@ Opens `http://localhost:8765/dashboard/index.html` in your browser. Leave it run
 |-------|--------|-------------|
 | `INIT` | FORMAT 1 | Project spec: type, complexity, goal, features, constraints, architecture, modules |
 | `SPEC_REVISION` | FORMAT 1 | Re-emits spec with `revision_feedback` applied |
-| `SPEC_ACCEPTED` | FORMAT 2 | Full task DAG — up to 30 tasks with dependencies, files, acceptance criteria, verification type |
+| `SPEC_ACCEPTED` | FORMAT 2 | Full task DAG — up to 50 tasks with dependencies, files, acceptance criteria, verification type |
 | `EXECUTION_ERROR` | FORMAT 3 | Fix for a failed task: `modify`, `split`, or `deprecate` |
 | `PROJECT_REVIEW` | FORMAT 4 | Final orchestrator verdict: `pass` or `needs_followup` with additional tasks |
 | `REVIEW_FAILED` | FORMAT 4 | Self-healing: orchestrator receives the Claude review's issue list and returns fix tasks |
@@ -226,7 +226,7 @@ The validator enforces these rules on every FORMAT 2, FORMAT 3 split, and FORMAT
 - Every dependency reference must point to an existing task ID
 - No cycles
 - No two tasks write the same file unless one depends (directly or transitively) on the other
-- Total Active DAG size never exceeds 30 tasks
+- Total Active DAG size never exceeds 50 tasks
 
 ---
 

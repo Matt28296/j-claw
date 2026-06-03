@@ -2,7 +2,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
 
-from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, MAX_PARALLEL_WORKERS
+from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, MAX_PARALLEL_WORKERS, MAX_TASKS
 from project import ProjectInstance, Task
 from worker import execute_task
 from verification import run_verification, detect_ecosystem
@@ -201,9 +201,9 @@ class Scheduler:
             return
 
         budget = self.instance.active_dag_count() + len(followups)
-        if budget > 20:
+        if budget > MAX_TASKS:
             console.print(
-                f"[red]Follow-up tasks would push Active DAG to {budget} (> 20 limit). Stopping.[/red]"
+                f"[red]Follow-up tasks would push Active DAG to {budget} (> {MAX_TASKS} limit). Stopping.[/red]"
             )
             return
 
