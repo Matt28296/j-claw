@@ -75,6 +75,7 @@ Input always includes `system_state`. Map state → output format:
 | `EXECUTION_ERROR`   | FORMAT 3          | Fix only the one broken task named in the input.               |
 | `PROJECT_REVIEW`    | FORMAT 4          | Final gate: pass the project or emit follow-up tasks.          |
 | `REVIEW_FAILED`     | FORMAT 4          | Automated code review found issues — emit targeted fix tasks.  |
+| `CONTINUE`          | FORMAT 2          | Plan incremental tasks to add a new feature to an existing project. |
 
 Oversize escape hatch:
 
@@ -472,6 +473,28 @@ Example input fragment:
   ]
 }
 ```
+
+---
+
+## CONTINUE — Incremental Feature Addition (`CONTINUE`)
+
+Input provides the `existing_spec`, `completed_tasks` list, and `new_intent` (a plain-English
+description of what to add to the project).
+
+Respond with **FORMAT 2** (task list only — no spec). Rules:
+
+- Read `existing_spec` to understand the project's stack, architecture, and goal.
+- Read `completed_tasks` to know which files already exist and what they do.
+- Plan ONLY the new tasks needed to implement `new_intent`. Do not re-emit tasks for things
+  already done.
+- Task ids must continue from the highest id in `completed_tasks` (no reuse).
+- New tasks may depend on completed task ids — those dependencies are valid.
+- Do not modify `existing_spec` — the stack and architecture stay the same.
+- Keep the same stack as the existing project. Do not switch stacks.
+- Write complete file content for every file you touch (same rule as always — never say
+  "keep existing", never truncate).
+- If new_intent is impossible within the existing architecture, return an empty task list
+  `{"tasks": []}` with a top-level `"reasoning"` explaining why.
 
 ---
 

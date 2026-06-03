@@ -27,6 +27,70 @@ from verification import detect_ecosystem, run_playwright_project_check
 console = Console()
 
 
+def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = False) -> None:
+    """Add features to an already-generated project."""
+    import json as _json
+    spec_path = project_dir / "spec.json"
+    tasks_path = project_dir / "tasks_done.json"
+
+    if not spec_path.exists():
+        console.print(f"[red]No spec.json found in {project_dir} — run the project first.[/red]")
+        sys.exit(1)
+
+    spec = _json.loads(spec_path.read_text(encoding="utf-8"))
+    completed = _json.loads(tasks_path.read_text(encoding="utf-8")) if tasks_path.exists() else []
+
+    console.print(Panel(
+        f"[bold cyan]Continuing: {spec.get('goal', '?')}[/bold cyan]\n"
+        f"[dim]Adding: {new_intent}[/dim]",
+        title="J-Claw Continuation"
+    ))
+
+    if ORCHESTRATOR_PROVIDER == "openrouter":
+        orch = OpenRouterOrchestrator()
+    else:
+        orch = Orchestrator()
+
+    sw.on_project_start(new_intent, str(project_dir))
+
+    console.print("\n[bold]Planning continuation tasks…[/bold]")
+    sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "CONTINUE")
+    dag_response = orch.call({
+        "system_state": "CONTINUE",
+        "existing_spec": spec,
+        "completed_tasks": completed,
+        "new_intent": new_intent,
+    })
+    sw.on_agent_done()
+
+    if not dag_response.get("tasks"):
+        console.print("[yellow]Orchestrator returned no new tasks.[/yellow]")
+        return
+
+    instance = ProjectInstance(project_dir)
+    instance.spec = spec
+    # Pre-populate with completed tasks so dependency references work
+    instance.load_tasks(completed)
+    # Load the new follow-up tasks
+    instance.apply_format4_followups(dag_response["tasks"])
+    sw.on_dag_loaded(dag_response["tasks"])
+
+    console.print(f"\n[bold]Executing {len(dag_response['tasks'])} new task(s)…[/bold]")
+    Scheduler(instance, orch).run()
+
+    # Save updated tasks
+    (project_dir / "tasks_done.json").write_text(
+        _json.dumps(instance.tasks_as_list(), indent=2), encoding="utf-8"
+    )
+
+    passed = run_final_review(project_dir, spec)
+    heal_cycle = 0
+    handoff_path = write_handoff(project_dir, spec, passed, heal_cycle)
+    try_claude_stamp(handoff_path, project_dir)
+    git_commit_project(project_dir, {"goal": f"continuation: {new_intent}"})
+    deploy_project(project_dir, spec)
+
+
 def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = False, auto_accept: bool = False) -> None:
     """Run one project instance from intent to completion (recursive for FORMAT 5)."""
     if depth > MAX_FORMAT5_DEPTH:
@@ -83,6 +147,8 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
 
     # ── SPEC_ACCEPTED ─────────────────────────────────────────────────────────
     sw.on_spec_accepted(spec)
+    import json as _json
+    (output_dir / "spec.json").write_text(_json.dumps(spec, indent=2), encoding="utf-8")
     console.print("\n[bold]Generating task DAG…[/bold]")
     sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "SPEC_ACCEPTED")
     dag_response = orch.call({"system_state": "SPEC_ACCEPTED", "accepted_spec": spec})
@@ -99,6 +165,9 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
 
     console.print(f"\n[bold]Executing {len(instance.tasks)} task(s)…[/bold]")
     Scheduler(instance, orch).run()
+    (output_dir / "tasks_done.json").write_text(
+        _json.dumps(instance.tasks_as_list(), indent=2), encoding="utf-8"
+    )
 
     console.print(f"\n[bold green]Project output written to: {output_dir}[/bold green]")
 
@@ -189,9 +258,23 @@ def main() -> None:
                         help="You act as the orchestrator — no API key required")
     parser.add_argument("--yes", "-y", action="store_true",
                         help="Auto-accept the first spec without prompting")
+    parser.add_argument("--continue", dest="continue_dir", metavar="PROJECT_DIR",
+                        help="Continue an existing project — add features to it")
     args = parser.parse_args()
 
     intent: str = args.intent or Prompt.ask("[bold]Describe your project[/bold]")
+
+    if args.continue_dir:
+        cont_dir = Path(args.continue_dir)
+        if not cont_dir.exists():
+            console.print(f"[red]Project directory not found: {cont_dir}[/red]")
+            sys.exit(1)
+        try:
+            run_continuation(intent, cont_dir, auto_accept=args.yes)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Interrupted.[/yellow]")
+            sys.exit(1)
+        return
 
     if args.output:
         output_dir = Path(args.output)
