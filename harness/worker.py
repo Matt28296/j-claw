@@ -84,6 +84,18 @@ Stripe frontend integration (include when project requires payments/checkout):
 - POST to /payments/create-checkout-session with cart data → get {url} → stripe.redirectToCheckout is deprecated; use window.location.href = url (Stripe Checkout redirects)
 - Add VITE_STRIPE_PUBLISHABLE_KEY to .env.example (note: VITE_ prefix is required for Vite to expose env vars to frontend)
 - Add a <SuccessPage /> component for success_url and a <CancelPage /> for cancel_url
+LemonSqueezy checkout (when the project involves LemonSqueezy payments):
+- Add Lemon.js CDN to index.html: <script src="https://assets.lemonsqueezy.com/lemon.js" defer></script>
+- Initialize: window.createLemonSqueezy() after DOM load
+- Overlay checkout: <a class="lemonsqueezy-button" href="{checkout_url}">Buy Now</a> — Lemon.js intercepts and shows overlay
+- Get checkout_url: fetch from backend POST /checkout/lemonsqueezy, then set as href or call LemonSqueezy.Url.Open(url)
+- Success/cancel: use LemonSqueezy event listeners: window.addEventListener("LP:checkout:close", handler)
+
+Stripe Connect frontend (when the project involves a marketplace or platform payments):
+- Seller onboarding button: onClick → POST /connect/onboard → window.location.href = data.url (redirects to Stripe)
+- Buyer payment: fetch POST /payments/create-intent → get {clientSecret, publishableKey}
+  then: const stripe = window.Stripe(publishableKey); const elements = stripe.elements({clientSecret});
+  mount PaymentElement, confirm with stripe.confirmPayment({elements, confirmParams: {return_url: ...}})
 """,
 
     "fastapi": """\
@@ -170,6 +182,22 @@ Stripe payment integration (include when project requires payments/checkout/subs
   - Use async def with request: Request to read raw body for webhook
 - Add STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET to .env.example
 - Never hardcode keys. Return {"url": session.url} from checkout endpoint.
+LemonSqueezy integration (when the project involves LemonSqueezy payments):
+- Install: pip install httpx; use REST API directly (no official Python SDK needed)
+- Create checkout: POST https://api.lemonsqueezy.com/v1/checkouts
+  Headers: Authorization: Bearer {LEMONSQUEEZY_API_KEY}, Accept: application/vnd.api+json, Content-Type: application/vnd.api+json
+  Body: {"data": {"type": "checkouts", "attributes": {"checkout_data": {"custom": {"user_id": "..."}}, "product_options": {}}, "relationships": {"store": {"data": {"type": "stores", "id": "{LEMONSQUEEZY_STORE_ID}"}}, "variant": {"data": {"type": "variants", "id": "{LEMONSQUEEZY_VARIANT_ID}"}}}}}
+- Webhook: POST /webhooks/lemonsqueezy
+  Verify: HMAC-SHA256 of raw request body with LEMONSQUEEZY_WEBHOOK_SECRET, compare to X-Signature header
+  Handle: order_created event → grant access
+- .env.example keys: LEMONSQUEEZY_API_KEY, LEMONSQUEEZY_WEBHOOK_SECRET, LEMONSQUEEZY_STORE_ID, LEMONSQUEEZY_VARIANT_ID
+
+Stripe Connect multi-vendor (when the project involves a marketplace or platform payments):
+- Platform collects fee: stripe.PaymentIntent.create(amount=..., currency="usd", transfer_data={"destination": connected_account_id}, application_fee_amount=fee_cents)
+- Onboard seller: POST /connect/onboard → stripe.Account.create(type="express") → stripe.AccountLink.create(account=acct_id, refresh_url=..., return_url=..., type="account_onboarding") → return {"url": link.url}
+- Payout: stripe automatically transfers to connected account after PaymentIntent succeeds
+- .env.example keys: STRIPE_PLATFORM_SECRET_KEY, STRIPE_CONNECT_WEBHOOK_SECRET
+- Endpoints to generate: POST /connect/onboard, POST /payments/create-intent, POST /webhooks/stripe-connect
 """,
 
     "phaser": """\
