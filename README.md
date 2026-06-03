@@ -217,12 +217,54 @@ Start with `.\bot.bat` after setting `TELEGRAM_BOT_TOKEN` in `.env`:
 
 ## OpenClaw Integration
 
-[OpenClaw](https://openclaw.ai) is a local AI assistant with native Telegram/WhatsApp/Discord access. J-claw ships a ready-made OpenClaw skill.
+[OpenClaw](https://openclaw.ai) is a local AI assistant with native Telegram/WhatsApp/Discord access. J-claw ships a ready-made OpenClaw skill so you can trigger builds by sending a message to your Telegram bot.
 
-**To activate:**
-1. Install OpenClaw from openclaw.ai
-2. Copy the skill: `cp openclaw-skill C:\Users\<you>\.openclaw\workspace\skills\j-claw -Recurse`
-3. Done — say "build me a React dashboard" in your Telegram chat and OpenClaw invokes j-claw
+### Setup status
+
+| Step | Status |
+|---|---|
+| Install OpenClaw | ✅ Done (2026.5.28) |
+| Fix Discord/Telegram streaming config | ✅ Done |
+| Copy j-claw skill to `~/.openclaw/workspace/skills/j-claw/` | ✅ Done |
+| Add `ANTHROPIC_API_KEY` to `~/.openclaw/.env` | ⬜ Manual step — see below |
+| Create Telegram bot via @BotFather and add token | ⬜ Manual step — see below |
+| Start the OpenClaw gateway | ⬜ Run once after above steps |
+
+### Remaining manual steps
+
+**1. Add your Anthropic API key to OpenClaw's environment**
+
+OpenClaw runs as a separate process with its own `.env` at `~/.openclaw/.env`. Without the key it cannot invoke the j-claw skill.
+
+```powershell
+Add-Content -Path "$env:USERPROFILE\.openclaw\.env" -Value "ANTHROPIC_API_KEY=<your-key>"
+```
+
+**2. Create a Telegram bot and wire in the token**
+
+1. Open Telegram → search `@BotFather` → send `/newbot`
+2. Give it a name (e.g. `Jarvis`) and a username (e.g. `jarvis_claw_bot`)
+3. BotFather replies with a token like `7123456789:AAHkj...`
+4. Add it to `~/.openclaw/.env`:
+   ```
+   TELEGRAM_BOT_TOKEN=<your-token>
+   ```
+5. Add it to `~/.openclaw/openclaw.json` under `channels.telegram.botToken`
+
+**3. Start the gateway and pair your account**
+
+```powershell
+openclaw gateway          # runs in foreground; Ctrl-C to stop
+```
+
+Then message your bot in Telegram — it will send a pairing code. Approve it with:
+```powershell
+openclaw pairing approve telegram "<CODE>"
+```
+
+**4. Test**
+
+Send your bot: `build me a snake game` — OpenClaw will invoke j-claw and stream progress back to Telegram.
 
 > **Security note**: Before installing any third-party OpenClaw plugins, audit their source code. OpenClaw plugins run in-process with full OS privileges — no sandbox. The `@alan512/ExperienceEngine` plugin was reviewed and rejected (exfiltrates task data to external LLMs). The `@openclaw/memory-lancedb` plugin is safe only when configured with local Ollama embeddings.
 
@@ -312,6 +354,14 @@ Every project writes to `harness/projects/<slug>/`:
 
 ## What's Left To Build
 
+### Immediate — OpenClaw activation (manual, no code needed)
+
+| Step | Detail |
+|---|---|
+| Add `ANTHROPIC_API_KEY` to `~/.openclaw/.env` | See OpenClaw Integration section above |
+| Create Telegram bot via @BotFather, add token to OpenClaw config | See OpenClaw Integration section above |
+| Run `openclaw gateway` and pair your Telegram account | See OpenClaw Integration section above |
+
 ### P1 — Completed
 
 | Item | Status |
@@ -321,7 +371,7 @@ Every project writes to `harness/projects/<slug>/`:
 | **Experience tracker** — local JSONL fix-outcome log fed back into retries | ✅ Done |
 | **Orchestrator JSON truncation fix** — `_fix_json_strings()` sanitizer + full-stack forced to FORMAT 5 + Rule 7 prohibits code-in-objectives | ✅ Done |
 | **FORMAT 5 sub-project bug fix** — `_handle_oversize()` `manual`/`auto_accept` scope bug fixed | ✅ Done |
-| **OpenClaw integration** — j-claw skill installed at `~/.openclaw/workspace/skills/j-claw/` | ✅ Done |
+| **OpenClaw integration** — config fixed, Discord streaming repaired, j-claw skill deployed to `~/.openclaw/workspace/skills/j-claw/` | ✅ Done |
 
 ### P2 — Planned
 
