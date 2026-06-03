@@ -81,3 +81,6 @@ TECHNICAL_ARCHITECT_PROMPT_PATH: Path = Path(__file__).parent.parent / "technica
 DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "8765"))
 DASHBOARD_AUTOOPEN: bool = os.getenv("DASHBOARD_AUTOOPEN", "true") == "true"
 GODOT_PATH: str = os.getenv("GODOT_PATH", "godot")
+PINATA_API_KEY: str = os.getenv("PINATA_API_KEY", "")
+PINATA_SECRET_KEY: str = os.getenv("PINATA_SECRET_KEY", "")
+IPFS_AUTO_PIN: bool = os.getenv("IPFS_AUTO_PIN", "false").lower() == "true"

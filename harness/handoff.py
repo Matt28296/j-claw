@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,11 +12,38 @@ import anthropic
 from rich.console import Console
 
 from config import ANTHROPIC_API_KEY, ORCHESTRATOR_MODEL
+import config as cfg
 
 _STATE_FILE = Path(__file__).parent.parent / "mission_control.json"
 _MAX_HEAL = 2
 
 console = Console()
+
+
+def _run_ipfs_pin(project_dir: Path) -> str | None:
+    """Run scripts/pin-to-ipfs.js in project_dir and return the CID if found, else None."""
+    if not cfg.IPFS_AUTO_PIN:
+        return None
+    if not cfg.PINATA_API_KEY:
+        return None
+    pin_script = project_dir / "scripts" / "pin-to-ipfs.js"
+    if not pin_script.exists():
+        return None
+    try:
+        result = subprocess.run(
+            ["node", "scripts/pin-to-ipfs.js"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "PINATA_API_KEY": cfg.PINATA_API_KEY, "PINATA_SECRET_KEY": cfg.PINATA_SECRET_KEY},
+        )
+        match = re.search(r'(Qm[a-zA-Z0-9]{44}|bafy[a-zA-Z0-9]+)', result.stdout)
+        if match:
+            return match.group(1)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def write_handoff(output_dir: Path, spec: dict, passed: bool, heal_cycles: int) -> Path:
@@ -94,6 +122,13 @@ output directory. The project goal is:
     handoff_path = output_dir / "HANDOFF.md"
     handoff_path.write_text(content, encoding="utf-8")
     console.print(f"\n  Handoff report written to: [dim]{handoff_path}[/dim]")
+
+    cid = _run_ipfs_pin(output_dir)
+    if cid:
+        with open(handoff_path, "a", encoding="utf-8") as f:
+            f.write(f"\n## IPFS\n- CID: `{cid}`\n- Gateway: https://gateway.pinata.cloud/ipfs/{cid}\n")
+        console.print(f"  [dim]IPFS CID pinned: {cid}[/dim]")
+
     return handoff_path
 
 
