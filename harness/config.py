@@ -47,9 +47,8 @@ LOCAL_FIRST_TASK_TYPES: set[str] = set(
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
 GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY: str | None = os.getenv("OPENROUTER_API_KEY")
-OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
-ASSET_PROVIDER: str = os.getenv("ASSET_PROVIDER", "dalle")  # "dalle" | "none"
-ASSET_MODEL: str = os.getenv("ASSET_MODEL", "dall-e-3")
+SD_API_URL: str = os.getenv("SD_API_URL", "http://localhost:7860")   # AUTOMATIC1111 / Forge / ComfyUI
+ASSET_PROVIDER: str = os.getenv("ASSET_PROVIDER", "sd")  # "sd" | "none"
 
 # Optional deployment hook: command to run in the output dir after git commit.
 # Example: "vercel --prod --yes" or "netlify deploy --prod --dir=dist"

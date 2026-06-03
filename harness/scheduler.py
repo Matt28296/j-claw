@@ -2,7 +2,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
 
-from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, MAX_PARALLEL_WORKERS, MAX_TASKS, ASSET_MODEL
+from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, MAX_PARALLEL_WORKERS, MAX_TASKS
 from project import ProjectInstance, Task
 from worker import execute_task
 from verification import run_verification, detect_ecosystem
@@ -94,7 +94,7 @@ class Scheduler:
         # Asset tasks: route to asset_worker instead of code worker
         if task.type == "asset":
             written = generate_assets(task, self.instance.spec, self.instance.output_dir)
-            result = {"files": [], "model_used": f"dalle/{ASSET_MODEL}" if can_generate() else "placeholder"}
+            result = {"files": [], "model_used": "sd-webui" if can_generate() else "placeholder"}
             task.status = "done"
             sw.on_task_done(task.id, result["model_used"])
             console.print(f"  [green]✓ asset done[/green]  [dim]({len(written)} file(s) written)[/dim]")
