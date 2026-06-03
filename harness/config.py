@@ -32,7 +32,7 @@ def _parse_fallbacks(raw: str) -> list[tuple[str, str]]:
     return result
 
 WORKER_FALLBACKS: list[tuple[str, str]] = _parse_fallbacks(
-    os.getenv("WORKER_FALLBACKS", "openrouter::openrouter/auto,ollama::qwen2.5-coder:7b")
+    os.getenv("WORKER_FALLBACKS", "openrouter::qwen/qwen-2.5-coder-32b-instruct:free,ollama::qwen2.5-coder:7b")
 )
 
 # Maximum tasks to run in parallel (1 = sequential, 2-4 = parallel)
