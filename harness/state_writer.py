@@ -29,6 +29,8 @@ class StateWriter:
             "elapsed_s": 0,
         }
         self._start_time: float | None = None
+        self._last_orch_model: str = "orchestrator"
+        self._last_worker_model: str = "worker"
 
     # ── Public hooks ──────────────────────────────────────────────────────────
 
@@ -89,6 +91,8 @@ class StateWriter:
         self._update_task(task_id, status="done", model_used=model_used)
         self._event(f"✓ {task_id} done  [{model_used}]")
         obj = self._task_objective(task_id)
+        self._last_worker_model = model_used
+        self._state["project"]["worker_model"] = model_used
         self._work_log("worker", model_used, task_id,
                        obj, status="done")
         self._write()
@@ -111,6 +115,12 @@ class StateWriter:
         }
         self._state["pipeline_state"] = state
         self._event(f"[{agent}] calling {model} for {state}")
+        if agent == "orchestrator":
+            self._last_orch_model = model
+            self._state["project"]["orch_model"] = model
+        else:
+            self._last_worker_model = model
+            self._state["project"]["worker_model"] = model
         self._write()
 
     def on_agent_done(self) -> None:
@@ -177,8 +187,8 @@ class StateWriter:
     def _orch_model(self) -> str:
         aa = self._state.get("active_agent")
         if aa and aa.get("agent") == "orchestrator":
-            return aa.get("model", "orchestrator")
-        return "orchestrator"
+            self._last_orch_model = aa.get("model", self._last_orch_model)
+        return self._last_orch_model
 
     def _active_model(self) -> str:
         aa = self._state.get("active_agent")

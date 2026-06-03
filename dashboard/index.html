@@ -392,6 +392,8 @@ body {
   <span id="goal" class="goal">Waiting for pipeline…</span>
   <span id="badge-stack" class="badge" style="display:none"></span>
   <span id="badge-complexity" class="badge" style="display:none"></span>
+  <span id="badge-orch-model" class="model-badge cloud" style="display:none" title="Orchestrator / planning model"></span>
+  <span id="badge-worker-model" class="model-badge local" style="display:none" title="Worker / code-writing model"></span>
   <span id="elapsed" class="elapsed">0:00</span>
   <button class="copy-btn" id="copy-btn" onclick="copyLogs()" title="Copy all logs to clipboard">&#x1F4CB; Copy Logs</button>
 </div>
@@ -598,6 +600,24 @@ function render(d) {
   const bComp  = document.getElementById('badge-complexity');
   if (d.project?.stack)      { bStack.textContent = d.project.stack;      bStack.style.display = ''; }
   if (d.project?.complexity) { bComp.textContent  = d.project.complexity; bComp.style.display  = ''; }
+
+  // Header — orchestrator and worker model badges
+  const bOrch   = document.getElementById('badge-orch-model');
+  const bWorker = document.getElementById('badge-worker-model');
+  if (d.project?.orch_model) {
+    const mi = modelInfo(d.project.orch_model);
+    bOrch.textContent = '🧠 ' + (mi ? mi.label : d.project.orch_model);
+    bOrch.className = 'model-badge ' + (mi ? mi.type : 'cloud');
+    bOrch.title = 'Orchestrator: ' + d.project.orch_model;
+    bOrch.style.display = '';
+  }
+  if (d.project?.worker_model) {
+    const mi = modelInfo(d.project.worker_model);
+    bWorker.textContent = '⚙ ' + (mi ? mi.label : d.project.worker_model);
+    bWorker.className = 'model-badge ' + (mi ? mi.type : 'local');
+    bWorker.title = 'Worker: ' + d.project.worker_model;
+    bWorker.style.display = '';
+  }
 
   // Header — elapsed
   document.getElementById('elapsed').textContent = fmt(d.elapsed_s || 0);
