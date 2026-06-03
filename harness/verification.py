@@ -260,6 +260,15 @@ def _is_bare_html_task(task, project_dir: Path) -> bool:
     )
 
 
+def run_playwright_project_check(project_dir: Path) -> tuple[bool, str]:
+    """Public entry point for a project-level Playwright check.
+
+    Called from main.py after all tasks complete for phaser/vanilla projects
+    where task verification is 'none' and no per-task check fires.
+    """
+    return _run_playwright_check(project_dir)
+
+
 def _run_playwright_check(project_dir: Path) -> tuple[bool, str]:
     """Headless Chromium check for bare HTML/Phaser projects.
 

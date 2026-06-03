@@ -19,6 +19,7 @@ from project import ProjectInstance
 from scheduler import Scheduler
 from final_review import run_final_review, parse_review_issues
 from handoff import write_handoff, try_claude_stamp
+from verification import detect_ecosystem, run_playwright_project_check
 
 console = Console()
 
@@ -97,6 +98,13 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     Scheduler(instance, orch).run()
 
     console.print(f"\n[bold green]Project output written to: {output_dir}[/bold green]")
+
+    # Project-level Playwright check for phaser/vanilla — runs regardless of
+    # task verification settings (which are always "none" for these stacks).
+    ecosystem = detect_ecosystem(output_dir)
+    if ecosystem in ("phaser", "unknown") and (output_dir / "index.html").exists():
+        passed_pw, log_pw = run_playwright_project_check(output_dir)
+        sw.on_verification_result("project", "playwright", ecosystem, passed_pw, log_pw)
 
     if not manual:
         _MAX_HEAL = 2
