@@ -312,13 +312,16 @@ Every project writes to `harness/projects/<slug>/`:
 
 ## What's Left To Build
 
-### P1 — Completed this session
+### P1 — Completed
 
 | Item | Status |
 |---|---|
 | **Database migrations** — Alembic for FastAPI (`alembic upgrade head` at startup) | ✅ Done |
 | **Audio generation** — Coqui TTS + silent placeholder fallback | ✅ Done |
 | **Experience tracker** — local JSONL fix-outcome log fed back into retries | ✅ Done |
+| **Orchestrator JSON truncation fix** — `_fix_json_strings()` sanitizer + full-stack forced to FORMAT 5 + Rule 7 prohibits code-in-objectives | ✅ Done |
+| **FORMAT 5 sub-project bug fix** — `_handle_oversize()` `manual`/`auto_accept` scope bug fixed | ✅ Done |
+| **OpenClaw integration** — j-claw skill installed at `~/.openclaw/workspace/skills/j-claw/` | ✅ Done |
 
 ### P2 — Planned
 
@@ -347,6 +350,7 @@ Every project writes to `harness/projects/<slug>/`:
 - **Final code review requires `ANTHROPIC_API_KEY`** — without it, `REVIEW.md` and `HANDOFF.md` won't contain a real verdict.
 - **claude CLI stamp is optional** — OpenClaw verdict in the dashboard only appears if `claude` is installed and on PATH.
 - **SD/Coqui/Ollama must be running** — the pipeline degrades gracefully (SVG/silent/OpenRouter fallbacks) but local services need to be up for full capability.
+- **Full-stack projects split into sub-projects** — when the spec is "React + FastAPI", the orchestrator emits FORMAT 5 and the harness runs a `backend_api/` sub-project then a `frontend_react/` sub-project in sequence. Both land under `harness/projects/<slug>/`.
 
 ---
 

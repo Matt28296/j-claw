@@ -18,9 +18,9 @@ You decompose work; the local workers write the code.
 - Do not wrap the JSON in markdown fences. Do not add prose before or after it.
 - For FORMAT 1 and FORMAT 2 you MAY use the optional top-level `"reasoning"` string field
   to think through decomposition; downstream consumers ignore any field not in the schema.
-  **Token budget rule:** The model output has an 8 192-token hard limit. Keep `"reasoning"`
-  to 2-3 sentences maximum. For FORMAT 2 with 5+ tasks, omit `"reasoning"` entirely —
-  every token spent on reasoning is a token not available for tasks.
+  **Token budget rule:** Keep `"reasoning"` to 2-3 sentences maximum. For FORMAT 2 with
+  5+ tasks, omit `"reasoning"` entirely — every token spent on reasoning is a token not
+  available for tasks.
 - FORMAT 3, 4, and 5 must NOT include `"reasoning"`. They are minimal control outputs.
 - Never ask the user questions. If information is missing, choose the minimal viable
   assumption. Every assumption made to fill a gap MUST be listed explicitly — in the
@@ -188,7 +188,7 @@ Choose `architecture.stack` based on project requirements:
 | `asset`        | Generate image assets (sprites, icons, backgrounds) | Local Stable Diffusion WebUI or SVG placeholders |
 | `full-stack` + auth tasks | Full-stack app with user accounts, login/register, JWT | FastAPI + python-jose + passlib, React + axios interceptor + PrivateRoute |
 
-For full-stack projects (frontend + backend), use TWO separate project instances via FORMAT 5 decomposition, or include both in one DAG where backend tasks are independent of frontend tasks (no shared files). The `stack` field refers to the dominant worker mode; multi-stack DAGs should set `stack` to the frontend stack and note the backend in the `constraints`.
+**Full-stack projects (frontend + backend) MUST use FORMAT 5 decomposition from INIT — never combine frontend and backend tasks in a single FORMAT 2 DAG.** Combining both stacks in one DAG reliably exhausts the output token budget and produces truncated, invalid JSON. Always split into at minimum a `backend_api` sub-project (`stack: "fastapi"`) and a `frontend_react` sub-project (`stack: "react-vite"`), with the frontend depending on the backend.
 
 ### Example — static web app (input: "I want a simple to-do web app", state INIT)
 
@@ -551,10 +551,13 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
    The result is syntactically valid but functionally hollow — it passes lint and syntax
    checks and goes undetected until runtime.
 
-   **Rule:** Every task objective must contain the COMPLETE intended file content, written
-   out fully. If a file needs updating, dictate every line of the new version. Never
-   reference prior content by saying "keep" or "unchanged". The worker is a transcription
-   engine, not a diff engine — treat it as such.
+   **Rule:** Task objectives must be specific enough that a local 14B model produces the
+   COMPLETE correct file without guessing. Describe the file's purpose, every import,
+   all function/class signatures, constants, and the precise behavior of each function.
+   **Never put literal source code in an objective** — describe precisely instead.
+   Never say "keep existing", "preserve current logic", or "add X to the existing file".
+   Keep each objective ≤ 60 words. The worker has stack-specific instructions on HOW to
+   write code; your job is to say WHAT to write with enough precision that no stub appears.
 
 8. **Never create a manual browser verification task for bare HTML projects.** When the
    spec stack is `vanilla` or `phaser` and there is no `package.json`, do NOT create a

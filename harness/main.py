@@ -124,7 +124,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     sw.on_agent_done()
 
     if spec.get("oversize"):
-        _handle_oversize(spec, output_dir, depth, orch)
+        _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual)
         return
 
     # Spec review loop
@@ -142,7 +142,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
             "revision_feedback": feedback,
         })
         if spec.get("oversize"):
-            _handle_oversize(spec, output_dir, depth, orch)
+            _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual)
             return
 
     # ── SPEC_ACCEPTED ─────────────────────────────────────────────────────────
@@ -155,7 +155,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     sw.on_agent_done()
 
     if dag_response.get("oversize"):
-        _handle_oversize(dag_response, output_dir, depth, orch)
+        _handle_oversize(dag_response, output_dir, depth, auto_accept=auto_accept, manual=manual)
         return
 
     instance = ProjectInstance(output_dir)
@@ -227,7 +227,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
             sys.exit(1)
 
 
-def _handle_oversize(response: dict, base_dir: Path, depth: int, orch) -> None:
+def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bool = False, manual: bool = False) -> None:
     console.print(
         f"\n[bold yellow]Oversize project — decomposing into sub-projects.[/bold yellow]\n"
         f"  Reason: {response['reason']}"
@@ -241,7 +241,7 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, orch) -> None:
         sp_dir = base_dir / name
         sp_dir.mkdir(parents=True, exist_ok=True)
         console.rule(f"[cyan]Sub-project: {name}[/cyan]")
-        run_project(sp["goal"], sp_dir, depth + 1, manual=manual)
+        run_project(sp["goal"], sp_dir, depth + 1, manual=manual, auto_accept=auto_accept)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

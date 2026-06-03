@@ -89,6 +89,7 @@ class Orchestrator:
                     )
                 text = response.content[0].text.strip()
                 text = _strip_fences(text)
+                text = _fix_json_strings(text)
                 parsed = json.loads(text)
                 validate_response(state, parsed)
                 return parsed
@@ -140,6 +141,7 @@ class OpenRouterOrchestrator:
                 )
                 text = response.choices[0].message.content.strip()
                 text = _strip_fences(text)
+                text = _fix_json_strings(text)
                 parsed = json.loads(text)
                 validate_response(state, parsed)
                 return parsed
@@ -182,6 +184,32 @@ def _sanitize(text: str) -> str:
     import re
     # Keep only tab (\x09), newline (\x0a), carriage return (\x0d), and printable chars
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+
+
+def _fix_json_strings(text: str) -> str:
+    """Replace literal newlines/tabs inside JSON string values that break json.loads."""
+    result = []
+    in_string = False
+    escape_next = False
+    for ch in text:
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+        elif ch == '\\' and in_string:
+            result.append(ch)
+            escape_next = True
+        elif ch == '"':
+            result.append(ch)
+            in_string = not in_string
+        elif in_string and ch == '\n':
+            result.append('\\n')
+        elif in_string and ch == '\r':
+            pass  # strip bare CR
+        elif in_string and ch == '\t':
+            result.append('\\t')
+        else:
+            result.append(ch)
+    return ''.join(result)
 
 
 def _strip_fences(text: str) -> str:
