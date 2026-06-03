@@ -78,6 +78,12 @@ Full-stack wiring (use when memory_context.related_files contains wiring.json):
   the baseURL in src/api/axiosInstance.js instead of hardcoding http://localhost:8000.
 - Example: import wiring from '../../wiring.json'; const API = axios.create({ baseURL: wiring.api_base_url })
   OR use import.meta.env.VITE_API_URL with a fallback: axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' })
+Stripe frontend integration (include when project requires payments/checkout):
+- Load Stripe.js via script tag in index.html: <script src="https://js.stripe.com/v3/"></script>
+- In checkout component: const stripe = window.Stripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY)
+- POST to /payments/create-checkout-session with cart data → get {url} → stripe.redirectToCheckout is deprecated; use window.location.href = url (Stripe Checkout redirects)
+- Add VITE_STRIPE_PUBLISHABLE_KEY to .env.example (note: VITE_ prefix is required for Vite to expose env vars to frontend)
+- Add a <SuccessPage /> component for success_url and a <CancelPage /> for cancel_url
 """,
 
     "fastapi": """\
@@ -156,6 +162,14 @@ Full-stack wiring (include when this is the backend half of a full-stack FORMAT 
 - Write a wiring.json file at the project root alongside the code files:
   {"api_base_url": "http://localhost:8000", "cors_origin": "http://localhost:5173"}
 - This file is read by the frontend sub-project to configure its API base URL automatically.
+Stripe payment integration (include when project requires payments/checkout/subscriptions):
+- Add stripe to requirements.txt: stripe>=7.0.0
+- Create payments.py: import stripe; stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+  - POST /payments/create-checkout-session: create stripe.checkout.Session with line_items, mode='payment', success_url, cancel_url
+  - POST /payments/webhook: verify stripe.Webhook.construct_event(payload, sig_header, os.getenv("STRIPE_WEBHOOK_SECRET")); handle checkout.session.completed
+  - Use async def with request: Request to read raw body for webhook
+- Add STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET to .env.example
+- Never hardcode keys. Return {"url": session.url} from checkout endpoint.
 """,
 
     "phaser": """\
@@ -204,6 +218,16 @@ ABI auto-import (eliminates the manual placeholder step — REQUIRED):
 - NEVER output the string "DEPLOYED_CONTRACT_ADDRESS" as a placeholder in any file.
 - Add frontend/src/contracts/ to .gitignore — it is a build artifact regenerated on each deploy.
 - Hardhat networks config: always include hardhat: {} (in-memory) and localhost: { url: "http://127.0.0.1:8545" } so tests run on the in-memory network and deploy targets localhost.
+IPFS/Filecoin deployment (include when project requires decentralized hosting):
+- In scripts/deploy.js, after deploying the contract, also write frontend/public/deployment.json:
+  { "chainId": network.config.chainId, "address": contract.target, "network": network.name }
+- Add a scripts/pin-to-ipfs.js that uses the Pinata API (pinata.cloud free tier) to upload the frontend/dist/ directory:
+  const axios = require('axios'); const FormData = require('form-data'); const fs = require('fs');
+  async function pinDirectory(dirPath) { /* POST to https://api.pinata.cloud/pinning/pinFileToIPFS */ }
+  - The script reads PINATA_API_KEY and PINATA_SECRET from env
+  - Outputs the IPFS CID and gateway URL: https://gateway.pinata.cloud/ipfs/<CID>
+- Add PINATA_API_KEY and PINATA_SECRET to .env.example
+- In README.md, add: "Deploy to IPFS: npm install && npx hardhat run scripts/deploy.js && cd frontend && npm run build && node ../scripts/pin-to-ipfs.js"
 """,
 
     "react-native": """\
@@ -422,6 +446,52 @@ CHANGELOG.md:
 - Header: # Changelog and a note "All notable changes to this project will be documented in this file."
 - First entry: ## [Unreleased] with ### Added subsection listing the initial features.
 - Follow Keep a Changelog format: ## [version] - YYYY-MM-DD, subsections: Added / Changed / Deprecated / Removed / Fixed / Security.
+""",
+
+    "swift": """\
+iOS SwiftUI app generation rules:
+Project structure:
+- ContentView.swift: root @main App struct + primary SwiftUI View hierarchy
+- Models/: Swift structs conforming to Codable, Identifiable where needed
+- Views/: individual SwiftUI View structs — one per screen
+- ViewModels/: @ObservableObject classes with @Published properties (MVVM)
+- Services/: data layer — URLSession calls, UserDefaults, CoreData if needed
+- App.swift: @main entry point with WindowGroup/NavigationStack
+
+SwiftUI rules (follow strictly):
+- Use @State for local, @StateObject for owned view models, @EnvironmentObject for shared state
+- NavigationStack + .navigationDestination(for:) for navigation (iOS 16+, not NavigationView)
+- List + ForEach + .onDelete for CRUD lists
+- Async/await for network calls — async throws functions, Task {} in .onAppear
+- Error handling: Result<T, Error> or try/catch with @State var showError: Bool
+- Persistence: UserDefaults for simple KV, SwiftData/CoreData for structured data
+
+Verification note: verification is always "none" — Xcode cannot run headless in this pipeline.
+Include a README.md with: File → New → Project → select the right target → drag all .swift files in → run on simulator.
+""",
+
+    "kotlin": """\
+Android Jetpack Compose app generation rules:
+Project structure:
+- app/src/main/java/<package>/MainActivity.kt: @AndroidEntryPoint Activity with setContent { AppTheme { NavHost } }
+- app/src/main/java/<package>/ui/screens/: Composable screen functions — one per screen
+- app/src/main/java/<package>/ui/components/: reusable @Composable functions
+- app/src/main/java/<package>/viewmodel/: ViewModel subclasses with StateFlow<UiState>
+- app/src/main/java/<package>/data/: Repository pattern — Room DAO + Retrofit/OkHttp
+- app/src/main/res/: standard Android resources directory
+- app/build.gradle.kts: dependency declarations
+- build.gradle.kts (root): project-level build config
+
+Jetpack Compose rules (follow strictly):
+- Use rememberSaveable for state that survives recomposition, viewModel() for ViewModel injection
+- Navigation: NavController + NavHost + composable("route") — pass by id, not object
+- State: sealed class UiState, ViewModel exposes StateFlow<UiState>, collect with collectAsStateWithLifecycle()
+- Side effects: LaunchedEffect(key) for coroutines, DisposableEffect for cleanup
+- Lists: LazyColumn + items(list) { item -> } — never RecyclerView in Compose
+- Persistence: Room database with @Entity, @Dao, @Database; inject via Hilt (@HiltViewModel)
+
+Verification note: verification is always "none" — Android build cannot run headless in this pipeline.
+Include a README.md with Android Studio setup instructions and minimum SDK version (API 26 / Android 8.0).
 """,
 
     "auth": """\

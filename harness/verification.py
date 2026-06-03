@@ -77,6 +77,12 @@ _COMMANDS: dict[str, dict[str, list[str] | None]] = {
     "phaser": {
         "lint": None, "unit_test": None, "build": None, "smoke": None,
     },
+    "swift": {
+        "lint": None, "unit_test": None, "build": None, "smoke": None,
+    },
+    "kotlin": {
+        "lint": None, "unit_test": None, "build": None, "smoke": None,
+    },
     "unknown": {
         "lint": None, "unit_test": None, "build": None, "smoke": None,
     },

@@ -47,6 +47,28 @@ def write_handoff(output_dir: Path, spec: dict, passed: bool, heal_cycles: int) 
                 review_verdict = line.strip()
                 break
 
+    # Detect contract deployment info from deployment.json (web3 projects)
+    deployment_note = ""
+    for candidate in [
+        output_dir / "frontend" / "public" / "deployment.json",
+        output_dir / "deployment.json",
+    ]:
+        if candidate.exists():
+            try:
+                dep = json.loads(candidate.read_text(encoding="utf-8"))
+                network = dep.get("network", "unknown network")
+                address = dep.get("address", "")
+                chain_id = dep.get("chainId", "")
+                if address:
+                    chain_str = f" (chainId {chain_id})" if chain_id else ""
+                    deployment_note = (
+                        f"\n## Contract Deployment\n"
+                        f"Contract deployed on **{network}**{chain_str}: `{address}`\n"
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+            break
+
     content = f"""# J-Claw Handoff Report
 
 **Status:** {status_line}
@@ -57,7 +79,7 @@ def write_handoff(output_dir: Path, spec: dict, passed: bool, heal_cycles: int) 
 
 ## Final Review Verdict
 {review_verdict}
-
+{deployment_note}
 ## Test Results
 {chr(10).join(test_lines) if test_lines else "No automated tests recorded."}
 
