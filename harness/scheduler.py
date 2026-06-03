@@ -1,5 +1,7 @@
 from __future__ import annotations
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from rich.console import Console
 
 from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, MAX_PARALLEL_WORKERS, MAX_TASKS
@@ -132,11 +134,17 @@ class Scheduler:
             return
 
         try:
-            result = execute_task(task, self.instance.spec, dep_files)
+            context = _build_context(task, self.instance.output_dir)
+            result = execute_task(task, self.instance.spec, dep_files, context)
             task.output_files = {f["path"]: f["content"] for f in result["files"]}
             self.instance.write_task_files(task)
             for path in task.output_files:
                 sw.on_file_written(path, task.id)
+
+            # Apply memory patch if worker produced one
+            patch_json = task.output_files.get("memory_patch.json")
+            if patch_json:
+                _apply_memory_patch(patch_json, self.instance.output_dir, task.id)
 
             stub_hit = _scan_for_stubs(task.output_files)
             if stub_hit:
@@ -277,6 +285,8 @@ class Scheduler:
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
+    # ── helpers ───────────────────────────────────────────────────────────────
+
     def _ready_tasks(self) -> list[Task]:
         """Tasks whose dependencies are all done/deprecated and which are still pending."""
         ready = []
@@ -291,3 +301,38 @@ class Scheduler:
             if deps_resolved:
                 ready.append(task)
         return ready
+
+
+# ── module-level helpers ──────────────────────────────────────────────────────
+
+def _build_context(task, output_dir: Path) -> dict | None:
+    """Build structured context for a task. Returns None if project_memory/ not initialized."""
+    try:
+        from context_builder import ContextBuilder
+        return ContextBuilder().build(task, output_dir)
+    except Exception:
+        return None
+
+
+def _apply_memory_patch(patch_json: str, output_dir: Path, task_id: str) -> None:
+    """Validate and apply a memory_patch.json produced by a worker."""
+    try:
+        from memory_validator import MemoryValidator
+        from project_memory import ProjectMemory
+        patch = json.loads(patch_json)
+        pm = ProjectMemory(output_dir)
+        if not pm.exists():
+            return
+        result = MemoryValidator().validate(patch, pm.root)
+        if result.ok:
+            pm.apply_patch(patch)
+            console.print(
+                f"  [dim]Memory patch applied ({result.outcome})"
+                f"{' — ' + result.reason if result.reason else ''}[/dim]"
+            )
+        else:
+            console.print(
+                f"  [yellow]Memory patch from {task_id} rejected: {result.reason}[/yellow]"
+            )
+    except Exception as exc:
+        console.print(f"  [yellow]Memory patch error ({task_id}): {exc}[/yellow]")

@@ -1,10 +1,11 @@
-# J-Claw — Autonomous Development Agency
+# J-Claw — Autonomous Development Agency (v2)
 
-J-Claw is a fully autonomous local-first software factory. Describe what you want in plain English — a game, app, website, or film — and the pipeline interprets the creative intent, plans the full build, writes all the code and media, verifies every output, self-heals any issues, and delivers a production-ready artifact with no human in the loop.
+J-Claw is a fully autonomous local-first AI software factory. Describe what you want in plain English — a game, app, website, or film — and the pipeline interprets the creative intent, designs the architecture, plans the full build, writes all the code and media, verifies every output, self-heals any issues, and delivers a production-ready artifact with no human in the loop.
 
-Three layers of intelligence:
-- **Creative Director** (Claude Opus) — interprets intent, determines output type, produces a creative brief
-- **Orchestrator** (Claude Sonnet) — translates the brief into a task DAG, drives the pipeline, self-heals
+Four layers of intelligence:
+- **Creative Director** (Claude Opus) — interprets intent, determines output type, produces a creative brief *(WHAT)*
+- **Technical Architect** (Claude Sonnet) — chooses stack, file structure, ADRs, seeds persistent project memory *(HOW)*
+- **Orchestrator** (Claude Sonnet) — translates spec into a task DAG, drives the pipeline, self-heals
 - **Worker** (local Ollama model) — writes all code and runs all generation tasks on your hardware
 
 ---
@@ -15,21 +16,34 @@ Three layers of intelligence:
 "Build a game like Celeste" / "Make a 30-second explainer film about AI"
             │
             ▼  CREATIVE DIRECTOR (Claude Opus)
-    Interprets intent → determines output type (game / film / app / website)
-    Produces CREATIVE_BRIEF: visual style, scenes/flows, asset requirements
+    Interprets intent → output_type, features, constraints, desired_experience
+    NO stack choice — that belongs to the architect
+            │
+            ▼  TECHNICAL ARCHITECT (Claude Sonnet)
+    Reads CREATIVE_BRIEF → chooses confirmed_stack, file_structure
+    Creates ADRs (Architecture Decision Records) documenting every major call
+    Seeds project_memory/ with architecture.md, coding_standards.md,
+    api_contracts.md, known_issues.md, decision_log.jsonl, ADR files
             │
             ▼  INIT (Claude Sonnet)
-    Reads CREATIVE_BRIEF → generates project spec (FORMAT 1)
+    Reads CREATIVE_BRIEF + TECH_SPEC → generates project spec (FORMAT 1)
             │  (auto-accepted with --yes, or you review and revise)
             ▼  SPEC_ACCEPTED
     Generates task DAG (FORMAT 2) — up to 75 tasks
             │
             ▼  Execute tasks in topological order (up to 4 parallel workers)
-            │   ├─ Code tasks  → Worker (Ollama) writes files
-            │   ├─ Asset tasks → Stable Diffusion WebUI (SD-enriched prompts from brief)
-            │   ├─ Audio tasks → Coqui TTS (tone/speaker from brief)
-            │   ├─ Video tasks → video_worker (ffmpeg pipeline)  [Phase 2]
-            │   └─ On failure  → EXECUTION_ERROR (Haiku) → retry
+            │   ├─ Per task: CONTEXT BUILDER selects relevant ~4K tokens from memory
+            │   ├─ Code tasks      → Worker (Ollama) writes files + optional memory_patch.json
+            │   ├─ DevOps tasks    → Worker writes Dockerfile, docker-compose, nginx, CI/CD
+            │   ├─ Docs tasks      → Worker writes README, JSDoc, docstrings, CHANGELOG
+            │   ├─ Asset tasks     → Stable Diffusion WebUI (SD-enriched prompts from brief)
+            │   ├─ Audio tasks     → Coqui TTS (tone/speaker from brief)
+            │   ├─ Video tasks     → video_worker (ffmpeg pipeline)
+            │   └─ On failure      → EXECUTION_ERROR (Haiku) → retry
+            │
+            ▼  Memory patch (if worker produced memory_patch.json)
+    MEMORY VALIDATOR checks version + operation rules → PASS/WARN/REJECT
+    PASS/WARN → ProjectMemory.apply_patch() → increment version
             │
             ▼  Final Review (Claude Sonnet)
     Reads all outputs — code stubs, broken imports, media quality
@@ -48,9 +62,7 @@ Three layers of intelligence:
 
 ---
 
-## Supported Stacks
-
-### Current (10)
+## Supported Stacks (15)
 
 | Stack | Use case | Verification |
 |---|---|---|
@@ -64,23 +76,21 @@ Three layers of intelligence:
 | `socket-io` | Node.js + Socket.io real-time multiplayer | `npm install` |
 | `three-js` | Three.js 3D browser scenes (CDN, WebGL) | Playwright canvas check |
 | `electron` | Electron desktop apps (contextIsolation + contextBridge) | `npm install` |
-
-### Coming (Phase 2–4)
-
-| Stack | Use case |
-|---|---|
-| `film` | Narrative film / animated explainer — ffmpeg + SD frames + Coqui narration |
-| `video-editor` | Browser-based clip editor — ffmpeg WASM + Canvas API |
-| `tauri` | Rust + WebView desktop apps — lighter than Electron |
-| `godot` | GDScript games — Godot headless export |
-| `websocket-sse` | Real-time dashboards and data streams |
+| `film` | Narrative film / animated explainer — ffmpeg + SD frames + Coqui narration | ffprobe |
+| `video-editor` | Browser-based clip editor — ffmpeg WASM + Canvas API | build |
+| `tauri` | Rust + WebView desktop apps — lighter than Electron | build |
+| `godot` | GDScript games — Godot headless export | none |
+| `websocket-sse` | Real-time dashboards and data streams | `npm install` |
 
 All stacks also support:
 - **PWA output** (vanilla + react-vite): `manifest.json` + `sw.js` — every generated app is installable on mobile/desktop
 - **JWT auth** (full-stack): `auth.py`, User model, `/auth/register` + `/auth/login`, React `LoginForm`, `RegisterForm`, `PrivateRoute`
+- **DevOps tasks**: Dockerfile (multi-stage, non-root), `docker-compose.yml`, `nginx.conf`, `.github/workflows/ci.yml`, `.env.example`
+- **Documentation tasks**: `README.md`, JSDoc comments, Google-style Python docstrings, `CHANGELOG.md`
 - **Asset generation**: Stable Diffusion WebUI with Creative Director-enriched prompts (SVG fallback if SD not running)
 - **Audio generation**: Coqui TTS with tone/speaker from Creative Brief (silent WAV fallback)
-- **E2E tests**: Playwright test files auto-generated alongside every project *(Phase 4)*
+- **Security scanning**: `bandit` (Python) / `npm audit` (Node) — `verification: "security"` task type
+- **Lighthouse**: performance + accessibility checks for web projects — `verification: "lighthouse"` task type
 
 ---
 
@@ -89,23 +99,28 @@ All stacks also support:
 ```
 j-claw/
 ├── orchestrator.txt              Orchestrator system prompt (FORMATs 1–5)
-├── creative_director.txt         Creative Director system prompt (Claude Opus)  ← Phase 1
+├── creative_director.txt         Creative Director system prompt (Claude Opus)
+├── technical_architect.txt       Technical Architect system prompt (Claude Sonnet)
 ├── run.bat                       Entry point (Windows)
 ├── bot.bat                       Telegram bot entry point
-├── dashboard.py                  Mission Control dashboard server (port 8765)
+├── dashboard.py                  Mission Control dashboard server (port 8765, auto-starts)
 ├── openclaw-skill/
 │   └── SKILL.md                  OpenClaw skill — invoke j-claw from Telegram/WhatsApp
 ├── dashboard/
 │   └── index.html                Live pipeline dashboard (dark theme, auto-polling)
 └── harness/
-    ├── main.py                   CLI + pipeline loop + creative director pre-pass
-    ├── creative_director.py      Creative Director — intent → CREATIVE_BRIEF  ← Phase 1
+    ├── main.py                   CLI + pipeline loop (Creative Director → Architect → INIT)
+    ├── creative_director.py      Creative Director — intent → CREATIVE_BRIEF (WHAT)
+    ├── technical_architect.py    Technical Architect — brief → TECH_SPEC + project_memory/ (HOW)
+    ├── context_builder.py        Deterministic context selection (~4K tokens per task, no LLM)
+    ├── project_memory.py         ProjectMemory + RuntimeMemory — persistent + ephemeral state
+    ├── memory_validator.py       Patch validator — operation rules, version check, PASS/WARN/REJECT
     ├── orchestrator.py           Orchestrator (Claude/OpenRouter) + prompt caching
-    ├── scheduler.py              DAG scheduler — topological exec, media task routing
-    ├── worker.py                 Sends tasks to Ollama; stack-specific prompt sets
-    ├── video_worker.py           ffmpeg-based video/film pipeline  ← Phase 2
-    ├── music_worker.py           Music generation (placeholder → MusicGen)  ← Phase 3
-    ├── verification.py           Ecosystem detection + ffprobe/frame checks
+    ├── scheduler.py              DAG scheduler — context building, memory patch apply, task routing
+    ├── worker.py                 Sends tasks to Ollama; 17 stack-specific prompt sets
+    ├── video_worker.py           ffmpeg-based video/film pipeline
+    ├── music_worker.py           Music generation (placeholder → MusicGen)
+    ├── verification.py           Ecosystem detection + ffprobe/frame/security/lighthouse checks
     ├── asset_worker.py           SD WebUI asset generation + SVG fallback
     ├── audio_worker.py           Coqui TTS audio generation + silent fallback
     ├── experience_log.py         EXECUTION_ERROR outcome tracker (JSONL)
@@ -114,11 +129,29 @@ j-claw/
     ├── final_review.py           Claude API code review — stubs, imports, media quality
     ├── handoff.py                HANDOFF.md writer + deployment hook
     ├── state_writer.py           Singleton event bus → mission_control.json
-    ├── validator.py              JSON schema + DAG integrity + media task types
+    ├── validator.py              JSON schema + DAG integrity + task/verification type enums
     ├── project.py                ProjectInstance, Task, binary_outputs
     ├── config.py                 .env loading — all models, paths, limits
     ├── .env.example              Template — copy to .env and fill in keys
     └── projects/                 Generated project output (gitignored)
+        └── <project-slug>/
+            ├── creative_brief.json    CREATIVE_BRIEF from Creative Director
+            ├── tech_spec.json         TECH_SPEC from Technical Architect
+            ├── project_memory/        Long-lived architecture docs
+            │   ├── _meta.json             {version, last_modified, last_patch_by}
+            │   ├── architecture.md        Architecture notes from TECH_SPEC
+            │   ├── coding_standards.md    Coding standards for this project
+            │   ├── api_contracts.md       API endpoint registry (patched by workers)
+            │   ├── decision_log.jsonl     Operational decisions (append-only)
+            │   ├── known_issues.md        Known risks and workarounds
+            │   ├── project_summary.md     Project description + goals
+            │   └── architecture_decisions/
+            │       ├── ADR-001-*.md       Stack choice ADR (always created)
+            │       └── ADR-NNN-*.md       Additional architectural decisions
+            └── runtime_memory/        Ephemeral execution state (cleared on completion)
+                ├── current_state.json     {phase, completed_tasks, failed_tasks}
+                ├── task_registry.json     Task status map
+                └── active_workers.json    Currently running workers
 ```
 
 ---
@@ -177,10 +210,13 @@ copy harness\.env.example harness\.env
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Required for auto orchestrator + final review |
-| `OPENROUTER_API_KEY` | — | Alternative — set `ORCHESTRATOR_PROVIDER=openrouter` |
-| `WORKER_MODEL` | `qwen2.5-coder:7b` | Ollama model for code writing |
-| `ORCHESTRATOR_MODEL` | `claude-sonnet-4-6` | Claude model for planning and review |
+| `ANTHROPIC_API_KEY` | — | Required for Creative Director, Technical Architect, Orchestrator, Final Review |
+| `OPENROUTER_API_KEY` | — | Alternative orchestrator — set `ORCHESTRATOR_PROVIDER=openrouter` |
+| `WORKER_MODEL` | `qwen2.5-coder:7b` | Ollama model for code writing (never Claude) |
+| `ORCHESTRATOR_MODEL` | `claude-sonnet-4-6` | Claude model for architect, planning, and review |
+| `TECHNICAL_ARCHITECT_ENABLED` | `true` | Set `false` to skip architect pass (legacy mode) |
+| `DASHBOARD_AUTOOPEN` | `true` | Auto-open browser to dashboard when pipeline starts |
+| `DASHBOARD_PORT` | `8765` | Dashboard server port |
 | `WORKER_FALLBACKS` | openrouter free models | Fallback chain if Ollama is down |
 | `MAX_PARALLEL_WORKERS` | `2` | Concurrent Ollama workers (independent DAG branches) |
 | `ORCHESTRATOR_MAX_TOKENS` | `16384` | Raise to `32768` for very large full-stack DAGs |
@@ -361,54 +397,31 @@ Every project writes to `harness/projects/<slug>/`:
 | Item | Status |
 |---|---|
 | Core pipeline: spec → DAG → code → verify → review → self-heal | ✅ |
-| 10 stacks: vanilla, react-vite, fastapi, phaser, full-stack, web3, react-native, socket-io, three-js, electron | ✅ |
+| 15 stacks (including film, tauri, godot, websocket-sse) | ✅ |
 | PWA output, JWT auth, Alembic migrations | ✅ |
 | SD WebUI asset generation + Coqui TTS audio | ✅ |
 | Experience tracker (JSONL fix-outcome log) | ✅ |
 | Orchestrator JSON truncation fix + FORMAT 5 bug fix | ✅ |
 | OpenClaw skill deployed + Telegram bot paired | ✅ |
+| Creative Director (Claude Opus) — WHAT layer | ✅ |
+| Technical Architect (Claude Sonnet) — HOW layer + ADRs | ✅ |
+| Persistent project memory (project_memory/ + runtime_memory/) | ✅ |
+| Context Builder — deterministic ~4K token selection per task | ✅ |
+| Memory Patch System — operation-based, optimistic concurrency | ✅ |
+| Memory Validator — PASS/WARN/REJECT rules, <10ms, no LLM | ✅ |
+| Architecture Decision Records (ADR-001-*.md) | ✅ |
+| DevOps specialist agent (Dockerfile, docker-compose, nginx, CI/CD) | ✅ |
+| Documentation specialist agent (README, JSDoc, docstrings, CHANGELOG) | ✅ |
+| Security verification (bandit / npm audit) | ✅ (wired, `verification: "security"`) |
+| Lighthouse verification (performance + accessibility) | ✅ (wired, `verification: "lighthouse"`) |
+| Dashboard auto-start + browser open on pipeline start | ✅ |
 
-### Phase 1 — Creative Director + API optimization
-
-| Item | What it does |
-|---|---|
-| `creative_director.py` + `creative_director.txt` | Claude Opus pre-pass: interprets intent → CREATIVE_BRIEF JSON |
-| `orchestrator.py` prompt caching | Cache 550-line system prompt across calls — ~80% cost reduction |
-| Haiku for EXECUTION_ERROR calls | Downgrade simple fix-routing from Sonnet → Haiku |
-| Merge PROJECT_REVIEW into final_review | Eliminate one redundant API call per project |
-| `config.py` new vars | `CREATIVE_DIRECTOR_MODEL`, `EXECUTION_ERROR_MODEL`, `MAX_TASKS=75`, `MAX_PARALLEL_WORKERS=4` |
-
-### Phase 2 — Video/Movie Pipeline
-
-| Item | What it does |
-|---|---|
-| `video_worker.py` | ffmpeg-based video generation — LLM writes the ffmpeg command, harness executes it |
-| `verification.py` video checks | `ffprobe`, `frame_integrity`, `sync_check` |
-| `project.py` binary outputs | `binary_outputs` field on Task for `.mp4`/`.wav`/`.mov` files |
-| `validator.py` new task types | `video`, `editing`, `composition`, `vfx` |
-| `orchestrator.txt` film stacks | `film`, `video-editor` stacks + video task types |
-
-### Phase 3 — Enhanced Media
-
-| Item | What it does |
-|---|---|
-| `asset_worker.py` | Use Creative Brief visual identity to enrich SD prompts |
-| `audio_worker.py` | Speaker/tone/duration control from Creative Brief |
-| `music_worker.py` | Music generation placeholder (→ MusicGen/Audiocraft) |
-
-### Phase 4 — New Code Stacks
-
-| Item | What it does |
-|---|---|
-| Tauri | Rust + WebView desktop apps |
-| Godot | GDScript + headless export |
-| WebSocket/SSE | Real-time dashboards |
-| E2E test generation | Playwright tests auto-generated alongside every project |
-
-### Phase 5 — Long term
+### Next
 
 | Item |
 |---|
+| `verification.py` — implement security + lighthouse check logic |
+| E2E test generation — Playwright tests auto-generated alongside every project |
 | IPFS / on-chain deployment for Web3 projects |
 | Payment integration (Stripe/LemonSqueezy) |
 | Real native mobile (Swift/Kotlin) |
@@ -432,7 +445,13 @@ Every project writes to `harness/projects/<slug>/`:
 - `OpenRouterOrchestrator` — any OpenRouter model with cascading fallback on rate limit
 - `ManualOrchestrator` — writes JSON files, waits for human to fill in response (no API key needed)
 
-**Worker** (`worker.py`): Sends tasks to local Ollama with stack-specific prompt instructions. 10 stack prompts covering web, API, game, mobile, desktop, Web3, and asset generation. Detects truncated output, fixes literal `\n` sequences.
+**Technical Architect** (`technical_architect.py`): Runs once per project between the Creative Director and the Orchestrator INIT. Owns all technical decisions — stack, file structure, dependencies, coding standards. Writes ADR-001 (stack choice) and any additional ADRs. Seeds `project_memory/` with architecture docs that every downstream worker reads.
+
+**Context Builder** (`context_builder.py`): Deterministic Python service — no LLM. Runs before every worker task. Reads `project_memory/` and selects the most relevant ~4K tokens: always coding standards + current state; conditionally API contracts (code tasks), architecture head (devops tasks), project summary (docs tasks), recent decisions, matching known issues, and ADR index. Output is a structured JSON dict injected into the worker prompt.
+
+**Memory Patch System**: Workers can write a `memory_patch.json` alongside their code files. The `MemoryValidator` checks the patch against the current version (optimistic concurrency) and operation rules (duplicate check, schema validation, ID format). PASS/WARN → `ProjectMemory.apply_patch()` increments the version atomically. REJECT → logged and skipped.
+
+**Worker** (`worker.py`): Sends tasks to local Ollama with stack-specific prompt instructions. 17 stack prompts covering web, API, game, mobile, desktop, Web3, DevOps, documentation, and asset generation. Receives structured context from Context Builder. Detects truncated output, fixes literal `\n` sequences.
 
 **Scheduler** (`scheduler.py`): Topological DAG execution with parallel workers. Routes asset tasks to `asset_worker.py`, audio tasks to `audio_worker.py`, code tasks to `worker.py`. On failure: calls orchestrator in `EXECUTION_ERROR`, reads experience hints, retries up to `MAX_RETRIES_PER_TASK`.
 

@@ -40,13 +40,14 @@ class CreativeDirector:
 
         if "output_type" not in brief:
             raise ValueError("CREATIVE_BRIEF missing required field: output_type")
-        if "suggested_stack" not in brief:
-            raise ValueError("CREATIVE_BRIEF missing required field: suggested_stack")
+        if not isinstance(brief.get("features"), list) or not brief["features"]:
+            raise ValueError("CREATIVE_BRIEF missing required field: features (non-empty array)")
 
         console.print(
             f"[bold cyan]Creative Brief:[/bold cyan] "
             f"output_type=[green]{brief['output_type']}[/green]  "
-            f"suggested_stack=[green]{brief['suggested_stack']}[/green]"
+            f"scale=[green]{brief.get('scale', 'mvp')}[/green]  "
+            f"features=[green]{len(brief['features'])}[/green]"
         )
         return brief
 

@@ -12,7 +12,10 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 
-from config import PROJECTS_DIR, MAX_FORMAT5_DEPTH, ORCHESTRATOR_PROVIDER, ORCHESTRATOR_MODEL, ORCHESTRATOR_API_MODEL
+from config import (
+    PROJECTS_DIR, MAX_FORMAT5_DEPTH, ORCHESTRATOR_PROVIDER, ORCHESTRATOR_MODEL,
+    ORCHESTRATOR_API_MODEL, TECHNICAL_ARCHITECT_ENABLED, DASHBOARD_PORT, DASHBOARD_AUTOOPEN,
+)
 
 # Display name shown in dashboard active-agent box during orchestrator calls
 _ORCH_DISPLAY = ORCHESTRATOR_API_MODEL if ORCHESTRATOR_PROVIDER == "openrouter" else ORCHESTRATOR_MODEL
@@ -24,8 +27,28 @@ from final_review import run_final_review, parse_review_issues
 from handoff import write_handoff, try_claude_stamp, git_commit_project, deploy_project
 from verification import detect_ecosystem, run_playwright_project_check
 from creative_director import CreativeDirector
+from technical_architect import TechnicalArchitect
 
 console = Console()
+
+
+def _start_dashboard() -> None:
+    """Start dashboard.py in the background and optionally open the browser."""
+    import subprocess
+    repo_root = Path(__file__).parent.parent
+    try:
+        subprocess.Popen(
+            [sys.executable, "dashboard.py"],
+            cwd=str(repo_root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if DASHBOARD_AUTOOPEN:
+            import webbrowser, time as _t
+            _t.sleep(0.8)
+            webbrowser.open(f"http://localhost:{DASHBOARD_PORT}")
+    except Exception as exc:
+        console.print(f"  [yellow]Dashboard failed to start: {exc}[/yellow]")
 
 
 def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = False) -> None:
@@ -113,6 +136,8 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    _start_dashboard()
+
     if manual:
         orch = ManualOrchestrator()
     elif ORCHESTRATOR_PROVIDER == "openrouter":
@@ -122,7 +147,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
 
     sw.on_project_start(intent, str(output_dir))
 
-    # Creative Director pre-pass
+    # ── Creative Director pre-pass ────────────────────────────────────────────
     console.print("\n[bold]Creative Director interpreting intent...[/bold]")
     try:
         creative_brief = CreativeDirector().interpret(intent)
@@ -134,10 +159,30 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
         console.print(f"  [yellow]Creative Director skipped ({_cd_exc})[/yellow]")
         creative_brief = {}
 
+    # ── Technical Architect pass ──────────────────────────────────────────────
+    tech_spec: dict = {}
+    if TECHNICAL_ARCHITECT_ENABLED and creative_brief:
+        console.print("\n[bold]Technical Architect reviewing brief...[/bold]")
+        try:
+            tech_spec = TechnicalArchitect().review(creative_brief, intent, output_dir)
+            import json as _json_ta
+            (output_dir / "tech_spec.json").write_text(
+                _json_ta.dumps(tech_spec, indent=2), encoding="utf-8"
+            )
+        except Exception as _ta_exc:
+            console.print(f"  [yellow]Technical Architect skipped ({_ta_exc})[/yellow]")
+
     # ── INIT ──────────────────────────────────────────────────────────────────
     console.print("\n[bold]Generating project spec…[/bold]")
     sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "INIT")
-    spec = orch.call({"system_state": "INIT", "user_intent": intent, "creative_brief": creative_brief})
+    init_payload: dict = {
+        "system_state": "INIT",
+        "user_intent": intent,
+        "creative_brief": creative_brief,
+    }
+    if tech_spec:
+        init_payload["tech_spec"] = tech_spec
+    spec = orch.call(init_payload)
     sw.on_agent_done()
 
     if spec.get("oversize"):

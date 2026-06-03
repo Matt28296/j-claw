@@ -271,6 +271,75 @@ Stack: Node.js real-time dashboard (Express + WebSocket or SSE, no build step)
 - Do NOT use TypeScript, webpack, Vite, or any build tooling — pure Node.js + browser JS only.
 """,
 
+    "devops": """\
+Stack: DevOps / infrastructure (Dockerfile, Docker Compose, nginx, CI/CD, environment config)
+Generate production-ready infrastructure files for the project. Write every file completely.
+
+DOCKERFILE (multi-stage, non-root):
+- Stage 1 "builder": install all dependencies (npm install or pip install -r requirements.txt).
+- Stage 2 "production": copy only built artifacts + runtime deps; create non-root user with useradd -r and run as that user.
+- EXPOSE the application port. Set CMD or ENTRYPOINT to start the app.
+- For Node.js: use node:20-alpine base. For Python: use python:3.12-slim. For static sites: use nginx:1.25-alpine.
+
+DOCKER-COMPOSE (docker-compose.yml):
+- Define services: app (main), db (if PostgreSQL/MySQL needed), redis (if caching needed), nginx (if reverse proxy needed).
+- Use env_file: [".env"] for secrets. Never hardcode secrets in docker-compose.yml.
+- Persist data with named volumes for databases.
+- healthcheck on the app service: test: ["CMD", "curl", "-f", "http://localhost:<port>/health"], interval: 30s, timeout: 10s, retries: 3.
+
+NGINX (nginx.conf):
+- Reverse proxy to app on internal port.
+- gzip compression: gzip on; gzip_types text/plain text/css application/json application/javascript.
+- Cache static assets: location ~* \.(js|css|png|svg|ico)$ { expires 1y; add_header Cache-Control "public, immutable"; }
+- Security headers: X-Frame-Options DENY; X-Content-Type-Options nosniff; Referrer-Policy strict-origin-when-cross-origin.
+- Rate limiting: limit_req_zone $binary_remote_addr zone=api:10m rate=100r/m; apply to API routes.
+
+CI/CD (.github/workflows/ci.yml):
+- Trigger on push to main and pull_request.
+- Jobs: lint (eslint or flake8), test (jest or pytest), build (docker build), security (npm audit or bandit).
+- Cache: actions/cache for node_modules or pip.
+- Use actions/checkout@v4, actions/setup-node@v4 or actions/setup-python@v4.
+- Report test results with a test summary step.
+
+ENV CONFIG:
+- .env.example: list every required env var with a placeholder value and comment explaining each.
+- Include: APP_PORT, DATABASE_URL (if DB used), JWT_SECRET (if auth used), NODE_ENV or PYTHON_ENV, LOG_LEVEL.
+- Never include real secrets in .env.example.
+""",
+
+    "documentation": """\
+Stack: Documentation (README, API reference, JSDoc/docstrings, CHANGELOG)
+Generate comprehensive documentation for the project. Write every file completely.
+
+README.md:
+- Title with project name as H1.
+- Badges row: build status (GitHub Actions), license, version (use shields.io URLs with placeholder repo).
+- One-paragraph description of what the project does and who it is for.
+- ## Features — bullet list of key capabilities.
+- ## Prerequisites — list Node/Python/Docker version requirements.
+- ## Installation — numbered steps from git clone to running locally; include both dev and production paths.
+- ## Usage — code examples showing the most common use cases; use fenced code blocks with language identifiers.
+- ## API Reference — table for each endpoint: Method | Route | Description | Auth Required | Request Body | Response.
+- ## Architecture — ASCII diagram showing how components connect (services, databases, frontends). Use box-drawing characters.
+- ## Contributing — brief guide: fork → branch → PR.
+- ## License — state MIT (or as appropriate).
+
+JSDOC (for JavaScript/TypeScript files):
+- Add JSDoc comments to every exported function and class.
+- Include: @param with type and description, @returns with type and description, @throws if the function can throw, @example with a working code snippet.
+- Format: /** ... */ block immediately before the function declaration.
+
+PYTHON DOCSTRINGS (for Python files):
+- Add Google-style docstrings to every public function, class, and method.
+- Include: one-line summary, Args section, Returns section, Raises section (if applicable), Example section.
+- Format: triple double-quotes, indented under the def/class line.
+
+CHANGELOG.md:
+- Header: # Changelog and a note "All notable changes to this project will be documented in this file."
+- First entry: ## [Unreleased] with ### Added subsection listing the initial features.
+- Follow Keep a Changelog format: ## [version] - YYYY-MM-DD, subsections: Added / Changed / Deprecated / Removed / Fixed / Security.
+""",
+
     "auth": """\
 Stack: JWT Authentication layer for FastAPI backend + React frontend (full-stack auth module)
 This stack prompt applies to auth tasks within a full-stack project. Write COMPLETE file contents.
@@ -309,7 +378,12 @@ This stack prompt applies to auth tasks within a full-stack project. Write COMPL
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def execute_task(task, spec: dict, dependency_files: dict[str, dict[str, str]]) -> dict:
+def execute_task(
+    task,
+    spec: dict,
+    dependency_files: dict[str, dict[str, str]],
+    context: dict | None = None,
+) -> dict:
     """
     Ask the worker model to implement a task.
     Returns {"files": [...], "model_used": "<provider>/<model>"}.
@@ -323,18 +397,27 @@ def execute_task(task, spec: dict, dependency_files: dict[str, dict[str, str]]) 
     if stack == "full-stack":
         task_type = getattr(task, "type", "") or ""
         if task_type == "auth":
-            # Auth tasks get the dedicated auth prompt that covers both backend JWT
-            # helpers (python-jose + passlib) and frontend React patterns (axiosInstance,
-            # LoginForm, RegisterForm, PrivateRoute).
             effective_stack = "auth"
         elif task_type in ("backend", "api", "database", "config"):
             effective_stack = "fastapi"
+        elif task_type == "devops":
+            effective_stack = "devops"
+        elif task_type == "documentation":
+            effective_stack = "documentation"
         else:
             effective_stack = "react-vite"
+    elif stack in _STACK_PROMPTS:
+        task_type = getattr(task, "type", "") or ""
+        if task_type == "devops":
+            effective_stack = "devops"
+        elif task_type == "documentation":
+            effective_stack = "documentation"
+        else:
+            effective_stack = stack
     else:
         effective_stack = stack
     system_prompt = _SYSTEM_PROMPT + "\n" + _STACK_PROMPTS.get(effective_stack, _STACK_PROMPTS["vanilla"])
-    user_message = _build_user_message(task, spec, dependency_files)
+    user_message = _build_user_message(task, spec, dependency_files, context)
 
     # Build attempt chain: primary first, then fallbacks
     attempts: list[tuple[str, str]] = [(WORKER_PROVIDER, WORKER_MODEL)] + list(WORKER_FALLBACKS)
@@ -426,7 +509,7 @@ def _call_openrouter(model: str, system: str, user: str) -> str:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _build_user_message(task, spec: dict, dependency_files: dict) -> str:
+def _build_user_message(task, spec: dict, dependency_files: dict, context: dict | None = None) -> str:
     payload = {
         "task": {
             "id": task.id,
@@ -444,6 +527,8 @@ def _build_user_message(task, spec: dict, dependency_files: dict) -> str:
             tid: files for tid, files in dependency_files.items()
         },
     }
+    if context:
+        payload["memory_context"] = context
     return json.dumps(payload, indent=2)
 
 

@@ -21,7 +21,8 @@ _TASK_SCHEMA = {
         "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
         "verification":        {"type": "string",
                                 "enum": ["lint", "unit_test", "build", "smoke", "manual", "none",
-                                         "ffprobe", "frame_integrity", "sync_check"]},
+                                         "ffprobe", "frame_integrity", "sync_check",
+                                         "security", "lighthouse"]},
     },
 }
 
