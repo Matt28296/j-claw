@@ -237,6 +237,13 @@ body {
 .task-id.done    { color: var(--green); }
 .task-id.failed  { color: var(--red); }
 .task-type { font-size: 10px; color: var(--muted); }
+.model-badge {
+  margin-left: auto;
+  font-size: 10px; padding: 1px 6px; border-radius: 3px;
+  font-weight: bold; letter-spacing: .3px; white-space: nowrap;
+}
+.model-badge.local  { background: #0d2010; color: #3fb950; border: 1px solid #1a4020; }
+.model-badge.cloud  { background: #0d1b35; color: #4493f8; border: 1px solid #1a3060; }
 .retry-badge {
   background: #1a1200; color: var(--amber);
   border-radius: 3px; padding: 1px 5px; font-size: 10px;
@@ -482,6 +489,15 @@ function esc(s) {
 
 const ICONS = { done: '✓', running: '▶', failed: '✗', pending: '○', deprecated: '–' };
 
+const _CLOUD_PREFIXES = ['claude-', 'gpt-', 'gemini-', 'mistral-', 'openrouter/', 'anthropic/'];
+function modelInfo(model) {
+  if (!model) return null;
+  const m = model.toLowerCase();
+  const isCloud = _CLOUD_PREFIXES.some(p => m.startsWith(p)) || m.includes('openrouter');
+  const label = model.split('/').pop(); // strip provider prefix
+  return { label, type: isCloud ? 'cloud' : 'local', tag: isCloud ? '☁ CLOUD' : '⬡ LOCAL' };
+}
+
 // ── Stage Tracker ─────────────────────────────────────────────────────────────
 
 // Stage order: SPEC, PLAN, BUILD, REVIEW, [HEAL], DONE
@@ -637,8 +653,12 @@ function render(d) {
     agentEpoch = d.active_agent.started_epoch;
     const elapsed = Math.max(0, Date.now() / 1000 - agentEpoch);
     agentBox.className = 'agent-box active';
+    const ami = modelInfo(d.active_agent.model);
+    const agentModelBadge = ami
+      ? `<span class="model-badge ${ami.type}" style="font-size:9px;padding:1px 5px">${ami.tag}</span>`
+      : '';
     agentBox.innerHTML =
-      `<div class="agent-name">${esc(d.active_agent.agent)}</div>` +
+      `<div class="agent-name">${esc(d.active_agent.agent)} ${agentModelBadge}</div>` +
       `<div class="agent-model">${esc(d.active_agent.model)} · ${esc(d.active_agent.state)}</div>` +
       `<div class="agent-timer" id="agent-timer">${fmt(elapsed)}</div>`;
   } else {
@@ -669,11 +689,16 @@ function render(d) {
     const pills = (t.files || [])
       .map(f => `<span class="file-pill">${esc(f.split('/').pop())}</span>`)
       .join('');
+    const mi = modelInfo(t.model_used);
+    const modelBadge = mi
+      ? `<span class="model-badge ${mi.type}" title="${esc(t.model_used)}">${mi.tag} ${esc(mi.label)}</span>`
+      : '';
     return `<div class="task-row ${t.status}">
       <div class="task-header">
         <span class="task-id ${t.status}">${icon} ${esc(t.id)}</span>
         <span class="task-type">[${esc(t.type)}]</span>
         ${retry}
+        ${modelBadge}
       </div>
       <div class="task-obj" title="${esc(t.objective)}">${esc(t.objective)}</div>
       ${pills ? `<div class="task-files">${pills}</div>` : ''}
