@@ -57,12 +57,27 @@ Stack: React + Vite + Tailwind CSS (npm build required)
 - ES modules ARE allowed: use import/export freely.
 - Props: always destructure. Events: always use arrow functions in handlers.
 - Keep components small (< 80 lines each). Extract repeated UI into a component file.
+State management rules (follow strictly — do not invent patterns):
+- Component-local state: useState only.
+- State shared between 2-3 siblings: lift to nearest common parent, pass as props.
+- State needed by 4+ components or anywhere deep in the tree: React Context + useContext.
+  Create one context file per domain in src/context/ (e.g. src/context/AuthContext.jsx).
+  Each context file exports: the context object, a Provider component, and a useXxx hook.
+- App-wide async state (server data, loading, errors): useEffect + useState in a custom hook
+  in src/hooks/ (e.g. src/hooks/useTodos.js). No Redux, no Zustand unless explicitly requested.
+- Never prop-drill beyond 2 levels. If a prop passes through 3+ components untouched, use Context.
+- Naming: XxxContext.jsx for context files, useXxx.js for custom hooks.
 PWA support (include in every react-vite project that has a UI):
 - Create public/manifest.json (Vite copies public/ to dist/ automatically) with: name, short_name, start_url ("/"), display ("standalone"), background_color ("#ffffff"), theme_color ("#4f46e5"), and an icons array with two entries — { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" } and { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }.
 - Create public/sw.js implementing a cache-first service worker: on "install" event, open a cache named "app-shell-v1" and cache ["/", "/index.html"] (the built assets); on "fetch" event, respond from cache if found, otherwise fetch from network and cache the response.
 - In index.html <head>: add <link rel="manifest" href="/manifest.json"> and <meta name="theme-color" content="#4f46e5">.
 - In src/main.jsx, after the ReactDOM.createRoot call, add a service worker registration block: check "serviceWorker" in navigator, then call navigator.serviceWorker.register("/sw.js").catch(console.error).
 - Do NOT add vite-plugin-pwa — use the manual manifest + sw.js approach above to keep the dependency surface minimal.
+Full-stack wiring (use when memory_context.related_files contains wiring.json):
+- If wiring.json is listed in related_files, read api_base_url from it and use that value as
+  the baseURL in src/api/axiosInstance.js instead of hardcoding http://localhost:8000.
+- Example: import wiring from '../../wiring.json'; const API = axios.create({ baseURL: wiring.api_base_url })
+  OR use import.meta.env.VITE_API_URL with a fallback: axios.create({ baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000' })
 """,
 
     "fastapi": """\
@@ -137,6 +152,10 @@ Stack: Python + FastAPI + SQLAlchemy ORM + SQLite + Alembic migrations (uvicorn 
       run_migrations_offline()
   else:
       run_migrations_online()
+Full-stack wiring (include when this is the backend half of a full-stack FORMAT 5 project):
+- Write a wiring.json file at the project root alongside the code files:
+  {"api_base_url": "http://localhost:8000", "cors_origin": "http://localhost:5173"}
+- This file is read by the frontend sub-project to configure its API base URL automatically.
 """,
 
     "phaser": """\
@@ -146,9 +165,15 @@ Stack: Phaser 3 browser game (vanilla HTML + JS, no build step)
 - No ES module syntax (no import/export). All classes and functions must be assigned to window.* so other files can access them.
 - Scenes: define classes that extend Phaser.Scene with constructor() calling super('SceneName'), and implement create() and update().
 - Use this.add.text(), this.add.graphics(), this.input.keyboard.addKeys() etc. — all Phaser built-in APIs.
-- Game logic as class properties on the scene. Access shared state via window.CONFIG or globals defined in earlier scripts.
 - Scene transitions: use this.scene.start('SceneName', data) to switch scenes.
 - Graphics: use scene.add.graphics() then fillStyle()/fillRect()/fillCircle()/fillTriangle() — no textures unless preloaded.
+Cross-scene state (REQUIRED — missing this causes scene-transition bugs):
+- Define window.GAME_STATE = {} in the FIRST script loaded (index.html script order matters).
+- All scenes READ and WRITE only from window.GAME_STATE — never store shared data on scene instance properties.
+- Scene key strings: the string passed to super() MUST exactly match the string passed to this.scene.start(). Use a constants object to prevent typos:
+  window.CONFIG = { SCENES: { BOOT: 'BootScene', GAME: 'GameScene', OVER: 'GameOverScene' } }
+  then in each class: super(window.CONFIG.SCENES.GAME) and transitions: this.scene.start(window.CONFIG.SCENES.OVER)
+- Define window.CONFIG in the first <script> tag in index.html (before any scene files).
 """,
 
     "web3": """\
@@ -164,6 +189,21 @@ Stack: Solidity smart contracts + Hardhat + ethers.js
 - Frontend JS: use window.ethers (UMD global, NOT import); connect via window.ethereum (MetaMask); hardcode contract ABI as a JS const; use placeholder "DEPLOYED_CONTRACT_ADDRESS" for user to fill after deploy
 - NEVER use ES modules in the frontend (no import/export, no type="module") — use UMD CDN only
 - README.md: include setup steps: npm install, npx hardhat compile, npx hardhat test, npx hardhat node (terminal 1), npx hardhat run scripts/deploy.js --network localhost (terminal 2)
+ABI auto-import (eliminates the manual placeholder step — REQUIRED):
+- In scripts/deploy.js, after deploying the contract, write the address + ABI to a JSON file
+  that the frontend can import directly:
+  const fs = require('fs')
+  const artifact = require('../artifacts/contracts/<ContractName>.sol/<ContractName>.json')
+  const deployment = { address: contract.target, abi: artifact.abi }
+  fs.mkdirSync('./frontend/src/contracts', { recursive: true })
+  fs.writeFileSync('./frontend/src/contracts/<ContractName>.json', JSON.stringify(deployment, null, 2))
+- In frontend/app.js, load the deployment JSON (either via fetch or hardhat artifacts copy):
+  fetch('./contracts/<ContractName>.json').then(r => r.json()).then(deployment => {
+    const contract = new ethers.Contract(deployment.address, deployment.abi, signer)
+  })
+- NEVER output the string "DEPLOYED_CONTRACT_ADDRESS" as a placeholder in any file.
+- Add frontend/src/contracts/ to .gitignore — it is a build artifact regenerated on each deploy.
+- Hardhat networks config: always include hardhat: {} (in-memory) and localhost: { url: "http://127.0.0.1:8545" } so tests run on the in-memory network and deploy targets localhost.
 """,
 
     "react-native": """\
@@ -195,6 +235,16 @@ Stack: Socket.io real-time multiplayer (Node.js server + vanilla browser client)
 - Static files: serve public/ via express.static so index.html and app.js are reachable at /.
 - CORS: if needed, configure cors origin in the Socket.io server constructor.
 - Include README.md: npm install, node server.js, open http://localhost:3000 in multiple tabs.
+Reconnect state sync (REQUIRED for all stateful projects):
+- On server: inside every 'connection' handler, immediately emit 'state_sync' to the newly
+  connected socket with the complete current state: socket.emit('state_sync', getCurrentState()).
+  Define getCurrentState() as a function that returns the full authoritative server state.
+- On client: listen for 'state_sync' and FULLY REPLACE (not merge) local UI state with the
+  received data. This ensures a reconnecting client sees the current world without stale data.
+- socket.io-client handles TCP reconnect automatically. The server 'connection' event re-fires
+  on each reconnect, so state_sync is re-sent automatically — no extra client-side reconnect logic needed.
+- Room pattern (for multiplayer): socket.join(roomId) for isolated game/session instances.
+  Broadcast within a room with io.to(roomId).emit() instead of io.emit() (which hits all clients).
 """,
 
     "three-js": """\
@@ -211,6 +261,18 @@ Stack: Three.js 3D browser app/game (vanilla HTML + JS, no build step, CDN)
 - Multiple files: each JS file is a plain <script src="js/filename.js"> — globals only, assigned to window.* if shared.
 - Colors: use hex colors with 0x prefix (e.g. 0xff6600) in material color properties.
 - Include a dark background: document.body.style.margin='0'; document.body.style.background='#000';
+Physics:
+- For simple collision/bounce: use THREE.Raycaster — cast a ray from the object's current
+  position in its direction of travel, check intersections before moving the object each frame.
+- For real physics (gravity, rigid bodies, constraints): load Cannon-es via CDN:
+  <script src="https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"></script>
+  Create a CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) }). For each Three.js mesh,
+  create a matching CANNON.Body and add it to the world. In the animate() loop: world.step(1/60),
+  then copy body.position and body.quaternion to mesh.position and mesh.quaternion.
+- Performance: for 50+ moving objects of the same type, use THREE.InstancedMesh instead of
+  separate Mesh objects. Update instance matrices each frame with setMatrixAt() + instanceMatrix.needsUpdate=true.
+- Always add at least one THREE.AmbientLight and one THREE.DirectionalLight — MeshStandardMaterial
+  and MeshPhongMaterial are completely invisible without lighting.
 """,
 
     "electron": """\
@@ -227,6 +289,16 @@ Stack: Electron desktop app (Node.js + Chromium, cross-platform)
 - Window size: default 1200×800 with a minimum of 800×600. Set title in BrowserWindow options.
 - Do NOT use require() in renderer code — all Node.js access must go through the preload contextBridge.
 - Verification: "build" runs npm install. Cannot run full GUI in CI.
+IPC contract discipline (prevents channel-mismatch bugs — the #1 Electron failure mode):
+- Define a CHANNELS constant object at the top of preload.js and import/require it in main.js:
+  const CHANNELS = { FILE_READ: 'file:read', DIALOG_OPEN: 'dialog:open', STORE_GET: 'store:get' }
+- preload.js: contextBridge.exposeInMainWorld('api', { one method per CHANNEL entry, each
+  calling ipcRenderer.invoke(CHANNELS.X, ...args) }).
+- main.js: one ipcMain.handle(CHANNELS.X, async (event, ...args) => { ... }) per exposed method.
+  Every channel in the bridge MUST have a handler. Every handler MUST have a channel in the bridge.
+- IPC handlers MUST return { data, error } — never throw. Unhandled throws in ipcMain handlers
+  cause silent failures in the renderer because IPC errors don't propagate as JS exceptions.
+- Channel naming convention: 'verb:noun' in kebab-case (file:read, dialog:open, store:set).
 """,
 
     "tauri": """\
@@ -241,6 +313,18 @@ Stack: Tauri 2.x desktop app (Rust backend + WebView frontend)
 - Do NOT use ipcRenderer or contextBridge — Tauri uses invoke() exclusively for frontend↔backend calls.
 - All Rust structs passed to/from frontend must derive Serialize + Deserialize from serde.
 - serde import in main.rs: use serde::{Deserialize, Serialize};
+IPC contract discipline (the #1 Tauri failure mode is silent 404 from missing registration):
+- Every Rust function exposed to the frontend MUST have BOTH #[tauri::command] AND be listed
+  in .invoke_handler(tauri::generate_handler![cmd1, cmd2, ...]). Missing from generate_handler
+  gives a silent 404 with no error message — this is the most common Tauri bug.
+- The string passed to invoke() MUST exactly match the Rust function name in snake_case:
+  invoke('get_user_data') requires fn get_user_data() in Rust. No camelCase in invoke().
+- invoke() argument object keys MUST exactly match Rust parameter names:
+  invoke('save_file', { filePath: x }) requires fn save_file(file_path: String) — WRONG.
+  invoke('save_file', { file_path: x }) requires fn save_file(file_path: String) — CORRECT.
+- All commands MUST return Result<T, String>. Use Err("description".to_string()) for errors.
+  Err(String) maps to a JavaScript rejected Promise — catch with .catch() or try/await.
+- Organize all commands in src-tauri/src/commands.rs, pub use them in main.rs.
 """,
 
     "godot": """\

@@ -80,3 +80,4 @@ TECHNICAL_ARCHITECT_ENABLED: bool = os.getenv("TECHNICAL_ARCHITECT_ENABLED", "tr
 TECHNICAL_ARCHITECT_PROMPT_PATH: Path = Path(__file__).parent.parent / "technical_architect.txt"
 DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "8765"))
 DASHBOARD_AUTOOPEN: bool = os.getenv("DASHBOARD_AUTOOPEN", "true") == "true"
+GODOT_PATH: str = os.getenv("GODOT_PATH", "godot")

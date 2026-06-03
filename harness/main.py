@@ -119,7 +119,7 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
     deploy_project(project_dir, spec)
 
 
-def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = False, auto_accept: bool = False) -> None:
+def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = False, auto_accept: bool = False, wiring: dict | None = None) -> None:
     """Run one project instance from intent to completion (recursive for FORMAT 5)."""
     if depth > MAX_FORMAT5_DEPTH:
         console.print(
@@ -182,6 +182,8 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     }
     if tech_spec:
         init_payload["tech_spec"] = tech_spec
+    if wiring:
+        init_payload["wiring"] = wiring
     spec = orch.call(init_payload)
     sw.on_agent_done()
 
@@ -297,13 +299,24 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
 
     sub_projects = response["sub_projects"]
     graph = {sp["name"]: set(sp.get("depends_on", [])) for sp in sub_projects}
+    wiring: dict = {}  # accumulated from completed sub-projects, forwarded to dependents
 
     for name in TopologicalSorter(graph).static_order():
         sp = next(s for s in sub_projects if s["name"] == name)
         sp_dir = base_dir / name
         sp_dir.mkdir(parents=True, exist_ok=True)
         console.rule(f"[cyan]Sub-project: {name}[/cyan]")
-        run_project(sp["goal"], sp_dir, depth + 1, manual=manual, auto_accept=auto_accept)
+        run_project(sp["goal"], sp_dir, depth + 1, manual=manual, auto_accept=auto_accept,
+                    wiring=wiring)
+        # Carry wiring.json from this sub-project forward to all later sub-projects
+        wiring_path = sp_dir / "wiring.json"
+        if wiring_path.exists():
+            import json as _wj
+            try:
+                wiring.update(_wj.loads(wiring_path.read_text(encoding="utf-8")))
+                console.print(f"  [dim]Wiring from {name}: {list(wiring.keys())}[/dim]")
+            except Exception:
+                pass
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

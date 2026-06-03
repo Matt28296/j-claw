@@ -116,6 +116,13 @@ harness can detect failure and route it back as `EXECUTION_ERROR` without a huma
 - `sync_check` — verify audio/video stream alignment is within tolerance (e.g. < 40 ms
                  A/V offset). Use for `composition` and `editing` tasks that combine
                  audio and video tracks.
+- `security`   — run bandit (Python) or npm audit (Node) and FAIL only on HIGH/CRITICAL
+                 severity findings. Use for any `fastapi`, `python`, or Node backend task
+                 that handles user data, auth tokens, or external input.
+- `lighthouse` — run Google Lighthouse headless against a local static server and FAIL if
+                 performance < 0.5 or accessibility < 0.7. Use for `vanilla`, `react-vite`,
+                 `phaser`, and `three-js` projects when the final QA task verifies the full
+                 assembled page.
 
 Rule: `unit_test` and `smoke` may ONLY be used if a prior task in the same DAG explicitly
 installs **and configures** the required test/smoke infrastructure (runner, headless
@@ -196,6 +203,25 @@ Creative Director. When present, treat its fields as authoritative creative guid
 
 All other `creative_brief` fields are informational; include relevant details in the spec
 `constraints` list so workers have context.
+
+### Technical Architect input (`tech_spec`)
+
+The INIT payload may include an optional `"tech_spec"` JSON object produced by the Technical
+Architect (a Claude Sonnet pass that runs between Creative Director and Orchestrator). When
+present, treat its fields as authoritative engineering decisions — do not override them:
+
+- `confirmed_stack` — use as `architecture.stack` verbatim; the Technical Architect has
+  already chosen the best stack for this project.
+- `architecture_notes` — specific structural decisions (e.g. "use SQLite, not Postgres";
+  "CDN-only, no build step"); reflect these in spec `constraints` and task breakdown.
+- `dependencies` — key library/version choices to pass through to worker tasks.
+- `build_system` — the build tool (e.g. "Vite", "npm", "none"); informs task verification.
+- `coding_standards` — naming and style rules; note them in spec `constraints` so workers
+  inherit them.
+- `adrs_to_create` — list of Architecture Decision Records the architect wants created;
+  these are written to `project_memory/` automatically — you do not need to emit tasks for them.
+
+When `tech_spec` is absent, fall back to the Stack selection guide below.
 
 ### Stack selection guide
 
@@ -313,7 +339,7 @@ When the backend sub-project runs as its own INIT, its spec should use `"stack":
   "tasks": [
     {
       "id": "task-001",
-      "type": "frontend | backend | ui | api | game_logic | qa | devops | video | editing | composition | vfx | music",
+      "type": "frontend | backend | ui | api | game_logic | qa | devops | documentation | video | editing | composition | vfx | music",
       "objective": "one surgical instruction a small local model can follow",
       "files": ["exact/relative/path.ext"],
       "dependencies": [],
@@ -339,6 +365,10 @@ Rules:
 - Where two tasks are genuinely independent (no shared files, no dependency edge), leave
   them unlinked so the harness may run them on separate workers; do not invent artificial
   dependencies that serialize otherwise-parallel work.
+- `documentation` tasks produce README.md, CHANGELOG.md, JSDoc comment blocks, or Python
+  Google-style docstrings. They touch only documentation files and depend on the code task
+  that writes the file being documented so the docs reflect final content. Always assign
+  `verification: "none"` to documentation tasks.
 
 ### Example (for the to-do spec above)
 
@@ -413,7 +443,7 @@ Input provides the failed task and the error/log. Fix only that task.
   "updated_tasks": [
     {
       "id": "task-004",
-      "type": "frontend | backend | ui | api | game_logic | qa | devops | video | editing | composition | vfx | music",
+      "type": "frontend | backend | ui | api | game_logic | qa | devops | documentation | video | editing | composition | vfx | music",
       "objective": "corrected, isolated instruction that resolves the failure",
       "files": ["exact/relative/path.ext"],
       "dependencies": ["unchanged from original unless the fix requires it"],

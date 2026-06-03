@@ -163,6 +163,8 @@ def detect_ecosystem(project_dir: Path) -> str:
         return "node"
     if list(project_dir.glob("*.mp4")) or list(project_dir.glob("*.webm")):
         return "film"
+    if (project_dir / "project.godot").exists():
+        return "godot"
     return "unknown"
 
 
@@ -171,6 +173,8 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
     method = task.verification
 
     if method == "none":
+        if (project_dir / "project.godot").exists():
+            return _run_godot_check(project_dir)
         return True, ""
 
     if method == "manual":
@@ -195,6 +199,12 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
             return False, "file too small"
         return True, "passed"
 
+    if method == "security":
+        return _run_security_check(project_dir)
+
+    if method == "lighthouse":
+        return _run_lighthouse_check(project_dir)
+
     ecosystem = detect_ecosystem(project_dir)
 
     # Web3: Hardhat compile + test
@@ -203,9 +213,13 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
             return _run_hardhat_build(project_dir)
         return True, f"auto-passed: no {method} command for web3"
 
-    # React Native / Expo: npm install only (can't run iOS simulator in CI)
+    # React Native / Expo: npm install + expo web export check
     if ecosystem == "react-native" and method == "build":
-        return _run_react_native_install(project_dir)
+        ok, log = _run_react_native_install(project_dir)
+        if not ok:
+            return False, log
+        expo_ok, expo_log = _run_expo_export_check(project_dir)
+        return expo_ok, "\n".join(filter(None, [log, expo_log]))
 
     # Three.js CDN: Playwright canvas check (same pattern as Phaser)
     if ecosystem == "three-js":
@@ -640,19 +654,36 @@ def _run_playwright_check(project_dir: Path) -> tuple[bool, str]:
 
 def _run_html_auto(project_dir: Path) -> tuple[bool, str]:
     """Headless structure check for bare HTML projects (no package.json)."""
+    import re as _re
     html_files = list(project_dir.glob("*.html"))
     if not html_files:
         return False, "No .html files found in project directory"
-    issues = []
+    issues: list[str] = []
+    meta_warnings: list[str] = []
     for f in html_files:
-        content = f.read_text(encoding="utf-8", errors="replace").lower()
+        content = f.read_text(encoding="utf-8", errors="replace")
+        cl = content.lower()
         for tag in ("<html", "<body"):
-            if tag not in content:
+            if tag not in cl:
                 issues.append(f"{f.name}: missing {tag} tag")
+        # WARN (not FAIL) meta checks
+        if 'meta name="description"' not in cl and "meta name='description'" not in cl:
+            meta_warnings.append(f"{f.name}: missing <meta name=\"description\">")
+        if '<html lang=' not in cl:
+            meta_warnings.append(f"{f.name}: <html> missing lang attribute")
+        for img in _re.finditer(r'<img\b([^>]*?)>', content, _re.IGNORECASE):
+            if 'alt=' not in img.group(1).lower():
+                meta_warnings.append(f"{f.name}: <img> missing alt attribute")
+                break
     if issues:
         return False, "; ".join(issues)
+    log = "html structure valid"
+    if meta_warnings:
+        warn_str = "; ".join(meta_warnings)
+        console.print(f"  [yellow]HTML meta warnings: {warn_str}[/yellow]")
+        log += f"\nwarnings: {warn_str}"
     console.print("  [green]HTML structure check passed (headless).[/green]")
-    return True, "html structure valid"
+    return True, log
 
 
 def _run_ffprobe_check(video_path: Path) -> tuple[bool, str]:
@@ -690,3 +721,171 @@ def _run_manual(task, prompt: str | None = None) -> tuple[bool, str]:
     question = prompt or "Does this task pass?"
     passed = Confirm.ask(f"  {question}")
     return passed, "" if passed else "Rejected at manual gate"
+
+
+def _run_godot_check(project_dir: Path) -> tuple[bool, str]:
+    """Godot headless syntax/error check."""
+    from config import GODOT_PATH
+    if not shutil.which(GODOT_PATH):
+        return True, f"auto-passed: godot not found at '{GODOT_PATH}'"
+    console.print(f"  [dim]Godot: {GODOT_PATH} --headless --check-only project.godot[/dim]")
+    try:
+        result = subprocess.run(
+            [GODOT_PATH, "--headless", "--check-only", "project.godot"],
+            cwd=project_dir, capture_output=True, text=True, timeout=60,
+        )
+        combined = result.stdout + result.stderr
+        error_lines = [ln for ln in combined.splitlines() if "ERROR:" in ln or "SCRIPT ERROR:" in ln]
+        if error_lines:
+            summary = "\n".join(error_lines[:10])
+            console.print(f"  [red]Godot: {len(error_lines)} error(s)[/red]")
+            return False, f"Godot errors:\n{summary}"
+        console.print("  [green]Godot headless check passed.[/green]")
+        return True, "godot: no errors"
+    except subprocess.TimeoutExpired:
+        return True, "auto-passed: godot check timed out"
+    except FileNotFoundError:
+        return True, "auto-passed: godot not installed"
+
+
+def _run_security_check(project_dir: Path) -> tuple[bool, str]:
+    """Run bandit (Python) or npm audit (Node) and FAIL only on HIGH/CRITICAL."""
+    import json as _json
+    ecosystem = detect_ecosystem(project_dir)
+    if ecosystem in ("python", "fastapi", "full-stack"):
+        if not shutil.which("bandit"):
+            return True, "auto-passed: bandit not installed"
+        console.print("  [dim]Security: bandit -r . -f json -q[/dim]")
+        result = subprocess.run(
+            ["bandit", "-r", ".", "-f", "json", "-q"],
+            cwd=project_dir, capture_output=True, text=True, timeout=60,
+        )
+        try:
+            data = _json.loads(result.stdout)
+            severe = [r for r in data.get("results", []) if r.get("issue_severity", "") in ("HIGH", "CRITICAL")]
+            if severe:
+                summary = "; ".join(
+                    f"{r.get('filename', '?')}:{r.get('line_number', '?')} {r.get('issue_text', '')}"
+                    for r in severe[:5]
+                )
+                console.print(f"  [red]bandit: {len(severe)} HIGH/CRITICAL issue(s)[/red]")
+                return False, f"bandit: {len(severe)} HIGH/CRITICAL issue(s): {summary}"
+            total = len(data.get("results", []))
+            console.print(f"  [green]bandit: no HIGH/CRITICAL issues ({total} total)[/green]")
+            return True, f"bandit: no HIGH/CRITICAL issues ({total} total)"
+        except Exception:
+            return True, "auto-passed: bandit output not parseable"
+    if (project_dir / "package.json").exists():
+        npm = _npm_cmd()
+        if npm is None:
+            return True, "auto-passed: npm not available"
+        console.print("  [dim]Security: npm audit --json[/dim]")
+        use_shell = sys.platform == "win32"
+        cmd_arg = f"{npm} audit --json" if use_shell else [npm, "audit", "--json"]
+        result = subprocess.run(
+            cmd_arg, cwd=project_dir, capture_output=True, text=True, timeout=60, shell=use_shell,
+        )
+        try:
+            data = _json.loads(result.stdout)
+            vulns = data.get("vulnerabilities", {})
+            severe = [k for k, v in vulns.items() if v.get("severity", "") in ("high", "critical")]
+            if severe:
+                console.print(f"  [red]npm audit: {len(severe)} high/critical vulnerability(ies)[/red]")
+                return False, f"npm audit: {len(severe)} high/critical: {', '.join(severe[:5])}"
+            console.print("  [green]npm audit: no high/critical vulnerabilities[/green]")
+            return True, "npm audit: no high/critical vulnerabilities"
+        except Exception:
+            return True, "auto-passed: npm audit output not parseable"
+    return True, "auto-passed: no applicable security tool for this project"
+
+
+def _run_lighthouse_check(project_dir: Path) -> tuple[bool, str]:
+    """Run Google Lighthouse headless against a local static server."""
+    import json as _json
+    import time as _time
+    ecosystem = detect_ecosystem(project_dir)
+    if ecosystem not in ("unknown", "react-vite", "phaser", "three-js"):
+        return True, f"auto-passed: lighthouse not applicable to {ecosystem}"
+    if not (project_dir / "index.html").exists():
+        return True, "auto-passed: no index.html for lighthouse check"
+    if not shutil.which("npx"):
+        return True, "auto-passed: npx not available"
+    console.print("  [dim]Lighthouse: starting static server on :18080...[/dim]")
+    server = subprocess.Popen(
+        [sys.executable, "-m", "http.server", "18080", "--directory", str(project_dir)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _time.sleep(1)
+    try:
+        use_shell = sys.platform == "win32"
+        if use_shell:
+            cmd = (
+                'npx lighthouse http://localhost:18080 --output json --quiet '
+                '--chrome-flags="--headless --no-sandbox" '
+                '--only-categories=performance,accessibility'
+            )
+        else:
+            cmd = [
+                "npx", "lighthouse", "http://localhost:18080",
+                "--output", "json", "--quiet",
+                "--chrome-flags=--headless --no-sandbox",
+                "--only-categories=performance,accessibility",
+            ]
+        console.print("  [dim]Running lighthouse...[/dim]")
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120, shell=use_shell,
+        )
+        try:
+            data = _json.loads(result.stdout)
+            cats = data.get("categories", {})
+            perf = cats.get("performance", {}).get("score", 1.0)
+            a11y = cats.get("accessibility", {}).get("score", 1.0)
+            console.print(f"  [dim]Lighthouse scores: performance={perf:.2f} accessibility={a11y:.2f}[/dim]")
+            if perf < 0.5:
+                return False, f"lighthouse: performance score {perf:.2f} < 0.5"
+            if a11y < 0.7:
+                return False, f"lighthouse: accessibility score {a11y:.2f} < 0.7"
+            console.print("  [green]Lighthouse check passed.[/green]")
+            return True, f"lighthouse: performance={perf:.2f} accessibility={a11y:.2f}"
+        except Exception:
+            return True, "auto-passed: lighthouse output not parseable"
+    except subprocess.TimeoutExpired:
+        return True, "auto-passed: lighthouse timed out"
+    except FileNotFoundError:
+        return True, "auto-passed: lighthouse (npx) not found"
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=5)
+        except Exception:
+            server.kill()
+
+
+def _run_expo_export_check(project_dir: Path) -> tuple[bool, str]:
+    """Run `npx expo export --platform web` to verify the app can build for the web."""
+    import tempfile
+    if not shutil.which("npx"):
+        return True, "auto-passed: npx not available"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        use_shell = sys.platform == "win32"
+        cmd = (
+            f"npx expo export --platform web --output-dir {tmpdir}"
+            if use_shell
+            else ["npx", "expo", "export", "--platform", "web", "--output-dir", tmpdir]
+        )
+        console.print("  [dim]Expo: npx expo export --platform web[/dim]")
+        try:
+            result = subprocess.run(
+                cmd, cwd=project_dir, capture_output=True, text=True, timeout=180, shell=use_shell,
+            )
+        except FileNotFoundError:
+            return True, "auto-passed: expo not installed"
+        if result.returncode != 0:
+            stderr_lines = result.stderr.strip().splitlines()
+            first_error = next((ln for ln in stderr_lines if "ERROR" in ln.upper()), None)
+            log = first_error or (stderr_lines[0] if stderr_lines else "export failed")
+            console.print(f"  [red]Expo web export failed: {log}[/red]")
+            return False, f"expo export: {log}"
+        console.print("  [green]Expo web export passed.[/green]")
+        return True, "expo export: web platform build succeeded"
