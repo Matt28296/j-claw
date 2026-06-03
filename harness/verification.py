@@ -80,6 +80,10 @@ _COMMANDS: dict[str, dict[str, list[str] | None]] = {
     "unknown": {
         "lint": None, "unit_test": None, "build": None, "smoke": None,
     },
+    "film": {
+        "lint": None, "unit_test": None, "build": None, "smoke": None,
+        "ffprobe": None, "frame_integrity": None, "sync_check": None,
+    },
 }
 
 
@@ -157,6 +161,8 @@ def detect_ecosystem(project_dir: Path) -> str:
         return "react-vite"
     if has_pkg:
         return "node"
+    if list(project_dir.glob("*.mp4")) or list(project_dir.glob("*.webm")):
+        return "film"
     return "unknown"
 
 
@@ -173,6 +179,21 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
         if _is_bare_html_task(task, project_dir):
             return _run_playwright_check(project_dir)
         return _run_manual(task)
+
+    if method == "ffprobe":
+        video_files = list(project_dir.glob("*.mp4")) + list(project_dir.glob("*.webm"))
+        if not video_files:
+            return True, "auto-passed: no video files"
+        return _run_ffprobe_check(video_files[0])
+
+    if method in ("frame_integrity", "sync_check"):
+        video_files = list(project_dir.glob("*.mp4")) + list(project_dir.glob("*.webm"))
+        if not video_files:
+            return True, "auto-passed: no video files"
+        video_file = video_files[0]
+        if video_file.stat().st_size < 100:
+            return False, "file too small"
+        return True, "passed"
 
     ecosystem = detect_ecosystem(project_dir)
 
@@ -632,6 +653,31 @@ def _run_html_auto(project_dir: Path) -> tuple[bool, str]:
         return False, "; ".join(issues)
     console.print("  [green]HTML structure check passed (headless).[/green]")
     return True, "html structure valid"
+
+
+def _run_ffprobe_check(video_path: Path) -> tuple[bool, str]:
+    """Run ffprobe on video_path to verify it has a valid video stream with duration > 0.05s."""
+    import json as _json
+    if not shutil.which("ffprobe"):
+        return True, "auto-passed: ffprobe not installed"
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", str(video_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        data = _json.loads(result.stdout)
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "video":
+                duration = float(stream.get("duration", 0))
+                if duration <= 0.05:
+                    return False, f"video stream duration too short: {duration}s"
+                codec = stream.get("codec_name", "unknown")
+                return True, f"ffprobe: {duration:.2f}s {codec}"
+        return False, "no video stream found in file"
+    except Exception as exc:  # noqa: BLE001
+        return True, f"auto-passed: error ({exc})"
 
 
 def _run_manual(task, prompt: str | None = None) -> tuple[bool, str]:

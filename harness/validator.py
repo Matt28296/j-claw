@@ -20,7 +20,8 @@ _TASK_SCHEMA = {
         "priority":            {"type": "string", "enum": ["low", "medium", "high"]},
         "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
         "verification":        {"type": "string",
-                                "enum": ["lint", "unit_test", "build", "smoke", "manual", "none"]},
+                                "enum": ["lint", "unit_test", "build", "smoke", "manual", "none",
+                                         "ffprobe", "frame_integrity", "sync_check"]},
     },
 }
 
@@ -52,7 +53,7 @@ _FORMAT2_SCHEMA = {
     "type": "object",
     "required": ["tasks"],
     "properties": {
-        "tasks": {"type": "array", "items": _TASK_SCHEMA, "maxItems": 20},
+        "tasks": {"type": "array", "items": _TASK_SCHEMA, "maxItems": 100},
     },
 }
 

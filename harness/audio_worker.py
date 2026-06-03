@@ -7,7 +7,9 @@ No cloud API keys needed — fully local.
 from __future__ import annotations
 import json
 import os
+import re
 import struct
+import wave
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -51,6 +53,10 @@ def generate_audio(task, spec: dict, output_dir: Path) -> list[str]:
         stem = Path(file_path).stem.replace("_", " ").replace("-", " ")
         prompt = f"{task.objective}, {stem}"
 
+        brief = spec.get("creative_brief", {}) if spec else {}
+        audio_hints = " ".join(brief.get("audio_requirements", [])).lower()
+        speaker = "p229" if "male" in audio_hints else "p267"  # p229=male, p267=female
+
         console.print(f"  [dim]Generating audio via Coqui TTS: {file_path}…[/dim]")
         dest = output_dir / file_path
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -58,7 +64,7 @@ def generate_audio(task, spec: dict, output_dir: Path) -> list[str]:
         try:
             payload = json.dumps({
                 "text": prompt[:500],
-                "speaker_id": "p267",
+                "speaker_id": speaker,
                 "style_wav": "",
             }).encode("utf-8")
 
@@ -72,6 +78,13 @@ def generate_audio(task, spec: dict, output_dir: Path) -> list[str]:
                 audio_bytes = resp.read()
 
             dest.write_bytes(audio_bytes)
+
+            # Duration control: parse task.objective for a duration hint (e.g. "15 second" or "30-second")
+            dur_match = re.search(r"(\d+)[\s-]second", task.objective, re.IGNORECASE)
+            if dur_match:
+                target_secs = int(dur_match.group(1))
+                _adjust_wav_duration(dest, target_secs)
+
             console.print(f"  [green]✓ Generated: {file_path}[/green]")
             written.append(file_path)
 
@@ -92,6 +105,33 @@ def _write_all_placeholders(task, output_dir: Path) -> list[str]:
             _write_silent_wav(dest)
             written.append(file_path)
     return written
+
+
+def _adjust_wav_duration(dest: Path, target_secs: int) -> None:
+    """Truncate or pad a WAV file to the target duration in seconds."""
+    try:
+        with wave.open(str(dest), "rb") as wf:
+            params = wf.getparams()
+            frame_rate = wf.getframerate()
+            n_channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            frames = wf.readframes(wf.getnframes())
+
+        target_frames = target_secs * frame_rate
+        bytes_per_frame = n_channels * sampwidth
+        current_frames = len(frames) // bytes_per_frame
+
+        if current_frames > target_frames:
+            frames = frames[:target_frames * bytes_per_frame]
+        elif current_frames < target_frames:
+            pad_frames = target_frames - current_frames
+            frames = frames + (b"\x00" * pad_frames * bytes_per_frame)
+
+        with wave.open(str(dest), "wb") as wf:
+            wf.setparams(params)
+            wf.writeframes(frames)
+    except Exception as exc:
+        console.print(f"  [yellow]Duration adjustment failed: {exc}[/yellow]")
 
 
 def _write_silent_wav(dest: Path) -> None:

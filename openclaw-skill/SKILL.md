@@ -1,10 +1,10 @@
 ---
 name: j-claw
 description: >
-  Build complete software projects autonomously — websites, apps, DApps, games, and more.
+  Build complete software projects autonomously — websites, apps, DApps, games, films, dashboards, and more.
   Generates a full project from a plain-English description using a local Ollama coding model.
-  Supports 10 stacks: vanilla, react-vite, fastapi, full-stack, phaser, web3, react-native,
-  socket-io, three-js, electron.
+  Supports 14 stacks: vanilla, react-vite, fastapi, full-stack, phaser, web3, react-native,
+  socket-io, three-js, electron, film/explainer, tauri, godot4, realtime-dashboard.
 version: 1.0.0
 skillKey: build
 
@@ -51,6 +51,15 @@ cd C:\Users\Tyler\Desktop\Jarvis-Claw && .\run.bat --yes "<user's description>"
 - `.\run.bat --yes "A task manager with React frontend and FastAPI backend"`
 - `.\run.bat --yes "A Solidity NFT contract with a minting frontend"`
 - `.\run.bat --yes "A real-time multiplayer drawing game"`
+- `.\run.bat --yes "build me a 30-second explainer about machine learning"`
+- `.\run.bat --yes "make a Tauri desktop app that shows system CPU usage"`
+- `.\run.bat --yes "create a Godot 4 platformer game"`
+- `.\run.bat --yes "build a real-time dashboard showing live WebSocket data"`
+
+**Typical build times:**
+- Code / app / website projects: 5–15 minutes
+- Games: 10–20 minutes
+- Film / video projects: 30–60 minutes (SD frame generation + ffmpeg)
 
 ### Add a feature to an existing project
 
@@ -90,7 +99,11 @@ Each run produces a complete project in `harness/projects/<name>/` with:
 | "smart contract", "DApp", "NFT", "Web3" | web3 |
 | "mobile app" | react-native (Expo) |
 | "multiplayer", "real-time", "chat app" | socket-io |
-| "desktop app" | electron |
+| "desktop app", "Electron app" | electron |
+| "explainer video", "animated explainer", "short film" | film/explainer (ffmpeg + SD frames + Coqui TTS, 30–90 seconds) |
+| "Tauri app", "lightweight desktop app" | tauri (Rust + WebView, lighter than Electron) |
+| "Godot game", "Godot 4", "GDScript game" | godot4 (GDScript, headless export) |
+| "live dashboard", "real-time dashboard", "WebSocket dashboard" | realtime-dashboard (Node.js + WebSocket or SSE) |
 
 ## Output
 

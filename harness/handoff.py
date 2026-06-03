@@ -175,11 +175,17 @@ def _collect_stamp_context(handoff_path: Path, output_dir: Path) -> str:
     if handoff_path.exists():
         parts.append(f"=== HANDOFF.md ===\n{handoff_path.read_text(encoding='utf-8')}\n")
 
+    BINARY_EXTS = {".mp4", ".webm", ".mov", ".wav", ".mp3", ".flac", ".ogg",
+                   ".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".woff2", ".ttf", ".eot"}
     total = sum(len(p) for p in parts)
     for path in sorted(output_dir.rglob("*")):
         if path.is_dir() or any(d in path.parts for d in _SKIP_DIRS):
             continue
         if path.name in _SKIP_FILES or path.suffix.lower() not in _EXTS:
+            continue
+        if path.suffix.lower() in BINARY_EXTS:
+            continue
+        if path.stat().st_size > 500_000:
             continue
         try:
             content = path.read_text(encoding="utf-8", errors="replace")

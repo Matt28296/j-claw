@@ -9,7 +9,7 @@ from rich.syntax import Syntax
 from config import (
     ORCHESTRATOR_MODEL, ANTHROPIC_API_KEY, ORCHESTRATOR_PROMPT_PATH,
     ORCHESTRATOR_API_MODEL, ORCHESTRATOR_FALLBACK_MODELS, OPENROUTER_API_KEY,
-    ORCHESTRATOR_MAX_TOKENS,
+    ORCHESTRATOR_MAX_TOKENS, EXECUTION_ERROR_MODEL,
 )
 from validator import validate_response, OrchestratorOutputError
 
@@ -76,10 +76,11 @@ class Orchestrator:
 
         for attempt in range(max_retries + 1):
             try:
+                _model = EXECUTION_ERROR_MODEL if state == "EXECUTION_ERROR" else ORCHESTRATOR_MODEL
                 response = self._client.messages.create(
-                    model=ORCHESTRATOR_MODEL,
+                    model=_model,
                     max_tokens=ORCHESTRATOR_MAX_TOKENS,
-                    system=self._system_prompt,
+                    system=[{"type": "text", "text": self._system_prompt, "cache_control": {"type": "ephemeral"}}],
                     messages=[{"role": "user", "content": user_message}],
                 )
                 if response.stop_reason == "max_tokens":

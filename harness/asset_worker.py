@@ -52,8 +52,15 @@ def generate_assets(task, spec: dict, output_dir: Path) -> list[str]:
             continue
 
         asset_name = Path(file_path).stem.replace("_", " ").replace("-", " ")
+        brief = spec.get("creative_brief", {}) if spec else {}
+        visual = brief.get("visual_identity", {})
+        style = visual.get("style", "")
+        palette = visual.get("palette", "")
+        prompt = task.objective
+        if style: prompt = prompt + ", " + style
+        if palette: prompt = prompt + ", " + palette + " color palette"
         prompt = (
-            f"{task.objective}, {asset_name} for a {goal}, "
+            f"{prompt}, {asset_name} for a {goal}, "
             f"{style_hint}, transparent background, clean edges, no text"
         )
         negative = "blurry, low quality, distorted, text, watermark, signature, background clutter"

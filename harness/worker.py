@@ -229,6 +229,48 @@ Stack: Electron desktop app (Node.js + Chromium, cross-platform)
 - Verification: "build" runs npm install. Cannot run full GUI in CI.
 """,
 
+    "tauri": """\
+Stack: Tauri 2.x desktop app (Rust backend + WebView frontend)
+- Project layout: src-tauri/src/main.rs, src-tauri/Cargo.toml, src-tauri/tauri.conf.json, src/index.html, src/main.js, package.json
+- src-tauri/Cargo.toml: [package] name, version = "0.1.0", edition = "2021"; [dependencies] tauri = { version = "2", features = [] }, serde = { version = "1", features = ["derive"] }, serde_json = "1"; [[bin]] name = "app", path = "src/main.rs"
+- src-tauri/src/main.rs: use #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] at the top; define Rust commands with #[tauri::command] attribute; register commands with .invoke_handler(tauri::generate_handler![cmd1, cmd2, ...]); use tauri::Builder::default().run(tauri::generate_context!()) in main(); return Result<T, String> from all commands (never panic).
+- src-tauri/tauri.conf.json: must include "productName", "identifier" (e.g. "com.example.app"), "version", and a "windows" array with at least one window entry containing "title", "width", "height"; set "bundle": { "active": true, "identifier": "com.example.app" }.
+- src/index.html: normal HTML page loading src/main.js via <script src="main.js"></script>; no ES module syntax in main.js.
+- src/main.js: import invoke from Tauri using window.__TAURI__.core.invoke (UMD global available at runtime); call invoke("command_name", { arg: value }) which returns a Promise; handle .then()/.catch() or use async/await.
+- package.json: scripts "dev": "tauri dev", "build": "tauri build"; devDependencies: "@tauri-apps/cli": "^2"
+- Do NOT use ipcRenderer or contextBridge — Tauri uses invoke() exclusively for frontend↔backend calls.
+- All Rust structs passed to/from frontend must derive Serialize + Deserialize from serde.
+- serde import in main.rs: use serde::{Deserialize, Serialize};
+""",
+
+    "godot": """\
+Stack: Godot 4.x game (GDScript, text-based scene files)
+- Project layout: project.godot, scenes/Main.tscn, scripts/Main.gd, assets/ directory
+- Use GDScript exclusively — do NOT use C# or any other language.
+- Use Godot 4 API only — never use Godot 3 API (e.g., use CharacterBody2D not KinematicBody2D, use Input.get_vector() not Input.is_action_pressed() for movement).
+- project.godot: must have config_version=5 at the top, [application] section with config/name and run/main_scene pointing to the main scene (e.g. "res://scenes/Main.tscn"), and [rendering] section.
+- GDScript syntax rules: use @export for exported variables, func _ready() for initialization, func _process(delta: float) for per-frame logic, $NodeName shorthand for get_node("NodeName"), signal declarations with the "signal" keyword.
+- .tscn files: use Godot 4 text scene format with [gd_scene] header, [node] entries including name, type, and script path (ExtResource); parent node must use parent="." with no explicit parent field.
+- Do NOT generate .import files, .godot/ cache files, or binary resources — only write source files.
+- For 2D games: root node type Node2D or Control; use Sprite2D (not Sprite), CollisionShape2D, Area2D, CharacterBody2D.
+- For signals: use signal_name.connect(callable) syntax (Godot 4), not .connect(target, "method_string") (Godot 3).
+- Resource paths: always use res:// prefix for scene and script references in .tscn and project.godot.
+""",
+
+    "websocket-sse": """\
+Stack: Node.js real-time dashboard (Express + WebSocket or SSE, no build step)
+- Project layout: server.js, public/index.html, public/client.js, package.json
+- package.json: dependencies = express, ws; scripts: "start": "node server.js", "dev": "nodemon server.js"; no TypeScript, no build step.
+- server.js: use Express for HTTP routes; serve public/ via express.static; listen on PORT 3000; include GET /health endpoint that returns JSON { status: "ok", timestamp: Date.now() }.
+- WebSocket support: attach a "ws" WebSocket server to the same HTTP server using new WebSocketServer({ server }); broadcast updates to all connected clients with ws.clients.forEach(client => { if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(data)); }).
+- SSE support: for SSE routes, set headers res.setHeader("Content-Type", "text/event-stream"), res.setHeader("Cache-Control", "no-cache"), res.setHeader("Connection", "keep-alive"); send data with res.write("data: " + JSON.stringify(payload) + "\\n\\n").
+- Dashboard (public/index.html): dark theme using Tailwind CSS CDN (<script src="https://cdn.tailwindcss.com"></script>); show live-updating data in a clean layout; no custom CSS files needed (Tailwind utilities only).
+- public/client.js: plain browser JS — no ES module syntax (no import/export, no type="module"); connect to WebSocket with new WebSocket("ws://" + location.host); include client-side reconnect logic: on "close" event, use setTimeout(() => reconnect(), 3000) with exponential backoff up to 30 seconds.
+- SSE client reconnect: use EventSource with built-in browser reconnect; explicitly handle EventSource onerror to log and let browser auto-reconnect.
+- Live data: server must push data updates at a regular interval (e.g. setInterval every 1-2 seconds) so the dashboard updates in real time without user interaction.
+- Do NOT use TypeScript, webpack, Vite, or any build tooling — pure Node.js + browser JS only.
+""",
+
     "auth": """\
 Stack: JWT Authentication layer for FastAPI backend + React frontend (full-stack auth module)
 This stack prompt applies to auth tasks within a full-stack project. Write COMPLETE file contents.

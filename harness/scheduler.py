@@ -10,6 +10,7 @@ from verification import run_verification, detect_ecosystem
 from validator import validate_dag, OrchestratorOutputError
 from state_writer import writer as sw
 from asset_worker import generate_assets, can_generate
+from video_worker import generate_video, can_generate as video_can_generate
 
 console = Console()
 
@@ -109,6 +110,25 @@ class Scheduler:
             task.status = "done"
             sw.on_task_done(task.id, result["model_used"])
             console.print(f"  [green]✓ audio done[/green]  [dim]({len(written)} file(s) written)[/dim]")
+            return
+
+        # Video tasks: route to video_worker
+        if task.type in ("video", "editing", "composition", "vfx"):
+            written = generate_video(task, self.instance.spec, self.instance.output_dir)
+            task.binary_outputs = {str(p.relative_to(self.instance.output_dir)): p for p in written}
+            model_used = "ffmpeg" if video_can_generate() else "video-stub"
+            task.status = "done"
+            sw.on_task_done(task.id, model_used)
+            console.print(f"  [green]✓ video done[/green]  [dim]({len(written)} file(s) written)[/dim]")
+            return
+
+        # Music tasks: route to music_worker
+        if task.type == "music":
+            from music_worker import generate_music
+            written = generate_music(task, self.instance.spec, self.instance.output_dir)
+            task.status = "done"
+            sw.on_task_done(task.id, "music_worker")
+            console.print(f"  [green]✓ music done[/green]  [dim]({len(written)} file(s) written)[/dim]")
             return
 
         try:

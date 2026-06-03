@@ -130,6 +130,8 @@ def parse_review_issues(review_path: Path) -> list[str]:
 
 def _collect_files(output_dir: Path) -> list[tuple[str, str]]:
     """Return [(relative_path, content)] for all reviewable files, sorted by path."""
+    BINARY_EXTS = {".mp4", ".webm", ".mov", ".wav", ".mp3", ".flac", ".ogg",
+                   ".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".woff2", ".ttf", ".eot"}
     results = []
     for path in sorted(output_dir.rglob("*")):
         if path.is_dir():
@@ -140,6 +142,10 @@ def _collect_files(output_dir: Path) -> list[tuple[str, str]]:
         if path.name in _SKIP_FILES:
             continue
         if path.suffix.lower() not in _REVIEW_EXTS:
+            continue
+        if path.suffix.lower() in BINARY_EXTS:
+            continue
+        if path.stat().st_size > 120_000:
             continue
         rel = str(path.relative_to(output_dir)).replace("\\", "/")
         try:

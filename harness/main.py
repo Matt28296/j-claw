@@ -23,6 +23,7 @@ from scheduler import Scheduler
 from final_review import run_final_review, parse_review_issues
 from handoff import write_handoff, try_claude_stamp, git_commit_project, deploy_project
 from verification import detect_ecosystem, run_playwright_project_check
+from creative_director import CreativeDirector
 
 console = Console()
 
@@ -39,6 +40,9 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
 
     spec = _json.loads(spec_path.read_text(encoding="utf-8"))
     completed = _json.loads(tasks_path.read_text(encoding="utf-8")) if tasks_path.exists() else []
+
+    brief_path = project_dir / "creative_brief.json"
+    creative_brief = _json.loads(brief_path.read_text(encoding="utf-8")) if brief_path.exists() else {}
 
     console.print(Panel(
         f"[bold cyan]Continuing: {spec.get('goal', '?')}[/bold cyan]\n"
@@ -60,6 +64,7 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
         "existing_spec": spec,
         "completed_tasks": completed,
         "new_intent": new_intent,
+        "creative_brief": creative_brief,
     })
     sw.on_agent_done()
 
@@ -117,10 +122,22 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
 
     sw.on_project_start(intent, str(output_dir))
 
+    # Creative Director pre-pass
+    console.print("\n[bold]Creative Director interpreting intent...[/bold]")
+    try:
+        creative_brief = CreativeDirector().interpret(intent)
+        import json as _json_cd
+        (output_dir / "creative_brief.json").write_text(
+            _json_cd.dumps(creative_brief, indent=2), encoding="utf-8"
+        )
+    except Exception as _cd_exc:
+        console.print(f"  [yellow]Creative Director skipped ({_cd_exc})[/yellow]")
+        creative_brief = {}
+
     # ── INIT ──────────────────────────────────────────────────────────────────
     console.print("\n[bold]Generating project spec…[/bold]")
     sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "INIT")
-    spec = orch.call({"system_state": "INIT", "user_intent": intent})
+    spec = orch.call({"system_state": "INIT", "user_intent": intent, "creative_brief": creative_brief})
     sw.on_agent_done()
 
     if spec.get("oversize"):

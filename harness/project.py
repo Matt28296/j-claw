@@ -21,6 +21,7 @@ class Task:
     # runtime state
     status: str = "pending"        # pending | running | done | failed | deprecated
     output_files: dict = field(default_factory=dict)  # relative_path -> content str
+    binary_outputs: dict = field(default_factory=dict)  # relative_path -> Path (binary files written by workers)
     error_log: str = ""
     retry_count: int = 0
 

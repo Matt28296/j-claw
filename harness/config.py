@@ -36,7 +36,7 @@ WORKER_FALLBACKS: list[tuple[str, str]] = _parse_fallbacks(
 )
 
 # Maximum tasks to run in parallel (1 = sequential, 2-4 = parallel)
-MAX_PARALLEL_WORKERS: int = int(os.getenv("MAX_PARALLEL_WORKERS", "2"))
+MAX_PARALLEL_WORKERS: int = int(os.getenv("MAX_PARALLEL_WORKERS", "4"))
 
 # Task types that prefer local Ollama (simple, low-token tasks)
 # Everything else prefers cloud (complex logic, multi-file, reasoning-heavy)
@@ -64,8 +64,11 @@ DEPLOY_HOOK: str | None = os.getenv("DEPLOY_HOOK")  # None = no deployment
 DEPLOY_TIMEOUT: int = int(os.getenv("DEPLOY_TIMEOUT", "120"))  # seconds
 PROJECTS_DIR: Path = Path(os.getenv("PROJECTS_DIR", "./projects"))
 MAX_RETRIES_PER_TASK: int = int(os.getenv("MAX_RETRIES_PER_TASK", "3"))
-MAX_TASKS: int = int(os.getenv("MAX_TASKS", "50"))
+MAX_TASKS: int = int(os.getenv("MAX_TASKS", "75"))
 ORCHESTRATOR_MAX_TOKENS: int = int(os.getenv("ORCHESTRATOR_MAX_TOKENS", "16384"))
+CREATIVE_DIRECTOR_MODEL: str = os.getenv("CREATIVE_DIRECTOR_MODEL", "claude-opus-4-8")
+EXECUTION_ERROR_MODEL: str = os.getenv("EXECUTION_ERROR_MODEL", "claude-haiku-4-5-20251001")
+CREATIVE_DIRECTOR_PROMPT_PATH: Path = Path(__file__).parent.parent / "creative_director.txt"
 MAX_FORMAT5_DEPTH: int = int(os.getenv("MAX_FORMAT5_DEPTH", "3"))
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 EXPERIENCE_LOG: str = os.getenv("EXPERIENCE_LOG", "experience.jsonl")

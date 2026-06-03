@@ -108,6 +108,14 @@ harness can detect failure and route it back as `EXECUTION_ERROR` without a huma
 - `manual`     — requires human approval; the harness PAUSES the pipeline for a human gate.
                  Use only when no automated check is possible. Avoid on core-path tasks.
 - `none`       — no verification (e.g. static markup with no logic). Use sparingly.
+- `ffprobe`    — run `ffprobe` on the output media file to confirm it is a valid,
+                 non-zero-duration video or audio file. Use for `video`, `audio`, and
+                 `composition` tasks that produce media files.
+- `frame_integrity` — sample-decode N evenly spaced frames from the output video to
+                 confirm no corrupt or missing frames. Use for `video` and `vfx` tasks.
+- `sync_check` — verify audio/video stream alignment is within tolerance (e.g. < 40 ms
+                 A/V offset). Use for `composition` and `editing` tasks that combine
+                 audio and video tracks.
 
 Rule: `unit_test` and `smoke` may ONLY be used if a prior task in the same DAG explicitly
 installs **and configures** the required test/smoke infrastructure (runner, headless
@@ -170,6 +178,25 @@ browser, etc.). That tooling setup must itself be a task. Never assume tooling e
 If the spec cannot be built within the 50-task budget, do not emit FORMAT 1 — emit
 FORMAT 5 instead.
 
+### Creative Director input (`creative_brief`)
+
+The INIT payload may include an optional `"creative_brief"` JSON object produced by the
+Creative Director. When present, treat its fields as authoritative creative guidance:
+
+- `suggested_stack` — use as the first-choice `architecture.stack`; override only if it
+  is technically incompatible with the stated goal.
+- `visual_identity` (style, palette) — incorporate into the `objective` of any asset task
+  so the image worker produces visually consistent output.
+- `scenes_or_flows` — use to structure the task breakdown for games and films; each scene
+  or flow maps to a logical task group.
+- `asset_requirements` — create one `type: "asset"` task per entry, using the provided
+  description as the task objective.
+- `audio_requirements` — create one `type: "audio"` task per entry, using the provided
+  description as the task objective.
+
+All other `creative_brief` fields are informational; include relevant details in the spec
+`constraints` list so workers have context.
+
 ### Stack selection guide
 
 Choose `architecture.stack` based on project requirements:
@@ -186,6 +213,11 @@ Choose `architecture.stack` based on project requirements:
 | `three-js`     | 3D browser scenes, visualizations, 3D games       | Three.js CDN, WebGL, OrbitControls      |
 | `electron`     | Cross-platform desktop app (Windows/Mac/Linux)    | Electron, Node.js IPC, contextBridge    |
 | `asset`        | Generate image assets (sprites, icons, backgrounds) | Local Stable Diffusion WebUI or SVG placeholders |
+| `film`         | Narrative film or animated explainer                | ffmpeg + SD frames + Coqui TTS. **FORMAT 5 required.** |
+| `video-editor` | Browser-based clip editor                           | ffmpeg WASM + Canvas API                        |
+| `tauri`        | Rust + WebView desktop app (lighter than Electron)  | Rust toolchain, Tauri v2, WebView2              |
+| `godot`        | GDScript game, Godot 4 headless export              | Godot 4 CLI headless, GDScript                  |
+| `websocket-sse` | Node.js real-time dashboard                        | Node.js + WebSocket/SSE, Express                |
 | `full-stack` + auth tasks | Full-stack app with user accounts, login/register, JWT | FastAPI + python-jose + passlib, React + axios interceptor + PrivateRoute |
 
 **Full-stack projects (frontend + backend) MUST use FORMAT 5 decomposition from INIT — never combine frontend and backend tasks in a single FORMAT 2 DAG.** Combining both stacks in one DAG reliably exhausts the output token budget and produces truncated, invalid JSON. Always split into at minimum a `backend_api` sub-project (`stack: "fastapi"`) and a `frontend_react` sub-project (`stack: "react-vite"`), with the frontend depending on the backend.
@@ -281,13 +313,13 @@ When the backend sub-project runs as its own INIT, its spec should use `"stack":
   "tasks": [
     {
       "id": "task-001",
-      "type": "frontend | backend | ui | api | game_logic | qa | devops",
+      "type": "frontend | backend | ui | api | game_logic | qa | devops | video | editing | composition | vfx | music",
       "objective": "one surgical instruction a small local model can follow",
       "files": ["exact/relative/path.ext"],
       "dependencies": [],
       "priority": "low | medium | high",
       "acceptance_criteria": ["objectively checkable condition"],
-      "verification": "lint | unit_test | build | smoke | manual | none"
+      "verification": "lint | unit_test | build | smoke | manual | none | ffprobe | frame_integrity | sync_check"
     }
   ]
 }
@@ -381,13 +413,13 @@ Input provides the failed task and the error/log. Fix only that task.
   "updated_tasks": [
     {
       "id": "task-004",
-      "type": "frontend | backend | ui | api | game_logic | qa | devops",
+      "type": "frontend | backend | ui | api | game_logic | qa | devops | video | editing | composition | vfx | music",
       "objective": "corrected, isolated instruction that resolves the failure",
       "files": ["exact/relative/path.ext"],
       "dependencies": ["unchanged from original unless the fix requires it"],
       "priority": "high",
       "acceptance_criteria": ["condition that proves the original failure is resolved"],
-      "verification": "lint | unit_test | build | smoke | manual | none"
+      "verification": "lint | unit_test | build | smoke | manual | none | ffprobe | frame_integrity | sync_check"
     }
   ]
 }
@@ -689,6 +721,28 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
    - The harness routes audio tasks to the local Coqui TTS server automatically.
    - If Coqui TTS is not running, silent WAV placeholders are written (pipeline continues).
    - Phaser and socket-io game projects that mention sound/music should include one audio task.
+
+21. **Film projects (`stack: "film"`) MUST use FORMAT 5 decomposition.** A film cannot fit
+   within a single 50-task project instance — always emit FORMAT 5 from INIT, never FORMAT 1.
+
+   - Decompose the film into one sub-project per scene (or logical segment). Name sub-projects
+     `scene_001`, `scene_002`, etc. Each scene sub-project depends on the previous scene so
+     that assembly runs in order.
+   - Every scene sub-project MUST include all four of the following task types. Omitting any
+     one is a spec error:
+     - At least one `type: "asset"` task — visual frames or image assets for the scene,
+       generated via Stable Diffusion WebUI.
+     - At least one `type: "audio"` task — narration, dialogue, or sound effects for the
+       scene, generated via Coqui TTS.
+     - At least one `type: "video"` task — encode/assemble the scene's frames into a video
+       clip using ffmpeg. Use `verification: "ffprobe"`.
+     - At least one `type: "editing"` task — cut, trim, and layer audio onto the video clip
+       using ffmpeg. Use `verification: "sync_check"`.
+   - Add a final `assembly` sub-project (depends on all scene sub-projects) that concatenates
+     scene clips into the full film via ffmpeg and runs a `type: "composition"` task with
+     `verification: "frame_integrity"`.
+   - Worker tooling: ffmpeg (CLI), Stable Diffusion WebUI (local REST), Coqui TTS (local REST).
+     All tools must be assumed available; no npm or pip install tasks for these tools.
 
 ---
 
