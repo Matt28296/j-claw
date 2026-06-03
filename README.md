@@ -223,6 +223,7 @@ copy harness\.env.example harness\.env
 | `SD_API_URL` | `http://localhost:7860` | Stable Diffusion WebUI endpoint for asset tasks |
 | `ASSET_PROVIDER` | `sd` | `sd` or `none` |
 | `COQUI_API_URL` | `http://localhost:5002` | Coqui TTS endpoint for audio tasks |
+| `GODOT_PATH` | `godot` | Path to Godot 4 CLI binary (for headless verification) |
 | `DEPLOY_HOOK` | — | CLI command run after git commit (e.g. `vercel --prod --yes`) |
 | `JWT_SECRET` | random default | Secret key for generated apps that include auth |
 | `TELEGRAM_BOT_TOKEN` | — | BotFather token — enables `bot.bat` Telegram control |
@@ -412,15 +413,19 @@ Every project writes to `harness/projects/<slug>/`:
 | Architecture Decision Records (ADR-001-*.md) | ✅ |
 | DevOps specialist agent (Dockerfile, docker-compose, nginx, CI/CD) | ✅ |
 | Documentation specialist agent (README, JSDoc, docstrings, CHANGELOG) | ✅ |
-| Security verification (bandit / npm audit) | ✅ (wired, `verification: "security"`) |
-| Lighthouse verification (performance + accessibility) | ✅ (wired, `verification: "lighthouse"`) |
+| Security verification (bandit / npm audit) — FAIL on HIGH/CRITICAL only | ✅ |
+| Lighthouse verification (performance + accessibility) — perf < 0.5 or a11y < 0.7 FAIL | ✅ |
+| Godot headless check — `godot --headless --check-only`, triggered on `none` when `project.godot` present | ✅ |
+| HTML meta warnings — meta description, html lang, img alt (WARN not FAIL) | ✅ |
+| Expo web export check — `npx expo export --platform web` appended to react-native build | ✅ |
+| FORMAT 5 wiring passthrough — `wiring.json` forwarded between sub-projects | ✅ |
+| orchestrator.txt — tech_spec INIT docs, documentation task type, security/lighthouse enum | ✅ |
 | Dashboard auto-start + browser open on pipeline start | ✅ |
 
 ### Next
 
 | Item |
 |---|
-| `verification.py` — implement security + lighthouse check logic |
 | E2E test generation — Playwright tests auto-generated alongside every project |
 | IPFS / on-chain deployment for Web3 projects |
 | Payment integration (Stripe/LemonSqueezy) |
@@ -455,7 +460,7 @@ Every project writes to `harness/projects/<slug>/`:
 
 **Scheduler** (`scheduler.py`): Topological DAG execution with parallel workers. Routes asset tasks to `asset_worker.py`, audio tasks to `audio_worker.py`, code tasks to `worker.py`. On failure: calls orchestrator in `EXECUTION_ERROR`, reads experience hints, retries up to `MAX_RETRIES_PER_TASK`.
 
-**Verification** (`verification.py`): Auto-detects ecosystem (Node, Python, FastAPI, React+Vite, Phaser, vanilla, web3, electron, socket-io, three-js). Runs appropriate checks. Validates PWA files (`manifest.json` + `sw.js`) for vanilla/react-vite projects.
+**Verification** (`verification.py`): Auto-detects ecosystem (Node, Python, FastAPI, React+Vite, Phaser, vanilla, web3, electron, socket-io, three-js, Godot). Runs appropriate checks. Security: bandit (Python) / npm audit (Node) — FAIL on HIGH/CRITICAL. Lighthouse: Playwright static server + headless Lighthouse — FAIL if perf < 0.5 or a11y < 0.7. Godot headless: `godot --headless --check-only`. HTML meta: WARN on missing lang, description, img alt. Expo: `npx expo export --platform web`. Validates PWA files (`manifest.json` + `sw.js`) for vanilla/react-vite projects.
 
 **Self-healing loop** (`main.py`): When final review returns `ISSUES FOUND`, parses the `ISSUES:` list, calls orchestrator in `REVIEW_FAILED` state, re-runs scheduler. Up to 2 cycles.
 
