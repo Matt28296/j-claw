@@ -105,7 +105,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     # Project-level Playwright check for phaser/vanilla — runs regardless of
     # task verification settings (which are always "none" for these stacks).
     ecosystem = detect_ecosystem(output_dir)
-    if ecosystem in ("phaser", "unknown") and (output_dir / "index.html").exists():
+    if ecosystem in ("phaser", "three-js", "unknown") and (output_dir / "index.html").exists():
         passed_pw, log_pw = run_playwright_project_check(output_dir)
         sw.on_verification_result("project", "playwright", ecosystem, passed_pw, log_pw)
 

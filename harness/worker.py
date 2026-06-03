@@ -126,6 +126,22 @@ Stack: Socket.io real-time multiplayer (Node.js server + vanilla browser client)
 - CORS: if needed, configure cors origin in the Socket.io server constructor.
 - Include README.md: npm install, node server.js, open http://localhost:3000 in multiple tabs.
 """,
+
+    "three-js": """\
+Stack: Three.js 3D browser app/game (vanilla HTML + JS, no build step, CDN)
+- Load Three.js via CDN in index.html: <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+- NEVER use ES module syntax (no import/export, no type="module") — Three.js UMD global is window.THREE.
+- Renderer: create a THREE.WebGLRenderer({antialias:true}), set size to window.innerWidth/Height, append renderer.domElement to document.body.
+- Scene graph: new THREE.Scene(), new THREE.PerspectiveCamera(75, aspect, 0.1, 1000), position camera back (camera.position.z = 5).
+- Lighting: always add at least one THREE.AmbientLight and one THREE.DirectionalLight or THREE.PointLight.
+- Geometry + material: use THREE.BoxGeometry, SphereGeometry, PlaneGeometry, etc. with THREE.MeshStandardMaterial or MeshPhongMaterial.
+- Animation loop: use requestAnimationFrame for a self-calling animate() function; call renderer.render(scene, camera) every frame.
+- Resize handling: listen to window 'resize' event and update camera.aspect + camera.updateProjectionMatrix() + renderer.setSize().
+- Controls: if user interaction needed, load OrbitControls from CDN: <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+- Multiple files: each JS file is a plain <script src="js/filename.js"> — globals only, assigned to window.* if shared.
+- Colors: use hex colors with 0x prefix (e.g. 0xff6600) in material color properties.
+- Include a dark background: document.body.style.margin='0'; document.body.style.background='#000';
+""",
 }
 
 

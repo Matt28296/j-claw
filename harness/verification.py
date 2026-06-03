@@ -65,6 +65,9 @@ _COMMANDS: dict[str, dict[str, list[str] | None]] = {
         "build":     ["npm", "install"],
         "smoke":     None,
     },
+    "three-js": {
+        "lint": None, "unit_test": None, "build": None, "smoke": None,
+    },
     "phaser": {
         "lint": None, "unit_test": None, "build": None, "smoke": None,
     },
@@ -104,6 +107,15 @@ def detect_ecosystem(project_dir: Path) -> str:
                 return "socket-io"
         except Exception:
             pass
+
+    # Three.js CDN: index.html present + JS file references THREE.
+    if (project_dir / "index.html").exists() and not has_pkg:
+        for js_file in list(project_dir.glob("*.js")) + list(project_dir.glob("js/*.js")):
+            try:
+                if "THREE." in js_file.read_text(encoding="utf-8", errors="ignore"):
+                    return "three-js"
+            except OSError:
+                pass
 
     # Full-stack: both a Python backend and a React/Node frontend present
     if (has_req or has_pyproj) and (has_vite or has_pkg):
@@ -156,6 +168,10 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
     # React Native / Expo: npm install only (can't run iOS simulator in CI)
     if ecosystem == "react-native" and method == "build":
         return _run_react_native_install(project_dir)
+
+    # Three.js CDN: Playwright canvas check (same pattern as Phaser)
+    if ecosystem == "three-js":
+        return _run_playwright_check(project_dir)
 
     # Full-stack: run frontend build + backend install together
     if ecosystem == "full-stack" and method == "build":

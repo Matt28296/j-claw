@@ -141,7 +141,7 @@ browser, etc.). That tooling setup must itself be a task. Never assume tooling e
   "features": ["feature as a short phrase"],
   "constraints": ["every assumption and limit made for missing info, stated explicitly"],
   "architecture": {
-    "stack": "vanilla | react-vite | fastapi | phaser | full-stack | web3 | react-native | socket-io",
+    "stack": "vanilla | react-vite | fastapi | phaser | full-stack | web3 | react-native | socket-io | three-js",
     "frontend": "framework or 'none'",
     "backend": "framework or 'none'",
     "database": "type or 'none'",
@@ -180,6 +180,7 @@ Choose `architecture.stack` based on project requirements:
 | `web3`       | Solidity smart contracts, DApps, token/NFT        | Hardhat, ethers.js, OpenZeppelin        |
 | `react-native` | Mobile app (iOS/Android), Expo managed workflow   | Expo SDK, React Native, AsyncStorage    |
 | `socket-io`    | Real-time multiplayer games/apps, WebSocket       | Node.js, Socket.io, Express             |
+| `three-js`     | 3D browser scenes, visualizations, 3D games       | Three.js CDN, WebGL, OrbitControls      |
 
 For full-stack projects (frontend + backend), use TWO separate project instances via FORMAT 5 decomposition, or include both in one DAG where backend tasks are independent of frontend tasks (no shared files). The `stack` field refers to the dominant worker mode; multi-stack DAGs should set `stack` to the frontend stack and note the backend in the `constraints`.
 
@@ -572,6 +573,16 @@ Example input fragment:
    - Game loop runs server-side with setInterval; state broadcast to all clients each tick.
    - Player map keyed by socket.id; clean up on 'disconnect'.
    - Verification: "build" runs `npm install`.
+
+14. **Three.js 3D projects (`stack: "three-js"`)** use Three.js via CDN — no build step, no npm.
+   - Load Three.js via CDN: `<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>`
+   - NEVER use ES module syntax (no import/export, no type="module") — Three.js UMD global is `window.THREE`.
+   - Always create a `THREE.WebGLRenderer`, `THREE.Scene`, and `THREE.PerspectiveCamera`.
+   - Add at least one `THREE.AmbientLight` and one `THREE.DirectionalLight`.
+   - Animation loop: `requestAnimationFrame`-based `animate()` function calling `renderer.render(scene, camera)`.
+   - Handle `window.resize` to update camera aspect ratio and renderer size.
+   - If camera interaction is needed, load OrbitControls from the same CDN version.
+   - Verification: "none" for all tasks — the harness runs a Playwright canvas check at project end.
 
 10. **Never use ES modules (`type="module"` or `import`/`export`) in `phaser` or `vanilla` stack projects.**
    These stacks serve files via `file://` protocol, where browsers block cross-origin ES module
