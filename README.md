@@ -422,14 +422,19 @@ Every project writes to `harness/projects/<slug>/`:
 | orchestrator.txt — tech_spec INIT docs, documentation task type, security/lighthouse enum | ✅ |
 | Dashboard auto-start + browser open on pipeline start | ✅ |
 
+| E2E test generation — `e2e_generator.py` produces `tests/e2e.spec.ts` after pipeline for web stacks | ✅ |
+| IPFS deployment — `scripts/pin-to-ipfs.js` (Pinata API) auto-generated for Web3 projects | ✅ |
+| Stripe integration — payment prompts in fastapi + react-vite stacks (checkout, webhook, .env) | ✅ |
+| Swift (iOS/SwiftUI) + Kotlin (Android/Compose) native mobile stacks | ✅ |
+
 ### Next
 
 | Item |
 |---|
-| E2E test generation — Playwright tests auto-generated alongside every project |
-| IPFS / on-chain deployment for Web3 projects |
-| Payment integration (Stripe/LemonSqueezy) |
-| Real native mobile (Swift/Kotlin) |
+| Playwright test runner task in orchestrator DAG (alongside e2e_generator.py step) |
+| IPFS/on-chain CI deployment hook |
+| LemonSqueezy / Stripe Connect multi-vendor support |
+| Real native mobile build validation (xcrun simctl / Android emulator) |
 
 ---
 
