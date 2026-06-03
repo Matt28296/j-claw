@@ -232,6 +232,42 @@ def git_commit_project(output_dir: Path, spec: dict) -> None:
         console.print(f"  [yellow]Git auto-commit failed: {exc}[/yellow]")
 
 
+def deploy_project(output_dir: Path, spec: dict) -> None:
+    """Run the configured DEPLOY_HOOK command in output_dir (e.g. 'vercel --prod --yes')."""
+    from config import DEPLOY_HOOK, DEPLOY_TIMEOUT
+    if not DEPLOY_HOOK:
+        return
+    goal = spec.get("goal", "")[:50]
+    console.print(f"\n[bold]Running deployment hook: {DEPLOY_HOOK}[/bold]")
+    use_shell = sys.platform == "win32"
+    cmd = DEPLOY_HOOK if use_shell else DEPLOY_HOOK.split()
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=output_dir,
+            capture_output=True,
+            text=True,
+            timeout=DEPLOY_TIMEOUT,
+            shell=use_shell,
+            env={**os.environ, "CI": "1"},
+        )
+        output = (result.stdout + result.stderr).strip()
+        if result.returncode == 0:
+            console.print(f"  [green]Deployment succeeded.[/green]")
+            # Extract URL from common CLI output patterns
+            for line in output.splitlines():
+                if line.startswith("https://") or "https://" in line.lower() and ("url" in line.lower() or "deployed" in line.lower()):
+                    console.print(f"  [bold cyan]URL: {line.strip()}[/bold cyan]")
+                    break
+        else:
+            console.print(f"  [yellow]Deployment failed (exit {result.returncode}):[/yellow]")
+            console.print(f"  [dim]{output[-1000:]}[/dim]")
+    except subprocess.TimeoutExpired:
+        console.print(f"  [yellow]Deployment timed out after {DEPLOY_TIMEOUT}s.[/yellow]")
+    except Exception as exc:
+        console.print(f"  [yellow]Deployment hook error: {exc}[/yellow]")
+
+
 # ── Shared ────────────────────────────────────────────────────────────────────
 
 def _append_verdict(handoff_path: Path, verdict: str) -> None:

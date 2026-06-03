@@ -47,6 +47,11 @@ LOCAL_FIRST_TASK_TYPES: set[str] = set(
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
 GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY: str | None = os.getenv("OPENROUTER_API_KEY")
+
+# Optional deployment hook: command to run in the output dir after git commit.
+# Example: "vercel --prod --yes" or "netlify deploy --prod --dir=dist"
+DEPLOY_HOOK: str | None = os.getenv("DEPLOY_HOOK")  # None = no deployment
+DEPLOY_TIMEOUT: int = int(os.getenv("DEPLOY_TIMEOUT", "120"))  # seconds
 PROJECTS_DIR: Path = Path(os.getenv("PROJECTS_DIR", "./projects"))
 MAX_RETRIES_PER_TASK: int = int(os.getenv("MAX_RETRIES_PER_TASK", "3"))
 MAX_TASKS: int = int(os.getenv("MAX_TASKS", "50"))
