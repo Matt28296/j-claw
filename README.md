@@ -2,14 +2,14 @@
 
 J-Claw is a self-contained agentic software production system. You describe a project in plain English; the pipeline plans it, writes all the code, verifies the output, reviews the result with Claude, self-heals if issues are found, and hands off a signed report — with no human in the loop beyond the initial intent.
 
-It runs entirely on your local machine. The worker model is a local Ollama LLM. The orchestrator is Claude (via Anthropic or OpenRouter API), with a manual fallback mode that requires no API key.
+Runs entirely on your local machine. The worker model is a local Ollama LLM. The orchestrator is Claude (via Anthropic or OpenRouter API), with a manual fallback mode that requires no API key.
 
 ---
 
-## What it does
+## What It Does
 
 ```
-"Build a Phaser 3 snake game with score tracking"
+"Build a multiplayer drawing game with React frontend and FastAPI backend"
             │
             ▼  INIT
     Orchestrator generates a project spec (FORMAT 1)
@@ -17,17 +17,17 @@ It runs entirely on your local machine. The worker model is a local Ollama LLM. 
             ▼  SPEC_ACCEPTED
     Orchestrator emits a task DAG (FORMAT 2) — up to 50 tasks
             │
-            ▼  Execute tasks in topological order
+            ▼  Execute tasks in topological order (up to 2 parallel workers)
             │   └─ Worker (Ollama) writes each file
-            │   └─ Harness runs verification (lint / unit_test / build / html_auto)
+            │   └─ Harness runs verification (lint / unit_test / build / smoke)
             │   └─ On failure → EXECUTION_ERROR → Orchestrator rewrites task → retry
+            │   └─ Experience tracker logs outcomes for future retries
             │
             ▼  PROJECT_REVIEW
     Orchestrator inspects all outputs — pass or add follow-up tasks
             │
             ▼  Final Code Review (Claude API)
-    Claude reads every output file and checks for stubs, broken imports,
-    missing files, and obvious runtime errors
+    Claude reads every output file — checks for stubs, broken imports, missing files
             │
             ├─ VERDICT: PASS → write HANDOFF.md, done
             │
@@ -38,14 +38,33 @@ It runs entirely on your local machine. The worker model is a local Ollama LLM. 
         Worker re-writes the broken files
         Claude re-reviews
                 │
-                ▼  Write HANDOFF.md
+                ▼  Write HANDOFF.md + git commit
     Optional: invoke claude CLI for autonomous final stamp
             │
-            ▼  Done — output files in harness/projects/<name>/
-                       REVIEW.md, HANDOFF.md co-located with the project
+            ▼  Done — output in harness/projects/<name>/
 ```
 
-Generated projects include: browser games (Phaser 3), React+Vite SPAs, FastAPI REST APIs, and vanilla HTML/JS apps.
+---
+
+## Supported Stacks (10)
+
+| Stack | Use case | Verification |
+|---|---|---|
+| `vanilla` | Static HTML/JS/CSS + Tailwind CDN apps | Headless HTML structure check |
+| `react-vite` | React 18 + Vite + Tailwind SPAs | `npm run build` |
+| `fastapi` | Python REST API + SQLite + Alembic migrations | `pip install` + `alembic upgrade head` |
+| `phaser` | Phaser 3 browser games (CDN) | Playwright canvas check |
+| `full-stack` | React frontend + FastAPI backend in one pipeline run | Both above |
+| `web3` | Solidity + Hardhat + ethers.js DApps | `npx hardhat compile && test` |
+| `react-native` | Expo managed mobile apps (iOS/Android) | `npm install` |
+| `socket-io` | Node.js + Socket.io real-time multiplayer | `npm install` |
+| `three-js` | Three.js 3D browser scenes (CDN, WebGL) | Playwright canvas check |
+| `electron` | Electron desktop apps (contextIsolation + contextBridge) | `npm install` |
+
+All stacks also support:
+- **PWA output** (vanilla + react-vite): `manifest.json` + `sw.js` service worker — every generated app is installable on mobile/desktop
+- **JWT auth** (full-stack): when spec mentions login/register, generates `auth.py`, User model, `/auth/register` + `/auth/login` endpoints, React `LoginForm`, `RegisterForm`, `PrivateRoute`
+- **Asset generation**: image assets routed to local Stable Diffusion WebUI (AUTOMATIC1111/Forge/ComfyUI at `localhost:7860`), SVG color-block placeholders if SD not running
 
 ---
 
@@ -53,209 +72,50 @@ Generated projects include: browser games (Phaser 3), React+Vite SPAs, FastAPI R
 
 ```
 j-claw/
-├── orchestrator.txt          System prompt — the "brain" that plans and reviews
-├── run.bat                   Entry point (Windows) — sets UTF-8, activates venv
-├── dashboard.py              Mission Control dashboard server (port 8765)
+├── orchestrator.txt              System prompt — the planning and review brain
+├── run.bat                       Entry point (Windows)
+├── bot.bat                       Telegram bot entry point
+├── dashboard.py                  Mission Control dashboard server (port 8765)
+├── openclaw-skill/
+│   └── SKILL.md                  OpenClaw skill — invoke j-claw from Telegram/WhatsApp
 ├── dashboard/
-│   └── index.html            Live pipeline dashboard (dark theme, auto-polling)
+│   └── index.html                Live pipeline dashboard (dark theme, auto-polling)
 └── harness/
-    ├── main.py               CLI + top-level pipeline loop + healing loop
-    ├── orchestrator.py       Orchestrator (Claude/OpenRouter) + ManualOrchestrator
-    ├── scheduler.py          DAG scheduler — runs tasks, handles errors, PROJECT_REVIEW
-    ├── worker.py             Sends tasks to Ollama; validates and cleans JSON output
-    ├── verification.py       Ecosystem detection + verification runners
-    ├── final_review.py       Claude API code review — detects stubs, broken imports
-    ├── handoff.py            Writes HANDOFF.md; optionally invokes claude CLI stamp
-    ├── state_writer.py       Singleton event bus — writes mission_control.json
-    ├── validator.py          JSON schema + DAG integrity checks for all formats
-    ├── project.py            ProjectInstance and Task data classes
-    ├── config.py             .env loading — models, paths, limits
-    └── projects/             Generated project output (gitignored)
+    ├── main.py                   CLI + top-level pipeline loop + self-healing loop
+    ├── orchestrator.py           Orchestrator (Claude/OpenRouter) + ManualOrchestrator
+    ├── scheduler.py              DAG scheduler — topological exec, error handling, review
+    ├── worker.py                 Sends tasks to Ollama; 10 stack-specific prompt sets
+    ├── verification.py           Ecosystem detection + verification runners + PWA check
+    ├── asset_worker.py           Local SD WebUI asset generation + SVG fallback
+    ├── audio_worker.py           Local Coqui TTS audio generation + silent fallback
+    ├── experience_log.py         Local-only EXECUTION_ERROR outcome tracker
+    ├── telegram_bot.py           Telegram bot — /run /status /cancel /projects
+    ├── start_bot.py              Bot entry point
+    ├── final_review.py           Claude API code review — stubs, broken imports, etc.
+    ├── handoff.py                HANDOFF.md writer + deployment hook + claude CLI stamp
+    ├── state_writer.py           Singleton event bus → mission_control.json
+    ├── validator.py              JSON schema + DAG integrity checks
+    ├── project.py                ProjectInstance and Task data classes
+    ├── config.py                 .env loading — models, paths, limits, all config
+    ├── .env.example              Template — copy to .env and fill in keys
+    └── projects/                 Generated project output (gitignored)
 ```
-
-### Components
-
-**Orchestrator (`orchestrator.py`)** — Three implementations behind the same interface:
-- `Orchestrator`: calls Claude via the Anthropic API.
-- `OpenRouterOrchestrator`: calls any model via OpenRouter (`openrouter/auto` by default). Supports cascading fallback models when the primary is rate-limited.
-- `ManualOrchestrator`: writes `orchestrator_input.json`, waits for you to fill `orchestrator_response.json`, and continues. No API key needed.
-
-**Worker (`worker.py`)** — Sends a task to the local Ollama model and gets back `{files: [{path, content}]}`. Applies stack-specific prompt instructions (vanilla JS, React+Vite, FastAPI, Phaser). Detects truncated or suspiciously short output. Fixes literal `\n` sequences the model sometimes emits instead of real newlines.
-
-**Scheduler (`scheduler.py`)** — Executes the task DAG in topological order. On verification failure, sends `EXECUTION_ERROR` to the orchestrator for a refined task (modify / split / deprecate), then retries up to `MAX_RETRIES_PER_TASK`. After all tasks complete, calls `PROJECT_REVIEW` and applies any follow-up tasks. Emits state events to the state writer at every stage.
-
-**Verification (`verification.py`)** — Detects the project ecosystem (Node, Python, FastAPI, React+Vite, Phaser, vanilla) and runs the appropriate check. Bare HTML projects (only `.html/.css/.js` files, no build step) are verified with a headless structure check — no manual gate, no browser required. Phaser projects without `package.json` use the same headless check. If `package.json` exists, npm scripts run normally.
-
-**Final Review (`final_review.py`)** — After PROJECT_REVIEW passes, sends all output files to Claude for a code quality gate. Checks for stub placeholders, hollow functions, broken imports, and missing files. Writes `REVIEW.md` with a structured `VERDICT: PASS / ISSUES FOUND` response. Returns `True` (pass) or `False` (issues found) to drive the healing loop.
-
-**Healing Loop (`main.py`)** — When the final review returns `ISSUES FOUND`, parses the `ISSUES:` bullet list from `REVIEW.md`, calls the orchestrator in `REVIEW_FAILED` state with the issue list, gets targeted fix tasks, and re-runs the scheduler. Repeats up to 2 cycles before giving up. Healing cycles are tracked in `HANDOFF.md`.
-
-**Handoff (`handoff.py`)** — Always runs at pipeline end (pass or fail). Writes `HANDOFF.md` to the project output directory with: status, heal cycles used, final review verdict, test results, and instructions for manual follow-up. If the `claude` CLI is on PATH, runs `claude --print` autonomously for a final quality stamp and appends it to `HANDOFF.md` as `## Claude Code Verdict`.
-
-**State Writer (`state_writer.py`)** — Singleton event bus. Every pipeline event (task start/done/fail, agent calls, file writes, verification results) calls a hook that updates `mission_control.json` at the repo root. The dashboard polls this file every second.
-
-**Validator (`validator.py`)** — Validates every orchestrator response against its JSON schema before acting. Also checks DAG integrity: no duplicate IDs, no missing dependency references, no cycles, no two tasks writing the same file without a dependency edge.
 
 ---
 
-## Mission Control Dashboard
-
-```
-python dashboard.py
-```
-
-Opens `http://localhost:8765/dashboard/index.html` in your browser. Leave it running while the pipeline executes — it updates every second.
-
-```
-┌─────────────────────── J-CLAW MISSION CONTROL ─────────────────────────┐
-│  [● EXECUTING]  A Phaser 3 snake game…   elapsed: 2m 14s   [📋 Copy Logs]│
-├─────────────────────────────────────────────────────────────────────────┤
-│  REVIEW BANNER (green: PASS / red: ISSUES FOUND — appears when done)   │
-│  OPENCLAW BANNER (purple: APPROVED / amber: issues — if claude CLI used) │
-├──────────────────────────────┬──────────────────────────────────────────┤
-│  ACTIVE AGENT                │  EVENTS (live feed)                      │
-│  orchestrator · INIT · 4s    │  ✓ task-003 done [qwen2.5-coder:14b]    │
-│                              │  📄 js/snake.js                          │
-│  TASKS                       │  ▶ task-003 started                      │
-│  ● task-001  ✓ done          ├──────────────────────────────────────────┤
-│  ● task-002  ✓ done          │  TEST RESULTS                            │
-│  ▶ task-003  ↻ running       │  ✓ build/node  task-003  PASS            │
-│  ○ task-004  pending         ├──────────────────────────────────────────┤
-│                              │  WORK LOG                                │
-│                              │  ORCH  DAG  Planned 4 task(s)            │
-│                              │  WORKER  task-001  index.html written    │
-└──────────────────────────────┴──────────────────────────────────────────┘
-```
-
-**Panels:**
-- **Active Agent** — which agent is calling which API, with a live elapsed timer
-- **Tasks** — one card per task, color-coded by status (pending / running / done / failed), retry badge, file pills
-- **Events** — live feed of every pipeline event
-- **Test Results** — per-task verification results with method + ecosystem badges; Playwright and pytest log output is colorized (✓ green / ✗ red)
-- **Work Log** — chronological record of what each agent did: ORCH (orchestrator, purple) vs WORKER (purple/blue), model name, action, detail
-
-**Copy Logs button** — copies a structured plain-text snapshot of all pipeline data to the clipboard for pasting into chat or a bug report.
-
----
-
-## State Machine & Message Formats
+## Pipeline State Machine
 
 | State | Format | Description |
-|-------|--------|-------------|
-| `INIT` | FORMAT 1 | Project spec: type, complexity, goal, features, constraints, architecture, modules |
-| `SPEC_REVISION` | FORMAT 1 | Re-emits spec with `revision_feedback` applied |
-| `SPEC_ACCEPTED` | FORMAT 2 | Full task DAG — up to 50 tasks with dependencies, files, acceptance criteria, verification type |
+|---|---|---|
+| `INIT` | FORMAT 1 | Orchestrator generates project spec |
+| `SPEC_REVISION` | FORMAT 1 | Re-emit spec with `revision_feedback` applied |
+| `SPEC_ACCEPTED` | FORMAT 2 | Full task DAG — up to 50 tasks with deps, files, criteria |
 | `EXECUTION_ERROR` | FORMAT 3 | Fix for a failed task: `modify`, `split`, or `deprecate` |
-| `PROJECT_REVIEW` | FORMAT 4 | Final orchestrator verdict: `pass` or `needs_followup` with additional tasks |
-| `REVIEW_FAILED` | FORMAT 4 | Self-healing: orchestrator receives the Claude review's issue list and returns fix tasks |
+| `PROJECT_REVIEW` | FORMAT 4 | Final orchestrator verdict: pass or add follow-up tasks |
+| `REVIEW_FAILED` | FORMAT 4 | Self-healing: receives Claude review issues, returns fix tasks |
+| `CONTINUE` | FORMAT 2 | Incremental tasks to add a feature to an existing project |
 
-FORMAT 5 (oversize) is available from INIT/SPEC_ACCEPTED: if a project is too large, the orchestrator emits a sub-project graph and the harness runs each sub-project as its own pipeline instance in topological order.
-
-### FORMAT 1 — Project Spec
-
-```json
-{
-  "project_type": "web | app | game",
-  "complexity": "low | medium",
-  "goal": "One-sentence description",
-  "features": ["Feature A", "Feature B"],
-  "constraints": ["No external APIs", "SQLite only"],
-  "architecture": {
-    "frontend": "...", "backend": "...", "database": "...", "deployment": "..."
-  },
-  "modules": [
-    { "name": "auth", "responsibility": "JWT login and session management" }
-  ]
-}
-```
-
-### FORMAT 2 — Task DAG
-
-```json
-{
-  "tasks": [
-    {
-      "id": "task-001",
-      "type": "frontend",
-      "objective": "Write index.html containing the complete counter page...",
-      "files": ["index.html"],
-      "dependencies": [],
-      "priority": "high",
-      "acceptance_criteria": ["button increments counter", "count displayed on screen"],
-      "verification": "none"
-    }
-  ]
-}
-```
-
-Verification options: `lint` `unit_test` `build` `smoke` `none`
-(`manual` is accepted but automatically redirected to headless HTML check for static projects)
-
-### FORMAT 3 — Execution Error Refinement
-
-```json
-{
-  "refinement_target_task_id": "task-003",
-  "reason_for_refinement": "Worker produced stub — wrote '// Implementation unchanged'",
-  "action": "modify",
-  "updated_tasks": [{ "...revised task..." : "..." }]
-}
-```
-
-Actions: `modify` (rewrite), `split` (decompose into subtasks), `deprecate` (mark done and skip)
-
-### FORMAT 4 — Project Review / Review Failed
-
-```json
-{
-  "review_result": "needs_followup",
-  "summary": "qa_check.py checks for id='count-display' but HTML uses id='count'",
-  "followup_tasks": [{ "...fix task..." : "..." }]
-}
-```
-
-`review_result` is either `pass` or `needs_followup`. The same schema is used for both `PROJECT_REVIEW` and `REVIEW_FAILED` states.
-
----
-
-## DAG Rules
-
-The validator enforces these rules on every FORMAT 2, FORMAT 3 split, and FORMAT 4 follow-up:
-
-- No duplicate task IDs within a project instance
-- Every dependency reference must point to an existing task ID
-- No cycles
-- No two tasks write the same file unless one depends (directly or transitively) on the other
-- Total Active DAG size never exceeds 50 tasks
-
----
-
-## Verification Matrix
-
-| Ecosystem | Detected by | Verification commands |
-|-----------|-------------|----------------------|
-| `vanilla` | no package.json, no game.js | headless HTML structure check (no gate) |
-| `phaser` | game.js present, no package.json | headless HTML structure check (no gate) |
-| `phaser` (with npm) | game.js + package.json | npm scripts |
-| `node` | package.json | npm run lint, npm test, npm install |
-| `react-vite` | vite.config.js/ts | npm install && npm run build |
-| `python` | requirements.txt / pyproject.toml | pytest |
-| `fastapi` | requirements.txt with fastapi | pip install, pytest |
-
-The headless HTML check confirms `<html>` and `<body>` tags are present in all `.html` files. It replaces the old manual yes/no gate, allowing the pipeline to run fully unattended for all static web projects.
-
----
-
-## Hardware Context
-
-J-Claw is designed around running a 13–14B 4-bit quantized coding model locally on a GPU. The orchestrator prompt encodes these constraints so the orchestrator never plans work the worker can't handle:
-
-- Tasks are atomic: 1–3 files each
-- Objectives are self-contained — the worker sees one task at a time
-- Architecture is kept flat; no sprawling abstractions
-- Upper model bound: ~14B 4-bit (fits in 8–16 GB VRAM)
-
-Default worker: `qwen2.5-coder:7b` (configurable via `WORKER_MODEL` in `.env`). Tested with `qwen2.5-coder:14b`.
+**FORMAT 5 (oversize)**: if a project exceeds the 50-task budget, orchestrator emits a sub-project graph and the harness runs each as its own pipeline instance in dependency order.
 
 ---
 
@@ -265,8 +125,8 @@ Default worker: `qwen2.5-coder:7b` (configurable via `WORKER_MODEL` in `.env`). 
 
 - Windows 10/11
 - Python 3.10+
-- [Ollama](https://ollama.com/download/windows)
-- Anthropic or OpenRouter API key *(optional — only needed for automated orchestrator mode)*
+- [Ollama](https://ollama.com/download/windows) with a code model pulled
+- Anthropic API key *(for automated orchestrator mode and final code review)*
 
 ### Install
 
@@ -274,8 +134,7 @@ Default worker: `qwen2.5-coder:7b` (configurable via `WORKER_MODEL` in `.env`). 
 git clone https://github.com/Matt28296/j-claw.git
 cd j-claw\harness
 
-# Allow script execution (once)
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser   # once
 
 python -m venv .venv
 .venv\Scripts\activate
@@ -284,207 +143,227 @@ pip install -r requirements.txt
 
 ### Pull a worker model
 
-```
-ollama pull qwen2.5-coder:7b    # comfortable on 8 GB VRAM
-ollama pull qwen2.5-coder:14b   # 8–16 GB VRAM at Q4
+```powershell
+ollama pull qwen2.5-coder:14b   # recommended — 8–16 GB VRAM at Q4
+ollama pull qwen2.5-coder:7b    # lighter — 8 GB VRAM
 ```
 
 ### Configure
 
-```
+```powershell
 copy harness\.env.example harness\.env
+# then edit harness\.env with your keys
 ```
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Required for auto orchestrator mode (and final code review) |
-| `OPENROUTER_API_KEY` | — | Alternative to Anthropic — set `ORCHESTRATOR_PROVIDER=openrouter` |
+| `ANTHROPIC_API_KEY` | — | Required for auto orchestrator + final review |
+| `OPENROUTER_API_KEY` | — | Alternative — set `ORCHESTRATOR_PROVIDER=openrouter` |
 | `WORKER_MODEL` | `qwen2.5-coder:7b` | Ollama model for code writing |
-| `ORCHESTRATOR_MODEL` | `claude-sonnet-4-6` | Claude model for orchestration and final review |
-| `ORCHESTRATOR_PROVIDER` | `anthropic` | `anthropic` or `openrouter` |
-| `ORCHESTRATOR_API_MODEL` | `openrouter/auto` | Model string passed to OpenRouter |
+| `ORCHESTRATOR_MODEL` | `claude-sonnet-4-6` | Claude model for planning and review |
+| `WORKER_FALLBACKS` | openrouter free models | Fallback chain if Ollama is down |
+| `MAX_PARALLEL_WORKERS` | `2` | Concurrent Ollama workers (independent DAG branches) |
+| `ORCHESTRATOR_MAX_TOKENS` | `16384` | Raise to `32768` for very large full-stack DAGs |
+| `SD_API_URL` | `http://localhost:7860` | Stable Diffusion WebUI endpoint for asset tasks |
+| `ASSET_PROVIDER` | `sd` | `sd` or `none` |
+| `COQUI_API_URL` | `http://localhost:5002` | Coqui TTS endpoint for audio tasks |
+| `DEPLOY_HOOK` | — | CLI command run after git commit (e.g. `vercel --prod --yes`) |
+| `JWT_SECRET` | random default | Secret key for generated apps that include auth |
+| `TELEGRAM_BOT_TOKEN` | — | BotFather token — enables `bot.bat` Telegram control |
+| `TELEGRAM_CHAT_ID` | — | Restrict bot to your chat ID (get from @userinfobot) |
+| `EXPERIENCE_LOG` | `experience.jsonl` | Path for local EXECUTION_ERROR outcome log |
 | `PROJECTS_DIR` | `./projects` | Output directory for generated projects |
-| `MAX_RETRIES_PER_TASK` | `3` | EXECUTION_ERROR retries before halting |
-| `MAX_FORMAT5_DEPTH` | `3` | Max recursion depth for sub-projects |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama API endpoint |
 
 ---
 
 ## Usage
 
-From the repo root (`j-claw/`):
+From the repo root:
 
-**Run with auto-accept (fully zero-touch):**
-```
-.\run.bat --yes "A Phaser 3 snake game with score tracking and a game over screen"
-```
+```powershell
+# Fully zero-touch — auto-accept spec
+.\run.bat --yes "A snake game in the browser"
 
-**Interactive mode (review and accept spec before execution):**
-```
+# Interactive — review and approve the spec before execution
 .\run.bat "A single-page todo app"
-```
 
-**Manual orchestrator mode (no API key required):**
-```
+# Manual orchestrator — no API key required
 .\run.bat --manual
+
+# Add a feature to an existing generated project
+.\run.bat --continue "harness\projects\<project-folder>" "Add user authentication"
+
+# Mission Control dashboard (open in a second terminal)
+python dashboard.py   # then open http://localhost:8765/dashboard/index.html
+
+# Telegram bot — control the pipeline from your phone
+.\bot.bat             # requires TELEGRAM_BOT_TOKEN in .env
 ```
 
-In manual mode, the harness writes `harness/orchestrator_input.json` at each pipeline state, waits for you to fill `harness/orchestrator_response.json`, and continues when you press Enter.
+---
 
-**Mission Control dashboard (open in a second terminal):**
+## Telegram Bot Commands
+
+Start with `.\bot.bat` after setting `TELEGRAM_BOT_TOKEN` in `.env`:
+
+| Command | What it does |
+|---|---|
+| `/run <spec>` | Triggers a pipeline run — streams output to your Telegram chat |
+| `/status` | Shows current pipeline state, tasks done/total, elapsed time |
+| `/cancel` | Kills the running pipeline |
+| `/projects` | Lists the 5 most recently generated projects |
+
+---
+
+## OpenClaw Integration
+
+[OpenClaw](https://openclaw.ai) is a local AI assistant with native Telegram/WhatsApp/Discord access. J-claw ships a ready-made OpenClaw skill.
+
+**To activate:**
+1. Install OpenClaw from openclaw.ai
+2. Copy the skill: `cp openclaw-skill C:\Users\<you>\.openclaw\workspace\skills\j-claw -Recurse`
+3. Done — say "build me a React dashboard" in your Telegram chat and OpenClaw invokes j-claw
+
+> **Security note**: Before installing any third-party OpenClaw plugins, audit their source code. OpenClaw plugins run in-process with full OS privileges — no sandbox. The `@alan512/ExperienceEngine` plugin was reviewed and rejected (exfiltrates task data to external LLMs). The `@openclaw/memory-lancedb` plugin is safe only when configured with local Ollama embeddings.
+
+---
+
+## Asset Generation
+
+Image assets (sprites, icons, backgrounds) are generated locally via Stable Diffusion WebUI:
+
+1. Start AUTOMATIC1111/Forge/ComfyUI with `--api` flag
+2. Run j-claw normally — asset tasks are routed to SD automatically
+3. If SD is not running, SVG color-block placeholders are written instead (pipeline continues unblocked)
+
+Configure the SD endpoint: `SD_API_URL=http://localhost:7860` in `.env`.
+
+---
+
+## Audio Generation
+
+Sound effects and TTS for game/app projects via Coqui TTS:
+
+1. Start a Coqui TTS server at `localhost:5002`
+2. Audio tasks are routed automatically
+3. Silent `.wav` placeholders are written if Coqui is not running
+
+Configure: `COQUI_API_URL=http://localhost:5002` in `.env`.
+
+---
+
+## Deployment Hooks
+
+Run a deployment command automatically after every successful project build:
+
 ```
+# harness/.env
+DEPLOY_HOOK=vercel --prod --yes          # Vercel
+DEPLOY_HOOK=netlify deploy --prod        # Netlify
+DEPLOY_HOOK=railway up                   # Railway
+```
+
+The hook runs in the project output directory after git commit. The deployment URL is extracted from the command output and written to `HANDOFF.md`.
+
+---
+
+## Experience Tracker
+
+J-claw keeps a local JSONL log (`experience.jsonl`) of every `EXECUTION_ERROR` refinement outcome. When retrying a failed task, the top matching successful fix patterns are prepended to the orchestrator's context — so the pipeline gets better at fixing recurring errors over time.
+
+- Fully local — no external APIs, no network calls
+- Simple word-overlap matching (no embeddings)
+- Configure path: `EXPERIENCE_LOG=experience.jsonl` in `.env`
+
+---
+
+## Mission Control Dashboard
+
+```powershell
 python dashboard.py
+# open http://localhost:8765/dashboard/index.html
 ```
-Then open `http://localhost:8765/dashboard/index.html`.
 
-**With a specific output directory:**
-```
-.\run.bat --yes "A counter app" --output .\harness\projects\my-counter
-```
+Live panels:
+- **Active Agent** — which API is being called, live elapsed timer
+- **Tasks** — color-coded cards (pending / running / done / failed), retry badges, file pills
+- **Events** — live feed of every pipeline event
+- **Test Results** — per-task verification with ecosystem badges; Playwright/pytest output colorized
+- **Work Log** — chronological ORCH vs WORKER record with model names
+- **Review Banner** — green PASS / red ISSUES FOUND when pipeline completes
+- **OpenClaw Banner** — purple APPROVED stamp when claude CLI is on PATH
+
+**Copy Logs button** — structured plain-text snapshot of all pipeline state to clipboard.
 
 ---
 
 ## Pipeline Output
 
-For every project, the pipeline writes to `harness/projects/<slug>/`:
+Every project writes to `harness/projects/<slug>/`:
 
 | File | Description |
-|------|-------------|
-| `index.html`, `*.js`, `*.py`, … | Generated source files |
-| `REVIEW.md` | Final code review verdict — `VERDICT: PASS` or `VERDICT: ISSUES FOUND` with issue list |
-| `HANDOFF.md` | Pipeline completion report — status, heal cycles, test results, instructions for follow-up |
-
-If the `claude` CLI is on your PATH, `HANDOFF.md` will also contain a `## Claude Code Verdict` section written by an autonomous Claude Code session reviewing the final output.
-
----
-
-## Supported Stacks
-
-| Stack | Use case | Build requirement |
-|---|---|---|
-| `vanilla` | Static HTML/JS apps, no build step | None |
-| `phaser` | Browser games (Phaser 3 CDN) | None |
-| `fastapi` | Python REST API + SQLite | `pip install` |
-| `react-vite` | React + Vite + Tailwind SPA | Node.js + npm |
-
-The stack is set in the FORMAT 1 spec's `architecture` section. The worker receives stack-specific instructions (e.g. `window.*` globals for Phaser, no ES modules for vanilla, `yield` in FastAPI dependencies).
+|---|---|
+| Source files | All generated code (frontend + backend as needed) |
+| `manifest.json` + `sw.js` | PWA files (vanilla and react-vite stacks) |
+| `REVIEW.md` | Claude code review — `VERDICT: PASS` or `VERDICT: ISSUES FOUND` |
+| `HANDOFF.md` | Pipeline report — status, heal cycles, test results, deployment URL |
 
 ---
 
-## Orchestrator Prompt
+## What's Left To Build
 
-`orchestrator.txt` is the system prompt loaded at runtime. Edit it to change how the orchestrator plans projects, decomposes tasks, or handles errors. Key sections:
-
-- **Hardware context** — model size limits, VRAM ceiling, concurrency rules
-- **State machine** — which format to emit for each `system_state`
-- **Format schemas** — explicit field-by-field spec for each format
-- **Task writing rules** — atomic tasks, 1–3 files, no stubs, complete file content
-- **Verification rules** — never assign `manual` for static projects; use `none` instead
-- **REVIEW_FAILED handling** — how to produce targeted fix tasks from a list of review issues
-- **Anti-patterns** — common failure modes to avoid
-
----
-
-## What Was Built (Session Log)
-
-This section documents the major features added in the most recent development push, in build order.
-
-### 1. Windows Unicode Fix
-`run.bat` sets `PYTHONUTF8=1` and runs `chcp 65001`. Without this, Rich's `LegacyWindowsTerm` used Windows codepage 1252 and crashed on `▶` and `✓` characters when running in a subprocess.
-
-### 2. Zero-Touch Verification for Static Projects
-`verification.py` gained `_is_bare_html_task()` and `_run_html_auto()`. Any task whose files are all static web types (`.html`, `.css`, `.js`, etc.) now bypasses the manual yes/no gate entirely and is verified with a headless check for `<html>` and `<body>` tags. The package.json presence check was deliberately removed — a task that only writes static files is static by definition, and stale package.json files from previous runs were causing false negatives.
-
-Phaser projects without `package.json` also use the headless check instead of falling through to the manual gate.
-
-### 3. Mission Control Dashboard
-`dashboard.py` is a Python `http.server` that serves the repo root on port 8765 and auto-opens the browser. `dashboard/index.html` is the live dashboard:
-
-- Polls `mission_control.json` every second
-- Active agent card with live elapsed timer
-- Task cards (color-coded, retry badge, file pills)
-- Streaming event log
-- Test results panel with colorized Playwright/pytest log parsing
-- Work log panel distinguishing orchestrator (ORCH) vs worker actions
-- Review banner (green PASS / red ISSUES FOUND) fetched from REVIEW.md on completion
-- OpenClaw banner (purple) fetched from HANDOFF.md when claude CLI verdict is present
-- Copy Logs button — formats all state as plain text and writes to clipboard
-
-### 4. State Writer Hooks
-`state_writer.py` was wired into `scheduler.py` at every execution point: task start, task done, task failed, file written, verification result. Added `work_log[]` and `test_results[]` to the state. Fixed `output_url` path resolution so the dashboard can locate project files relative to the server root.
-
-### 5. Final Code Review
-`final_review.py` calls Claude with all project output files after PROJECT_REVIEW passes. It checks for stubs, hollow functions, broken imports, and missing files. Writes `REVIEW.md` with a structured verdict. Returns a boolean that drives the healing loop.
-
-### 6. Self-Healing Loop
-When `final_review` returns `ISSUES FOUND`, `main.py` parses the `ISSUES:` bullet points from `REVIEW.md` and calls the orchestrator in `REVIEW_FAILED` state with the issue list. The orchestrator returns targeted fix tasks. The scheduler re-runs. The review runs again. Up to 2 heal cycles before giving up. `REVIEW_FAILED` was added to `validator.py` and `orchestrator.txt` as a first-class pipeline state.
-
-### 7. HANDOFF.md + OpenClaw Stamp
-`handoff.py` always runs at pipeline end. It writes `HANDOFF.md` with the run summary, test results (pulled from `mission_control.json`), review verdict, and heal cycle count. If `claude` is on PATH, it invokes `claude --print` in the project directory with a quality-check prompt. The verdict (`OPENCLAW: APPROVED` or `OPENCLAW: ISSUES FOUND`) is appended to `HANDOFF.md` and shown in the dashboard's OpenClaw banner.
-
-### 8. Self-Healing Loop — Battle Tested
-Ran a Phaser 3 snake game end-to-end. The final code review caught a real bug (path mismatch: `index.html` referenced `GameScene.js` at root but task-003 wrote it to `js/GameScene.js`). The healing loop fired automatically, generated 3 fix tasks, the worker rewrote the files, and the review passed on the second cycle. The game shipped zero-touch.
-
-Discovered and fixed three bugs during this test:
-- Heal-cycle fix tasks were invisible in the dashboard (added `on_tasks_added()` hook to state_writer, called from main.py)
-- Orchestrator's fix tasks conflicted with the DAG validator (added rule: fix tasks must declare the original task as a dependency when rewriting an existing file)
-- Fix tasks were moving files to new paths instead of fixing the referencing file (added orchestrator rule: always fix in place, never change a file's path)
-
-### 9. Output Directory Cleanup
-`run_project()` now wipes the output directory at the start of every run via `shutil.rmtree`. Without this, stale files from a previous run on the same slug contaminated the new run's final review — a re-run of the snake game left `main.js` and root-level `GameScene.js` from the first run, causing the review to flag them as orphan files even though the new run never wrote them.
-
-### 10. HANDOFF.md Excluded from Review
-Added `HANDOFF.md` to `final_review.py`'s `_SKIP_FILES` set so the review never reads a previous run's handoff report as a project source file.
-
----
-
-## Roadmap
-
-### Completed
+### P1 — In progress / next up
 
 | Item | Status |
-|------|--------|
-| Eliminate manual verification gate for HTML/Phaser projects | ✓ Done — headless HTML structure check |
-| Mission Control live dashboard | ✓ Done |
-| Test results panel in dashboard | ✓ Done |
-| Work log panel in dashboard | ✓ Done |
-| Copy Logs button in dashboard | ✓ Done |
-| Final code review (Claude API) after pipeline completes | ✓ Done |
-| Self-healing loop — auto-fix issues flagged by final review | ✓ Done |
-| Self-healing loop — battle tested on Phaser 3 snake game | ✓ Done — loop caught real path mismatch, fixed and passed |
-| Heal-cycle fix tasks visible in dashboard | ✓ Done — on_tasks_added() hook |
-| DAG conflict prevention for heal tasks | ✓ Done — orchestrator prompt rules |
-| Output directory cleanup before each run | ✓ Done — shutil.rmtree at run start |
-| HANDOFF.md excluded from final code review | ✓ Done |
-| HANDOFF.md pipeline completion report | ✓ Done |
-| OpenClaw autonomous stamp via claude CLI | ✓ Done (requires claude CLI on PATH) |
-| OpenRouter orchestrator support with fallback models | ✓ Done |
-| Windows UTF-8 encoding fix | ✓ Done |
+|---|---|
+| **Database migrations** — Alembic for FastAPI (`alembic upgrade head` at startup) | 🔄 In progress |
+| **Audio generation** — Coqui TTS + silent placeholder fallback | 🔄 In progress |
+| **Experience tracker** — local JSONL fix-outcome log fed back into retries | 🔄 In progress |
 
-### Open
+### P2 — Planned
 
-| # | Issue | Impact |
-|---|-------|--------|
-| — | **Dashboard CSS redesign** — current styling is functional but plain; needs pipeline stage tracker, task progress bar, heal cycle badge, and a visual refresh | Dashboard is harder to read at a glance during long runs |
-| — | **Playwright browser testing for game projects** — headless HTML check confirms file structure but cannot run the game loop, check canvas rendering, or detect runtime JS errors | Full correctness testing of Phaser/vanilla games requires a real browser |
-| — | **Stub detection pre-check** — add a post-write scanner in `scheduler.py` that checks for known stub patterns before verification runs; fail the task immediately instead of waiting for the final review to catch it | Stub output wastes a full review cycle before being caught |
-| — | **Parallel task execution** — `MAX_PARALLEL_WORKERS` is configurable but the scheduler runs tasks sequentially; independent DAG branches could run concurrently | Pipeline is slower than necessary on multi-task DAGs with no inter-task dependencies |
-| — | **OpenClaw stamp without CLI** — `try_claude_stamp` silently skips if `claude` is not on PATH; a direct Anthropic API fallback would give all users the autonomous verdict | Final quality stamp is optional rather than guaranteed |
+| Item | What it does |
+|---|---|
+| **Tauri stack** | Rust + WebView desktop apps — lighter than Electron |
+| **E2E test generation** | Playwright test files auto-generated alongside every project |
+| **WebSocket/SSE stack** | Real-time dashboards and data streams (separate from socket-io games) |
+| **Inter-service testing** | Spin up FastAPI + React together, smoke test against real stack |
 
-### Priority Order
+### P3 — Long term
 
-1. **Dashboard redesign** — visual refresh + stage tracker + progress bar + heal badge makes the dashboard actually informative at a glance.
-2. **Playwright integration** — add headless Chromium check for game projects; the last quality gap for zero-touch game verification.
-3. **Stub detection** — post-write scan catches hollow output before it wastes a review cycle.
-4. **Parallel scheduler** — wire `MAX_PARALLEL_WORKERS` into actual concurrent dispatch; 30–50% wall time reduction on larger DAGs.
+| Item |
+|---|
+| Movie pipeline (script → storyboard → voice → video assembly) |
+| Godot 3D game generation via headless Godot CLI |
+| IPFS / on-chain deployment for Web3 projects |
+| Payment integration (Stripe/LemonSqueezy scaffolding) |
+| Real native mobile compilation (Swift/Kotlin — Expo covers JS-only today) |
 
 ---
 
 ## Known Limitations
 
-- **Projects directory is gitignored** — generated output is local only and not committed to this repo.
-- **Final code review requires `ANTHROPIC_API_KEY`** — if the key is not set, `final_review.py` auto-passes and neither `REVIEW.md` nor `HANDOFF.md` will contain a real verdict.
+- **Projects directory is gitignored** — generated output is local only.
+- **Final code review requires `ANTHROPIC_API_KEY`** — without it, `REVIEW.md` and `HANDOFF.md` won't contain a real verdict.
 - **claude CLI stamp is optional** — OpenClaw verdict in the dashboard only appears if `claude` is installed and on PATH.
+- **SD/Coqui/Ollama must be running** — the pipeline degrades gracefully (SVG/silent/OpenRouter fallbacks) but local services need to be up for full capability.
+
+---
+
+## Architecture Notes
+
+**Orchestrator** (`orchestrator.py`): Three implementations behind the same interface:
+- `Orchestrator` — Anthropic API (default)
+- `OpenRouterOrchestrator` — any OpenRouter model with cascading fallback on rate limit
+- `ManualOrchestrator` — writes JSON files, waits for human to fill in response (no API key needed)
+
+**Worker** (`worker.py`): Sends tasks to local Ollama with stack-specific prompt instructions. 10 stack prompts covering web, API, game, mobile, desktop, Web3, and asset generation. Detects truncated output, fixes literal `\n` sequences.
+
+**Scheduler** (`scheduler.py`): Topological DAG execution with parallel workers. Routes asset tasks to `asset_worker.py`, audio tasks to `audio_worker.py`, code tasks to `worker.py`. On failure: calls orchestrator in `EXECUTION_ERROR`, reads experience hints, retries up to `MAX_RETRIES_PER_TASK`.
+
+**Verification** (`verification.py`): Auto-detects ecosystem (Node, Python, FastAPI, React+Vite, Phaser, vanilla, web3, electron, socket-io, three-js). Runs appropriate checks. Validates PWA files (`manifest.json` + `sw.js`) for vanilla/react-vite projects.
+
+**Self-healing loop** (`main.py`): When final review returns `ISSUES FOUND`, parses the `ISSUES:` list, calls orchestrator in `REVIEW_FAILED` state, re-runs scheduler. Up to 2 cycles.
 
 ---
 

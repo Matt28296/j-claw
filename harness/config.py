@@ -47,6 +47,13 @@ LOCAL_FIRST_TASK_TYPES: set[str] = set(
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
 GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY: str | None = os.getenv("OPENROUTER_API_KEY")
+
+# Default JWT secret injected into generated full-stack projects that include auth tasks.
+# Workers read JWT_SECRET from this env var at code-gen time so .env.example is pre-populated.
+JWT_SECRET: str = os.getenv(
+    "JWT_SECRET",
+    "change-me-to-a-long-random-secret-at-least-32-chars",
+)
 SD_API_URL: str = os.getenv("SD_API_URL", "http://localhost:7860")   # AUTOMATIC1111 / Forge / ComfyUI
 ASSET_PROVIDER: str = os.getenv("ASSET_PROVIDER", "sd")  # "sd" | "none"
 
@@ -60,6 +67,7 @@ MAX_TASKS: int = int(os.getenv("MAX_TASKS", "50"))
 ORCHESTRATOR_MAX_TOKENS: int = int(os.getenv("ORCHESTRATOR_MAX_TOKENS", "16384"))
 MAX_FORMAT5_DEPTH: int = int(os.getenv("MAX_FORMAT5_DEPTH", "3"))
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+EXPERIENCE_LOG: str = os.getenv("EXPERIENCE_LOG", "experience.jsonl")
 
 # Path to the orchestrator system prompt (one level up from this file)
 ORCHESTRATOR_PROMPT_PATH: Path = Path(__file__).parent.parent / "orchestrator.txt"

@@ -299,7 +299,12 @@ def _run_react_vite_build(project_dir: Path) -> tuple[bool, str]:
     if not dist.exists():
         return False, f"Build succeeded but dist/index.html not found at {dist}"
     console.print("  [green]Build output: dist/index.html exists.[/green]")
-    return True, log + "\n" + log2
+
+    pwa_ok, pwa_log = check_pwa_files(project_dir)
+    combined = "\n".join(filter(None, [log, log2, pwa_log]))
+    if not pwa_ok:
+        return False, combined
+    return True, combined
 
 
 def _run_fastapi_install(project_dir: Path) -> tuple[bool, str]:
@@ -310,6 +315,16 @@ def _run_fastapi_install(project_dir: Path) -> tuple[bool, str]:
         ok, log = _run_cmd(["pip", "install", "-r", "requirements.txt"], project_dir, _TIMEOUT_BUILD)
         if not ok:
             return False, f"pip install failed:\n{log}"
+        # Run Alembic migrations if alembic.ini exists (skip gracefully for older projects)
+        alembic_ini = project_dir / "alembic.ini"
+        if alembic_ini.exists():
+            console.print("  [dim]FastAPI: alembic upgrade head[/dim]")
+            ok2, log2 = _run_cmd(["alembic", "upgrade", "head"], project_dir, _TIMEOUT_BUILD)
+            combined = "\n".join(filter(None, [log, log2]))
+            if not ok2:
+                return False, f"alembic upgrade head failed:\n{log2}"
+            console.print("  [green]Alembic migrations applied successfully.[/green]")
+            return True, combined
         return True, log
     elif pyproj.exists():
         console.print(
@@ -454,13 +469,58 @@ def _is_bare_html_task(task, project_dir: Path) -> bool:
     )
 
 
+def check_pwa_files(project_dir: Path) -> tuple[bool, str]:
+    """Check PWA completeness: if manifest.json exists, sw.js must also exist.
+
+    For react-vite projects the files live under public/; for vanilla projects
+    they sit at the project root. Both locations are checked.
+
+    Returns (passed, message). A missing sw.js is a hard failure; a missing
+    manifest.json means PWA was not requested and the check is skipped (pass).
+    """
+    # Candidate locations for manifest and sw files
+    manifest_candidates = [
+        project_dir / "manifest.json",
+        project_dir / "manifest.webmanifest",
+        project_dir / "public" / "manifest.json",
+        project_dir / "public" / "manifest.webmanifest",
+    ]
+    sw_candidates = [
+        project_dir / "sw.js",
+        project_dir / "public" / "sw.js",
+    ]
+
+    manifest_path = next((p for p in manifest_candidates if p.exists()), None)
+    if manifest_path is None:
+        # No manifest present — PWA not included; nothing to check.
+        return True, "pwa check skipped: no manifest.json found"
+
+    sw_path = next((p for p in sw_candidates if p.exists()), None)
+    if sw_path is None:
+        msg = (
+            f"PWA check FAILED: manifest.json found at {manifest_path.relative_to(project_dir)} "
+            "but sw.js is missing. Add a service worker at sw.js (vanilla) or public/sw.js (react-vite)."
+        )
+        console.print(f"  [red]{msg}[/red]")
+        return False, msg
+
+    console.print(
+        f"  [green]PWA check passed: {manifest_path.relative_to(project_dir)} "
+        f"and {sw_path.relative_to(project_dir)} both present.[/green]"
+    )
+    return True, f"pwa check passed: manifest={manifest_path.name}, sw={sw_path.name}"
+
+
 def run_playwright_project_check(project_dir: Path) -> tuple[bool, str]:
     """Public entry point for a project-level Playwright check.
 
     Called from main.py after all tasks complete for phaser/vanilla projects
     where task verification is 'none' and no per-task check fires.
     """
-    return _run_playwright_check(project_dir)
+    pw_ok, pw_log = _run_playwright_check(project_dir)
+    pwa_ok, pwa_log = check_pwa_files(project_dir)
+    combined_log = "\n".join(filter(None, [pw_log, pwa_log]))
+    return pw_ok and pwa_ok, combined_log
 
 
 def _run_playwright_check(project_dir: Path) -> tuple[bool, str]:

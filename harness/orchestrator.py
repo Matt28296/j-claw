@@ -82,6 +82,11 @@ class Orchestrator:
                     system=self._system_prompt,
                     messages=[{"role": "user", "content": user_message}],
                 )
+                if response.stop_reason == "max_tokens":
+                    console.print(
+                        f"[yellow]⚠ Orchestrator hit max_tokens ({ORCHESTRATOR_MAX_TOKENS}) — "
+                        "response truncated. Raise ORCHESTRATOR_MAX_TOKENS in .env or shorten DAG.[/yellow]"
+                    )
                 text = response.content[0].text.strip()
                 text = _strip_fences(text)
                 parsed = json.loads(text)

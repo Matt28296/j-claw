@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
 
 from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, MAX_PARALLEL_WORKERS, MAX_TASKS
+from experience_log import log_outcome, get_relevant_hints
 from project import ProjectInstance, Task
 from worker import execute_task
 from verification import run_verification, detect_ecosystem
@@ -130,6 +131,8 @@ class Scheduler:
             task.error_log = str(exc)
             console.print(f"  [red]✗ error: {exc}[/red]")
             sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
+            if task.retry_count >= MAX_RETRIES_PER_TASK:
+                log_outcome(task.id, task.type, str(exc)[:200], "none", "", succeeded=False)
             self._handle_error(task)
 
     # ── error handling ────────────────────────────────────────────────────────
@@ -142,12 +145,14 @@ class Scheduler:
             )
             return
 
+        hints = get_relevant_hints(task.type, task.error_log[:200])
+
         console.print(
             f"  [yellow]Requesting EXECUTION_ERROR refinement "
             f"(attempt {task.retry_count}/{MAX_RETRIES_PER_TASK})…[/yellow]"
         )
 
-        refinement = self.orch.call({
+        payload: dict = {
             "system_state": "EXECUTION_ERROR",
             "failed_task": {
                 "id": task.id,
@@ -160,7 +165,11 @@ class Scheduler:
             },
             "error_log": task.error_log[:3000],
             "active_dag": self.instance.tasks_as_list(),
-        })
+        }
+        if hints:
+            payload["experience_hints"] = hints
+
+        refinement = self.orch.call(payload)
 
         action = refinement["action"]
         console.print(
@@ -179,6 +188,14 @@ class Scheduler:
                 return
 
         self.instance.apply_format3(refinement)
+        log_outcome(
+            task.id,
+            task.type,
+            task.error_log[:200],
+            refinement["action"],
+            refinement["updated_tasks"][0]["objective"] if refinement.get("updated_tasks") else "",
+            succeeded=True,
+        )
 
     # ── project review ────────────────────────────────────────────────────────
 

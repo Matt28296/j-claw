@@ -38,6 +38,11 @@ Stack: vanilla HTML/CSS/JS (no build step)
 - Mobile-first: add sm: md: lg: breakpoints on layout-changing elements.
 - Buttons must look like buttons: rounded corners, padding, background color, hover color change.
 - Inputs must have visible borders, padding, focus ring (focus:ring-2 focus:ring-indigo-500).
+PWA support (include in every vanilla project that has a UI):
+- Create manifest.json at the project root with: name, short_name, start_url ("/"), display ("standalone"), background_color ("#ffffff"), theme_color ("#4f46e5"), and an icons array with two entries — { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" } and { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }.
+- Create sw.js at the project root implementing a cache-first service worker: on "install" event, open a cache named "app-shell-v1" and cache ["./", "./index.html", "./app.js"] (adjust paths to match actual JS file names); on "fetch" event, respond from cache if found, otherwise fetch from network.
+- In index.html <head>: add <link rel="manifest" href="manifest.json"> and <meta name="theme-color" content="#4f46e5">.
+- In index.html before </body>: add a <script> block that registers the service worker — check "serviceWorker" in navigator, then call navigator.serviceWorker.register("./sw.js") inside a DOMContentLoaded listener.
 """,
 
     "react-vite": """\
@@ -52,21 +57,86 @@ Stack: React + Vite + Tailwind CSS (npm build required)
 - ES modules ARE allowed: use import/export freely.
 - Props: always destructure. Events: always use arrow functions in handlers.
 - Keep components small (< 80 lines each). Extract repeated UI into a component file.
+PWA support (include in every react-vite project that has a UI):
+- Create public/manifest.json (Vite copies public/ to dist/ automatically) with: name, short_name, start_url ("/"), display ("standalone"), background_color ("#ffffff"), theme_color ("#4f46e5"), and an icons array with two entries — { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" } and { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }.
+- Create public/sw.js implementing a cache-first service worker: on "install" event, open a cache named "app-shell-v1" and cache ["/", "/index.html"] (the built assets); on "fetch" event, respond from cache if found, otherwise fetch from network and cache the response.
+- In index.html <head>: add <link rel="manifest" href="/manifest.json"> and <meta name="theme-color" content="#4f46e5">.
+- In src/main.jsx, after the ReactDOM.createRoot call, add a service worker registration block: check "serviceWorker" in navigator, then call navigator.serviceWorker.register("/sw.js").catch(console.error).
+- Do NOT add vite-plugin-pwa — use the manual manifest + sw.js approach above to keep the dependency surface minimal.
 """,
 
     "fastapi": """\
-Stack: Python + FastAPI + SQLite (uvicorn server required)
-- Entry point: main.py with a FastAPI() app instance and uvicorn.run() guard.
-- Database: use Python's built-in sqlite3 module, database file named app.db.
-- Schema init: call a init_db() function at module level to CREATE TABLE IF NOT EXISTS.
-- SQL strings: ALWAYS use double-quoted Python strings for SQL so single quotes inside (e.g. datetime('now')) don't break the string. Example: cursor.execute("CREATE TABLE ... DEFAULT (datetime('now'))")
-- Routes: use @app.get/post/put/delete decorators. Return dicts (FastAPI auto-serializes).
+Stack: Python + FastAPI + SQLAlchemy ORM + SQLite + Alembic migrations (uvicorn server required)
+- Entry point: main.py with a FastAPI() app instance, a lifespan context manager, and uvicorn.run() guard.
+- Database: use SQLAlchemy with a SQLite file named app.db. Define all models in models.py inheriting from Base (declared in database.py).
+- database.py: create engine with `create_engine("sqlite:///./app.db", connect_args={"check_same_thread": False})`, declare `Base = declarative_base()`, create `SessionLocal = sessionmaker(...)`. Do NOT call `Base.metadata.create_all()` anywhere — Alembic handles schema creation.
+- get_db() dependency: use yield to provide a SessionLocal() session and close it in finally.
+- Routes: use @app.get/post/put/delete decorators. Return dicts or Pydantic schemas (FastAPI auto-serializes).
 - CORS: use app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]). NEVER instantiate CORSMiddleware directly as a variable.
-- requirements.txt: fastapi, uvicorn[standard]. Nothing else unless strictly needed.
-- Pydantic models: define a BaseModel for every POST/PUT request body.
+- requirements.txt: fastapi, uvicorn[standard], sqlalchemy, alembic. Nothing else unless strictly needed.
+- Pydantic models: define a BaseModel for every POST/PUT request body (keep in schemas.py or inline in main.py).
 - Error handling: raise HTTPException(status_code=..., detail="...") for known error cases.
-- No ORM, no migrations — raw sqlite3 with parameterized queries (use ? placeholders, never f-strings for SQL).
-- get_conn() dependency: must use yield (not return) so FastAPI closes the connection after each request.
+- NEVER use raw sqlite3, NEVER use CREATE TABLE IF NOT EXISTS, NEVER call Base.metadata.create_all() — always use Alembic migrations.
+- Alembic setup (REQUIRED — generate all these files):
+  * alembic.ini at project root: standard Alembic config with script_location = migrations and sqlalchemy.url = sqlite:///./app.db
+  * migrations/env.py: import Base from database and set target_metadata = Base.metadata so autogenerate works
+  * migrations/versions/ directory: include a .gitkeep placeholder file
+  * migrations/versions/0001_initial.py: a real Alembic migration with upgrade() using op.create_table() for every table defined in models.py, and a matching downgrade() that calls op.drop_table() in reverse order. Use proper Column() calls matching your SQLAlchemy model definitions.
+- main.py lifespan: on startup, run `subprocess.run(["alembic", "upgrade", "head"], check=True)` so the DB schema is always up to date when the server starts. Import subprocess at the top of main.py.
+- alembic.ini format (write this exactly):
+  [alembic]
+  script_location = migrations
+  sqlalchemy.url = sqlite:///./app.db
+  [loggers]
+  keys = root,sqlalchemy,alembic
+  [handlers]
+  keys = console
+  [formatters]
+  keys = generic
+  [logger_root]
+  level = WARN
+  handlers = console
+  qualname =
+  [logger_sqlalchemy]
+  level = WARN
+  handlers =
+  qualname = sqlalchemy.engine
+  [logger_alembic]
+  level = INFO
+  handlers =
+  qualname = alembic
+  [handler_console]
+  class = StreamHandler
+  args = (sys.stderr,)
+  level = NOTSET
+  formatter = generic
+  [formatter_generic]
+  format = %(levelname)-5.5s [%(name)s] %(message)s
+  datefmt = %H:%M:%S
+- migrations/env.py format (write this exactly, substituting your actual Base import):
+  from logging.config import fileConfig
+  from sqlalchemy import engine_from_config, pool
+  from alembic import context
+  from database import Base
+  config = context.config
+  if config.config_file_name is not None:
+      fileConfig(config.config_file_name)
+  target_metadata = Base.metadata
+  def run_migrations_offline():
+      url = config.get_main_option("sqlalchemy.url")
+      context.configure(url=url, target_metadata=target_metadata, literal_binds=True, dialect_opts={"paramstyle": "named"})
+      with context.begin_transaction():
+          context.run_migrations()
+  def run_migrations_online():
+      connectable = engine_from_config(config.get_section(config.config_ini_section), prefix="sqlalchemy.", poolclass=pool.NullPool)
+      with connectable.connect() as connection:
+          context.configure(connection=connection, target_metadata=target_metadata)
+          with context.begin_transaction():
+              context.run_migrations()
+  if context.is_offline_mode():
+      run_migrations_offline()
+  else:
+      run_migrations_online()
 """,
 
     "phaser": """\
@@ -158,6 +228,40 @@ Stack: Electron desktop app (Node.js + Chromium, cross-platform)
 - Do NOT use require() in renderer code — all Node.js access must go through the preload contextBridge.
 - Verification: "build" runs npm install. Cannot run full GUI in CI.
 """,
+
+    "auth": """\
+Stack: JWT Authentication layer for FastAPI backend + React frontend (full-stack auth module)
+This stack prompt applies to auth tasks within a full-stack project. Write COMPLETE file contents.
+
+--- BACKEND (FastAPI) ---
+- Dependencies: add `python-jose[cryptography]` and `passlib[bcrypt]` to requirements.txt.
+- auth.py: import os, datetime, jose.jwt, passlib.context.CryptContext.
+  - JWT_SECRET = os.getenv("JWT_SECRET", "<long-random-fallback-string>")
+  - ALGORITHM = "HS256"
+  - ACCESS_TOKEN_EXPIRE_MINUTES = 60
+  - pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+  - hash_password(plain: str) -> str  — returns pwd_context.hash(plain)
+  - verify_password(plain: str, hashed: str) -> bool  — returns pwd_context.verify(plain, hashed)
+  - create_access_token(data: dict) -> str  — encodes JWT with exp claim using JWT_SECRET + ALGORITHM
+  - decode_access_token(token: str) -> dict | None  — decodes and returns payload; returns None on JWTError
+- models.py additions: users table with columns id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, hashed_password TEXT NOT NULL. Add init_users_table() called at startup.
+- schemas.py: define Pydantic models — UserCreate(username: str, password: str), UserResponse(id: int, username: str), Token(access_token: str, token_type: str = "bearer"), TokenData(username: str | None = None).
+- routes/auth_routes.py (or inline in main.py if project is small):
+  - POST /auth/register — accepts UserCreate, checks username not taken (409 if duplicate), hashes password with hash_password(), inserts into users table, returns UserResponse.
+  - POST /auth/login — accepts UserCreate (username + password), looks up user, verifies password with verify_password(), raises 401 if invalid, returns Token with create_access_token({"sub": username}).
+- NEVER store plaintext passwords. Always call hash_password() before INSERT.
+- get_current_user() dependency: reads Authorization header, calls decode_access_token(), raises 401 if None.
+
+--- FRONTEND (React) ---
+- src/api/axiosInstance.js: create axios instance with baseURL from import.meta.env.VITE_API_URL. Add request interceptor that reads token from localStorage.getItem("token") and sets Authorization: "Bearer <token>" header if present.
+- src/components/LoginForm.jsx: controlled form with username + password fields; on submit POST /auth/login, store response access_token in localStorage under key "token", then call onSuccess() prop.
+- src/components/RegisterForm.jsx: controlled form with username + password; on submit POST /auth/register, on success show success message or redirect to login.
+- src/components/PrivateRoute.jsx: reads localStorage.getItem("token"); if falsy, returns <Navigate to="/login" replace />; otherwise returns <Outlet />.
+- Use react-router-dom v6: wrap protected routes with <Route element={<PrivateRoute />}>.
+- Logout: remove "token" from localStorage and navigate to "/login".
+- Never store the JWT in a non-httpOnly cookie or expose it to third-party scripts.
+- All API calls must use the axiosInstance (not raw fetch) so the interceptor attaches the token automatically.
+""",
 }
 
 
@@ -176,7 +280,12 @@ def execute_task(task, spec: dict, dependency_files: dict[str, dict[str, str]]) 
     # For full-stack projects, pick the sub-stack based on task type
     if stack == "full-stack":
         task_type = getattr(task, "type", "") or ""
-        if task_type in ("backend", "api", "database", "auth", "config"):
+        if task_type == "auth":
+            # Auth tasks get the dedicated auth prompt that covers both backend JWT
+            # helpers (python-jose + passlib) and frontend React patterns (axiosInstance,
+            # LoginForm, RegisterForm, PrivateRoute).
+            effective_stack = "auth"
+        elif task_type in ("backend", "api", "database", "config"):
             effective_stack = "fastapi"
         else:
             effective_stack = "react-vite"
