@@ -142,7 +142,7 @@ browser, etc.). That tooling setup must itself be a task. Never assume tooling e
   "features": ["feature as a short phrase"],
   "constraints": ["every assumption and limit made for missing info, stated explicitly"],
   "architecture": {
-    "stack": "vanilla | react-vite | fastapi | phaser | full-stack | web3 | react-native | socket-io | three-js",
+    "stack": "vanilla | react-vite | fastapi | phaser | full-stack | web3 | react-native | socket-io | three-js | electron | asset",
     "frontend": "framework or 'none'",
     "backend": "framework or 'none'",
     "database": "type or 'none'",
@@ -182,6 +182,8 @@ Choose `architecture.stack` based on project requirements:
 | `react-native` | Mobile app (iOS/Android), Expo managed workflow   | Expo SDK, React Native, AsyncStorage    |
 | `socket-io`    | Real-time multiplayer games/apps, WebSocket       | Node.js, Socket.io, Express             |
 | `three-js`     | 3D browser scenes, visualizations, 3D games       | Three.js CDN, WebGL, OrbitControls      |
+| `electron`     | Cross-platform desktop app (Windows/Mac/Linux)    | Electron, Node.js IPC, contextBridge    |
+| `asset`        | Generate image assets (sprites, icons, backgrounds) | DALL-E 3 API or SVG placeholders    |
 
 For full-stack projects (frontend + backend), use TWO separate project instances via FORMAT 5 decomposition, or include both in one DAG where backend tasks are independent of frontend tasks (no shared files). The `stack` field refers to the dominant worker mode; multi-stack DAGs should set `stack` to the frontend stack and note the backend in the `constraints`.
 
@@ -606,6 +608,23 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
    - Handle `window.resize` to update camera aspect ratio and renderer size.
    - If camera interaction is needed, load OrbitControls from the same CDN version.
    - Verification: "none" for all tasks — the harness runs a Playwright canvas check at project end.
+
+15. **Electron desktop projects (`stack: "electron"`)** use the secure contextIsolation pattern.
+   - main.js: BrowserWindow with contextIsolation=true, nodeIntegration=false, preload script.
+   - preload.js: expose ALL Node.js/IPC access via contextBridge.exposeInMainWorld('api', {...}).
+   - Renderer: plain HTML/CSS/JS — no require(), no nodeIntegration. Access Node.js only via window.api.*.
+   - IPC: ipcMain.handle() + ipcRenderer.invoke() for request/response; ipcMain.on() + ipcRenderer.send() for fire-and-forget.
+   - Verification: "build" runs npm install (GUI cannot run in CI pipeline).
+   - Include a README.md with: npm install, npm start to launch, npm run build to package.
+
+16. **Asset generation tasks** have `type: "asset"` and list `.png` or `.svg` files.
+   - Use `type: "asset"` on any task whose sole output is image files.
+   - The `objective` must describe WHAT the image should look like in detail (style, color, subject).
+   - The harness routes asset tasks to the image generation worker — not the code worker.
+   - If DALL-E is not configured, the harness writes SVG color-block placeholders automatically.
+   - Asset tasks may have `verification: "none"` — the harness handles generation directly.
+   - Phaser and vanilla game projects SHOULD include asset tasks for player sprites, enemy sprites,
+     and background tiles to improve visual quality.
 
 10. **Never use ES modules (`type="module"` or `import`/`export`) in `phaser` or `vanilla` stack projects.**
    These stacks serve files via `file://` protocol, where browsers block cross-origin ES module

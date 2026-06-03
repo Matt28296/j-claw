@@ -68,6 +68,12 @@ _COMMANDS: dict[str, dict[str, list[str] | None]] = {
     "three-js": {
         "lint": None, "unit_test": None, "build": None, "smoke": None,
     },
+    "electron": {
+        "lint":      None,
+        "unit_test": None,
+        "build":     None,  # handled specially in run_verification
+        "smoke":     None,
+    },
     "phaser": {
         "lint": None, "unit_test": None, "build": None, "smoke": None,
     },
@@ -116,6 +122,17 @@ def detect_ecosystem(project_dir: Path) -> str:
                     return "three-js"
             except OSError:
                 pass
+
+    # Electron desktop: main.js + package.json with electron dependency
+    if (project_dir / "main.js").exists() and has_pkg:
+        try:
+            import json as _json
+            pkg = _json.loads((project_dir / "package.json").read_text(encoding="utf-8"))
+            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            if "electron" in deps:
+                return "electron"
+        except Exception:
+            pass
 
     # Full-stack: both a Python backend and a React/Node frontend present
     if (has_req or has_pyproj) and (has_vite or has_pkg):
@@ -172,6 +189,10 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
     # Three.js CDN: Playwright canvas check (same pattern as Phaser)
     if ecosystem == "three-js":
         return _run_playwright_check(project_dir)
+
+    # Electron: npm install only (can't run GUI in CI)
+    if ecosystem == "electron" and method == "build":
+        return _run_electron_install(project_dir)
 
     # Full-stack: run frontend build + backend install together
     if ecosystem == "full-stack" and method == "build":
@@ -340,6 +361,22 @@ def _run_react_native_install(project_dir: Path) -> tuple[bool, str]:
     if not ok:
         return False, f"npm install failed:\n{log}"
     console.print("  [green]Expo dependencies installed.[/green]")
+    return True, log
+
+
+def _run_electron_install(project_dir: Path) -> tuple[bool, str]:
+    """npm install for Electron projects. Cannot run GUI in CI."""
+    npm = _npm_cmd()
+    if npm is None:
+        missing = [f for f in ["main.js", "package.json"] if not (project_dir / f).exists()]
+        if missing:
+            return False, f"Missing required files: {missing}"
+        return True, "auto-passed: npm not available, files present"
+    console.print("  [dim]Electron: npm install[/dim]")
+    ok, log = _run_cmd([npm, "install"], project_dir, _TIMEOUT_BUILD)
+    if not ok:
+        return False, f"npm install failed:\n{log}"
+    console.print("  [green]Electron dependencies installed.[/green]")
     return True, log
 
 

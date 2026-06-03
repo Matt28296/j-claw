@@ -142,6 +142,22 @@ Stack: Three.js 3D browser app/game (vanilla HTML + JS, no build step, CDN)
 - Colors: use hex colors with 0x prefix (e.g. 0xff6600) in material color properties.
 - Include a dark background: document.body.style.margin='0'; document.body.style.background='#000';
 """,
+
+    "electron": """\
+Stack: Electron desktop app (Node.js + Chromium, cross-platform)
+- Project layout: main.js (main process), preload.js (preload script), renderer/ (HTML+JS+CSS for UI).
+- package.json: dependencies = electron; scripts: "start": "electron .", "build": "electron-builder --dir"; main field = "main.js"
+- main.js: create BrowserWindow with webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false }; load renderer/index.html via loadFile(); handle app.whenReady(), app.on('window-all-closed'), app.on('activate').
+- preload.js: use contextBridge.exposeInMainWorld('api', { ... }) to expose safe IPC methods. Use ipcRenderer.invoke/send/on for main↔renderer communication.
+- renderer/index.html: normal HTML page; reference renderer/style.css and renderer/app.js via relative paths; NO node require() calls in renderer (contextIsolation is on).
+- renderer/app.js: plain browser JS — use window.api.* (exposed via preload) for all IPC; no ES module syntax.
+- renderer/style.css: use CSS variables for theming; dark mode friendly (prefers-color-scheme: dark).
+- IPC handlers: define ipcMain.handle('channel', handler) in main.js for each method exposed via preload.
+- File dialogs: use dialog.showOpenDialog / showSaveDialog from electron (main process only, via IPC).
+- Window size: default 1200×800 with a minimum of 800×600. Set title in BrowserWindow options.
+- Do NOT use require() in renderer code — all Node.js access must go through the preload contextBridge.
+- Verification: "build" runs npm install. Cannot run full GUI in CI.
+""",
 }
 
 
