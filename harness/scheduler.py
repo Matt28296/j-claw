@@ -105,9 +105,10 @@ class Scheduler:
             passed, log = run_verification(task, self.instance.output_dir)
             sw.on_verification_result(task.id, task.verification, ecosystem, passed, log)
             if passed:
+                model_used = result.get("model_used", WORKER_MODEL)
                 task.status = "done"
-                sw.on_task_done(task.id, WORKER_MODEL)
-                console.print(f"  [green]✓ done[/green]  [dim](worker: {WORKER_MODEL})[/dim]")
+                sw.on_task_done(task.id, model_used)
+                console.print(f"  [green]✓ done[/green]  [dim](worker: {model_used})[/dim]")
             else:
                 task.status = "failed"
                 task.error_log = f"Verification ({task.verification}) failed:\n{log}"

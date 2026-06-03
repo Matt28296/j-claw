@@ -12,7 +12,10 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 
-from config import PROJECTS_DIR, MAX_FORMAT5_DEPTH, ORCHESTRATOR_PROVIDER, ORCHESTRATOR_MODEL
+from config import PROJECTS_DIR, MAX_FORMAT5_DEPTH, ORCHESTRATOR_PROVIDER, ORCHESTRATOR_MODEL, ORCHESTRATOR_API_MODEL
+
+# Display name shown in dashboard active-agent box during orchestrator calls
+_ORCH_DISPLAY = ORCHESTRATOR_API_MODEL if ORCHESTRATOR_PROVIDER == "openrouter" else ORCHESTRATOR_MODEL
 from orchestrator import Orchestrator, ManualOrchestrator, OpenRouterOrchestrator
 from state_writer import writer as sw
 from project import ProjectInstance
@@ -52,7 +55,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
 
     # ── INIT ──────────────────────────────────────────────────────────────────
     console.print("\n[bold]Generating project spec…[/bold]")
-    sw.on_agent_call("orchestrator", "openrouter/auto", "INIT")
+    sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "INIT")
     spec = orch.call({"system_state": "INIT", "user_intent": intent})
     sw.on_agent_done()
 
@@ -81,7 +84,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     # ── SPEC_ACCEPTED ─────────────────────────────────────────────────────────
     sw.on_spec_accepted(spec)
     console.print("\n[bold]Generating task DAG…[/bold]")
-    sw.on_agent_call("orchestrator", "openrouter/auto", "SPEC_ACCEPTED")
+    sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "SPEC_ACCEPTED")
     dag_response = orch.call({"system_state": "SPEC_ACCEPTED", "accepted_spec": spec})
     sw.on_agent_done()
 

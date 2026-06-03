@@ -3,7 +3,10 @@ import json
 import ollama
 from rich.console import Console
 
-from config import WORKER_MODEL, OLLAMA_HOST
+from config import (
+    WORKER_MODEL, OLLAMA_HOST, WORKER_PROVIDER,
+    WORKER_FALLBACKS, ANTHROPIC_API_KEY, OPENROUTER_API_KEY,
+)
 
 console = Console()
 
@@ -80,17 +83,112 @@ Stack: Phaser 3 browser game (vanilla HTML + JS, no build step)
 }
 
 
+# ── Public entry point ────────────────────────────────────────────────────────
+
 def execute_task(task, spec: dict, dependency_files: dict[str, dict[str, str]]) -> dict:
     """
     Ask the worker model to implement a task.
-    Returns {"files": [{"path": ..., "content": ...}]}.
-    Raises ValueError on malformed worker output.
+    Returns {"files": [...], "model_used": "<provider>/<model>"}.
+
+    Tries WORKER_PROVIDER first, then each entry in WORKER_FALLBACKS on provider failure.
+    Raises ValueError immediately on bad JSON format so the scheduler can send EXECUTION_ERROR.
     """
     arch = spec.get("architecture", {})
     stack = arch.get("stack", "vanilla")
-    stack_instructions = _STACK_PROMPTS.get(stack, _STACK_PROMPTS["vanilla"])
-    system_prompt = _SYSTEM_PROMPT + "\n" + stack_instructions
+    system_prompt = _SYSTEM_PROMPT + "\n" + _STACK_PROMPTS.get(stack, _STACK_PROMPTS["vanilla"])
+    user_message = _build_user_message(task, spec, dependency_files)
 
+    # Build attempt chain: primary first, then fallbacks
+    attempts: list[tuple[str, str]] = [(WORKER_PROVIDER, WORKER_MODEL)] + list(WORKER_FALLBACKS)
+
+    last_err: Exception | None = None
+    for provider, model in attempts:
+        try:
+            raw = _call_provider(provider, model, system_prompt, user_message)
+            parsed = _parse_and_validate(raw)
+            label = model if provider == "ollama" else f"{provider}/{model}"
+            parsed["model_used"] = label
+            return parsed
+
+        except ValueError:
+            raise  # Bad output format — let scheduler handle via EXECUTION_ERROR
+
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            console.print(
+                f"  [yellow]Worker {provider}/{model} error: {exc!r} — trying fallback…[/yellow]"
+            )
+            continue
+
+    raise RuntimeError(
+        f"All worker providers exhausted. Last error: {last_err}"
+    ) from last_err
+
+
+# ── Provider dispatch ─────────────────────────────────────────────────────────
+
+def _call_provider(provider: str, model: str, system: str, user: str) -> str:
+    if provider == "ollama":
+        return _call_ollama(model, system, user)
+    if provider == "anthropic":
+        return _call_anthropic(model, system, user)
+    if provider == "openrouter":
+        return _call_openrouter(model, system, user)
+    raise ValueError(f"Unknown worker provider: {provider!r}")
+
+
+def _call_ollama(model: str, system: str, user: str) -> str:
+    client = ollama.Client(host=OLLAMA_HOST)
+    response = client.chat(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        format="json",
+        options={"temperature": 0.15, "num_predict": 8192},
+    )
+    return response.message.content.strip()
+
+
+def _call_anthropic(model: str, system: str, user: str) -> str:
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY not set — cannot use anthropic worker provider")
+    import anthropic
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    response = client.messages.create(
+        model=model,
+        max_tokens=8192,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+    )
+    return response.content[0].text.strip()
+
+
+def _call_openrouter(model: str, system: str, user: str) -> str:
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY not set — cannot use openrouter worker provider")
+    from openai import OpenAI
+    client = OpenAI(
+        api_key=OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1",
+        default_headers={"X-Title": "J-Claw"},
+    )
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=8192,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        response_format={"type": "json_object"},
+    )
+    return response.choices[0].message.content.strip()
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _build_user_message(task, spec: dict, dependency_files: dict) -> str:
     payload = {
         "task": {
             "id": task.id,
@@ -101,35 +199,29 @@ def execute_task(task, spec: dict, dependency_files: dict[str, dict[str, str]]) 
         },
         "project_context": {
             "goal": spec.get("goal", ""),
-            "stack": stack,
-            "architecture": arch,
+            "stack": spec.get("architecture", {}).get("stack", "vanilla"),
+            "architecture": spec.get("architecture", {}),
         },
         "existing_dependency_files": {
             tid: files for tid, files in dependency_files.items()
         },
     }
+    return json.dumps(payload, indent=2)
 
-    client = ollama.Client(host=OLLAMA_HOST)
 
-    response = client.chat(
-        model=WORKER_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(payload, indent=2)},
-        ],
-        format="json",
-        options={"temperature": 0.15, "num_predict": 8192},
-    )
-
-    raw = response.message.content.strip()
-
+def _parse_and_validate(raw: str) -> dict:
+    raw = _strip_fences(raw)
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Worker returned invalid JSON: {exc}\n--- raw (first 600 chars) ---\n{raw[:600]}") from exc
+        raise ValueError(
+            f"Worker returned invalid JSON: {exc}\n--- raw (first 600 chars) ---\n{raw[:600]}"
+        ) from exc
 
     if not isinstance(parsed.get("files"), list):
-        raise ValueError(f"Worker output is missing a 'files' list. Got keys: {list(parsed.keys())}")
+        raise ValueError(
+            f"Worker output missing 'files' list. Got keys: {list(parsed.keys())}"
+        )
 
     for entry in parsed["files"]:
         if not isinstance(entry.get("path"), str) or not isinstance(entry.get("content"), str):
@@ -140,29 +232,42 @@ def execute_task(task, spec: dict, dependency_files: dict[str, dict[str, str]]) 
     return parsed
 
 
+def _strip_fences(text: str) -> str:
+    """Remove ```json ... ``` wrapping that API models sometimes add."""
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    inner = lines[1:]
+    if inner and inner[-1].strip() == "```":
+        inner = inner[:-1]
+    return "\n".join(inner).strip()
+
+
 _TRUNCATION_MARKERS = ("...", "// TODO", "# TODO", "[truncated]", "/* ... */", "// ...")
+
 
 def _warn_if_truncated(path: str, content: str) -> None:
     stripped = content.rstrip()
     if len(stripped) < 40:
-        console.print(f"  [yellow]⚠ Worker file '{path}' is suspiciously short ({len(stripped)} chars)[/yellow]")
+        console.print(
+            f"  [yellow]⚠ Worker file '{path}' is suspiciously short ({len(stripped)} chars)[/yellow]"
+        )
         return
     tail = stripped[-80:]
     for marker in _TRUNCATION_MARKERS:
         if marker in tail:
-            console.print(f"  [yellow]⚠ Worker file '{path}' may be truncated — ends near: {marker!r}[/yellow]")
+            console.print(
+                f"  [yellow]⚠ Worker file '{path}' may be truncated — ends near: {marker!r}[/yellow]"
+            )
 
 
 def _fix_literal_newlines(path: str, content: str) -> str:
-    """Replace literal \\n and \\t sequences in code files with real whitespace.
-    Workers sometimes emit backslash-n instead of a real newline inside generated code."""
+    """Replace literal \\n / \\t sequences with real whitespace."""
     ext = path.rsplit(".", 1)[-1].lower()
     if ext not in ("js", "ts", "jsx", "tsx", "py", "html", "css"):
         return content
     if r"\n" not in content and r"\t" not in content:
         return content
-    # Only fix \n and \t that appear outside of string literals (best-effort: replace all,
-    # since a literal backslash-n in code is always a bug for these file types).
     fixed = content.replace(r"\n", "\n").replace(r"\t", "\t")
     if fixed != content:
         console.print(f"  [yellow]⚠ Fixed literal \\\\n/\\\\t sequences in '{path}'[/yellow]")

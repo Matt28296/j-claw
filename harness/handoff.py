@@ -1,4 +1,4 @@
-"""Write HANDOFF.md and optionally invoke the claude CLI for a final verdict."""
+"""Write HANDOFF.md and invoke the claude CLI or Anthropic API for a final verdict."""
 from __future__ import annotations
 import json
 import os
@@ -6,7 +6,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import anthropic
 from rich.console import Console
+
+from config import ANTHROPIC_API_KEY, ORCHESTRATOR_MODEL
 
 _STATE_FILE = Path(__file__).parent.parent / "mission_control.json"
 _MAX_HEAL = 2
@@ -72,15 +75,24 @@ output directory. The project goal is:
 
 
 def try_claude_stamp(handoff_path: Path, output_dir: Path) -> None:
-    """Invoke the claude CLI for a final autonomous verdict, if available."""
-    if not shutil.which("claude"):
+    """Invoke the claude CLI (preferred) or Anthropic API (fallback) for a final verdict."""
+    if shutil.which("claude"):
+        _stamp_via_cli(handoff_path, output_dir)
+    elif ANTHROPIC_API_KEY:
+        _stamp_via_api(handoff_path, output_dir)
+    else:
         console.print(
-            "\n  [dim]claude CLI not found on PATH — skipping autonomous stamp.[/dim]\n"
+            "\n  [dim]claude CLI not found and no ANTHROPIC_API_KEY "
+            "— skipping autonomous stamp.[/dim]\n"
             f"  To run OpenClaw manually: cd \"{output_dir}\" && claude\n"
-            f"  Then ask Claude to review HANDOFF.md."
+            "  Then ask Claude to review HANDOFF.md."
         )
-        return
 
+
+# ── CLI path ──────────────────────────────────────────────────────────────────
+
+def _stamp_via_cli(handoff_path: Path, output_dir: Path) -> None:
+    """Run the claude CLI subprocess for the final verdict."""
     console.print("\n[bold]Running OpenClaw final stamp (claude CLI)…[/bold]")
     prompt = (
         "You are doing a final autonomous quality check for a software project. "
@@ -110,13 +122,81 @@ def try_claude_stamp(handoff_path: Path, output_dir: Path) -> None:
         console.print("  [yellow]claude CLI not found — skipping stamp.[/yellow]")
         return
 
-    # Determine result
+    _append_verdict(handoff_path, verdict)
+
+
+# ── API path ──────────────────────────────────────────────────────────────────
+
+def _stamp_via_api(handoff_path: Path, output_dir: Path) -> None:
+    """Call the Anthropic API directly when claude CLI is not on PATH."""
+    console.print("\n[bold]Running OpenClaw final stamp (Anthropic API)…[/bold]")
+
+    context = _collect_stamp_context(handoff_path, output_dir)
+    system = (
+        "You are doing a final autonomous quality check on an AI-generated software project. "
+        "Review the project files and handoff report provided. "
+        "Give a concise one-paragraph verdict: does the project meet its stated goal? "
+        "If there are remaining issues, list them briefly. "
+        "End your response with exactly one of:\n"
+        "  OPENCLAW: APPROVED\n"
+        "  OPENCLAW: ISSUES FOUND"
+    )
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model=ORCHESTRATOR_MODEL,
+            max_tokens=512,
+            system=system,
+            messages=[{"role": "user", "content": context}],
+        )
+        verdict = response.content[0].text.strip()
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"  [yellow]OpenClaw API stamp failed: {exc} — skipping.[/yellow]")
+        return
+
+    _append_verdict(handoff_path, verdict)
+
+
+def _collect_stamp_context(handoff_path: Path, output_dir: Path) -> str:
+    """Build context string: HANDOFF.md + project source files (capped at 80k chars)."""
+    _SKIP_DIRS  = {"node_modules", ".venv", "__pycache__", ".git", "dist", ".playwright"}
+    _EXTS       = {".js", ".py", ".html", ".css", ".ts", ".jsx", ".tsx", ".json", ".md"}
+    _SKIP_FILES = {"REVIEW.md", "HANDOFF.md", "package-lock.json", "yarn.lock"}
+    _MAX        = 80_000
+
+    parts: list[str] = []
+    if handoff_path.exists():
+        parts.append(f"=== HANDOFF.md ===\n{handoff_path.read_text(encoding='utf-8')}\n")
+
+    total = sum(len(p) for p in parts)
+    for path in sorted(output_dir.rglob("*")):
+        if path.is_dir() or any(d in path.parts for d in _SKIP_DIRS):
+            continue
+        if path.name in _SKIP_FILES or path.suffix.lower() not in _EXTS:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        rel   = str(path.relative_to(output_dir)).replace("\\", "/")
+        chunk = f"=== {rel} ===\n{content}\n\n"
+        if total + len(chunk) > _MAX:
+            break
+        parts.append(chunk)
+        total += len(chunk)
+
+    return "\n".join(parts)
+
+
+# ── Shared ────────────────────────────────────────────────────────────────────
+
+def _append_verdict(handoff_path: Path, verdict: str) -> None:
+    """Print the verdict summary and append it to HANDOFF.md."""
     approved = "OPENCLAW: APPROVED" in verdict
-    color = "green" if approved else "yellow"
-    summary = verdict.splitlines()[-1] if verdict else "No verdict"
+    color    = "green" if approved else "yellow"
+    summary  = verdict.splitlines()[-1] if verdict else "No verdict"
     console.print(f"\n  OpenClaw: [bold {color}]{summary}[/bold {color}]")
 
-    # Append verdict to HANDOFF.md
     existing = handoff_path.read_text(encoding="utf-8")
     handoff_path.write_text(
         existing + f"\n## Claude Code Verdict\n\n{verdict}\n",
