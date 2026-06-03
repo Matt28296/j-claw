@@ -312,13 +312,13 @@ Every project writes to `harness/projects/<slug>/`:
 
 ## What's Left To Build
 
-### P1 — In progress / next up
+### P1 — Completed this session
 
 | Item | Status |
 |---|---|
-| **Database migrations** — Alembic for FastAPI (`alembic upgrade head` at startup) | 🔄 In progress |
-| **Audio generation** — Coqui TTS + silent placeholder fallback | 🔄 In progress |
-| **Experience tracker** — local JSONL fix-outcome log fed back into retries | 🔄 In progress |
+| **Database migrations** — Alembic for FastAPI (`alembic upgrade head` at startup) | ✅ Done |
+| **Audio generation** — Coqui TTS + silent placeholder fallback | ✅ Done |
+| **Experience tracker** — local JSONL fix-outcome log fed back into retries | ✅ Done |
 
 ### P2 — Planned
 
