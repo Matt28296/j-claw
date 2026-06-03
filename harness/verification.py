@@ -17,6 +17,12 @@ _TIMEOUT_BUILD = 300
 # Commands per ecosystem per verification type.
 # None means "no command available — auto-pass with a warning".
 _COMMANDS: dict[str, dict[str, list[str] | None]] = {
+    "full-stack": {
+        "lint":      None,
+        "unit_test": ["python", "-m", "pytest", "-q"],
+        "build":     None,  # handled in run_verification
+        "smoke":     None,
+    },
     "node": {
         "lint":      ["npm", "run", "lint", "--if-present"],
         "unit_test": ["npm", "test"],
@@ -51,25 +57,33 @@ _COMMANDS: dict[str, dict[str, list[str] | None]] = {
 
 
 def detect_ecosystem(project_dir: Path) -> str:
+    has_req     = (project_dir / "requirements.txt").exists()
+    has_pyproj  = (project_dir / "pyproject.toml").exists()
+    has_vite    = (project_dir / "vite.config.js").exists() or (project_dir / "vite.config.ts").exists()
+    has_pkg     = (project_dir / "package.json").exists()
+
+    # Full-stack: both a Python backend and a React/Node frontend present
+    if (has_req or has_pyproj) and (has_vite or has_pkg):
+        return "full-stack"
+
     # Python takes priority — a FastAPI project with a React frontend
     # subfolder should still be detected as Python/FastAPI, not Node
-    req = project_dir / "requirements.txt"
-    if req.exists():
-        content = req.read_text(encoding="utf-8", errors="ignore").lower()
+    if has_req:
+        content = (project_dir / "requirements.txt").read_text(encoding="utf-8", errors="ignore").lower()
         if "fastapi" in content:
             return "fastapi"
         return "python"
-    if (project_dir / "pyproject.toml").exists():
+    if has_pyproj:
         content = (project_dir / "pyproject.toml").read_text(encoding="utf-8", errors="ignore").lower()
         if "fastapi" in content:
             return "fastapi"
         return "python"
     # Phaser: game.js present + no package.json at root
-    if (project_dir / "game.js").exists() and not (project_dir / "package.json").exists():
+    if (project_dir / "game.js").exists() and not has_pkg:
         return "phaser"
-    if (project_dir / "vite.config.js").exists() or (project_dir / "vite.config.ts").exists():
+    if has_vite:
         return "react-vite"
-    if (project_dir / "package.json").exists():
+    if has_pkg:
         return "node"
     return "unknown"
 
@@ -90,8 +104,12 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
 
     ecosystem = detect_ecosystem(project_dir)
 
+    # Full-stack: run frontend build + backend install together
+    if ecosystem == "full-stack" and method == "build":
+        return _run_fullstack_build(project_dir)
+
     # Special multi-step handlers
-    if ecosystem == "react-vite" and method == "build":
+    if ecosystem in ("react-vite", "full-stack") and method == "build":
         return _run_react_vite_build(project_dir)
 
     if ecosystem == "react-vite" and method == "unit_test":
@@ -211,6 +229,33 @@ def _run_fastapi_install(project_dir: Path) -> tuple[bool, str]:
     else:
         console.print("  [yellow]No requirements.txt or pyproject.toml found — auto-passing build.[/yellow]")
         return True, "auto-passed: no requirements file found"
+
+
+def _run_fullstack_build(project_dir: Path) -> tuple[bool, str]:
+    """Build a full-stack project: pip install backend deps + npm install/build frontend."""
+    logs: list[str] = []
+
+    # Backend: pip install
+    req = project_dir / "requirements.txt"
+    if req.exists():
+        console.print("  [dim]Full-stack backend: pip install -r requirements.txt[/dim]")
+        ok, log = _run_cmd(["pip", "install", "-r", "requirements.txt"], project_dir, _TIMEOUT_BUILD)
+        logs.append(log)
+        if not ok:
+            return False, f"pip install failed:\n{log}"
+
+    # Frontend: npm install + build (look for a frontend/ or src/ subdirectory with package.json)
+    frontend_dirs = [project_dir / "frontend", project_dir]
+    for fdir in frontend_dirs:
+        if (fdir / "package.json").exists():
+            console.print(f"  [dim]Full-stack frontend: npm install + build in {fdir.name or '.'}[/dim]")
+            ok, log = _run_react_vite_build(fdir)
+            logs.append(log)
+            if not ok:
+                return False, f"Frontend build failed:\n{log}"
+            break
+
+    return True, "\n".join(logs)
 
 
 def _run_cmd(cmd: list[str], cwd: Path, timeout: int) -> tuple[bool, str]:

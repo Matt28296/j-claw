@@ -21,7 +21,7 @@ from state_writer import writer as sw
 from project import ProjectInstance
 from scheduler import Scheduler
 from final_review import run_final_review, parse_review_issues
-from handoff import write_handoff, try_claude_stamp
+from handoff import write_handoff, try_claude_stamp, git_commit_project
 from verification import detect_ecosystem, run_playwright_project_check
 
 console = Console()
@@ -151,6 +151,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
 
         handoff_path = write_handoff(output_dir, instance.spec, passed, heal_cycle)
         try_claude_stamp(handoff_path, output_dir)
+        git_commit_project(output_dir, instance.spec)
 
         if not passed:
             sys.exit(1)

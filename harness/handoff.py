@@ -195,6 +195,43 @@ def _collect_stamp_context(handoff_path: Path, output_dir: Path) -> str:
     return "\n".join(parts)
 
 
+# ── Git auto-commit ───────────────────────────────────────────────────────────
+
+def git_commit_project(output_dir: Path, spec: dict) -> None:
+    """Init a git repo in output_dir and commit all generated files."""
+    if not shutil.which("git"):
+        console.print("  [dim]git not found on PATH — skipping auto-commit.[/dim]")
+        return
+
+    goal = spec.get("goal", spec.get("description", "generated project"))[:72]
+    msg  = f"j-claw: {goal}"
+
+    def _run(args: list[str]) -> bool:
+        r = subprocess.run(
+            args, cwd=output_dir, capture_output=True, text=True,
+            env={**os.environ, "GIT_AUTHOR_NAME": "j-claw",
+                 "GIT_AUTHOR_EMAIL": "jclaw@local",
+                 "GIT_COMMITTER_NAME": "j-claw",
+                 "GIT_COMMITTER_EMAIL": "jclaw@local"},
+        )
+        return r.returncode == 0
+
+    try:
+        _run(["git", "init"])
+        # Write a minimal .gitignore if none exists
+        gi = output_dir / ".gitignore"
+        if not gi.exists():
+            gi.write_text("node_modules/\n.venv/\n__pycache__/\ndist/\n*.pyc\n", encoding="utf-8")
+        _run(["git", "add", "."])
+        ok = _run(["git", "commit", "-m", msg])
+        if ok:
+            console.print(f"  [dim]Git commit: {msg}[/dim]")
+        else:
+            console.print("  [dim]Git commit skipped (nothing to commit or repo already up to date).[/dim]")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"  [yellow]Git auto-commit failed: {exc}[/yellow]")
+
+
 # ── Shared ────────────────────────────────────────────────────────────────────
 
 def _append_verdict(handoff_path: Path, verdict: str) -> None:

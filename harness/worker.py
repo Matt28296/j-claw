@@ -93,9 +93,18 @@ def execute_task(task, spec: dict, dependency_files: dict[str, dict[str, str]]) 
     Tries WORKER_PROVIDER first, then each entry in WORKER_FALLBACKS on provider failure.
     Raises ValueError immediately on bad JSON format so the scheduler can send EXECUTION_ERROR.
     """
-    arch = spec.get("architecture", {})
+    arch  = spec.get("architecture", {})
     stack = arch.get("stack", "vanilla")
-    system_prompt = _SYSTEM_PROMPT + "\n" + _STACK_PROMPTS.get(stack, _STACK_PROMPTS["vanilla"])
+    # For full-stack projects, pick the sub-stack based on task type
+    if stack == "full-stack":
+        task_type = getattr(task, "type", "") or ""
+        if task_type in ("backend", "api", "database", "auth", "config"):
+            effective_stack = "fastapi"
+        else:
+            effective_stack = "react-vite"
+    else:
+        effective_stack = stack
+    system_prompt = _SYSTEM_PROMPT + "\n" + _STACK_PROMPTS.get(effective_stack, _STACK_PROMPTS["vanilla"])
     user_message = _build_user_message(task, spec, dependency_files)
 
     # Build attempt chain: primary first, then fallbacks

@@ -141,7 +141,7 @@ browser, etc.). That tooling setup must itself be a task. Never assume tooling e
   "features": ["feature as a short phrase"],
   "constraints": ["every assumption and limit made for missing info, stated explicitly"],
   "architecture": {
-    "stack": "vanilla | react-vite | fastapi | phaser",
+    "stack": "vanilla | react-vite | fastapi | phaser | full-stack",
     "frontend": "framework or 'none'",
     "backend": "framework or 'none'",
     "database": "type or 'none'",
@@ -530,7 +530,20 @@ Example input fragment:
    Claude Code review covers content quality. Reserve `manual` only for genuinely
    un-automatable checks (audio output, device peripheral integration, physical hardware).
 
-9. **Never use ES modules (`type="module"` or `import`/`export`) in `phaser` or `vanilla` stack projects.**
+9. **Full-stack projects (`stack: "full-stack"`)** combine a React+Vite frontend with a FastAPI backend.
+   - Tag backend tasks with `type: "backend"`, `"api"`, `"database"`, or `"auth"`.
+   - Tag frontend tasks with `type: "frontend"`, `"ui"`, or `"component"`.
+   - The harness routes each task to the correct worker instructions based on its type.
+   - Backend (`main.py`) must run on `http://localhost:8000`. Frontend must proxy API calls
+     to that URL (set `VITE_API_URL=http://localhost:8000` in `.env` and read it via `import.meta.env`).
+   - Backend must have `CORSMiddleware` with `allow_origins=["http://localhost:5173"]` (Vite dev port).
+   - Place the FastAPI backend files at project root; place the React frontend in a `frontend/` subdirectory.
+   - Include `frontend/package.json`, `frontend/vite.config.js`, `frontend/src/main.jsx`, and `frontend/src/App.jsx`.
+   - Include `requirements.txt` at project root.
+   - Assign `verification: "build"` to the frontend scaffold task and `verification: "build"` to the
+     backend setup task so both are verified end-to-end.
+
+10. **Never use ES modules (`type="module"` or `import`/`export`) in `phaser` or `vanilla` stack projects.**
    These stacks serve files via `file://` protocol, where browsers block cross-origin ES module
    imports with a CORS error — making the game/app completely non-functional. Always use plain
    `<script src="...">` tags (no `type="module"`). All classes must be globals (assigned to
