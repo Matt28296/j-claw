@@ -1,52 +1,56 @@
-# J-Claw — Local-First Autonomous Coding Pipeline
+# J-Claw — Autonomous Development Agency
 
-J-Claw is a self-contained agentic software production system. You describe a project in plain English; the pipeline plans it, writes all the code, verifies the output, reviews the result with Claude, self-heals if issues are found, and hands off a signed report — with no human in the loop beyond the initial intent.
+J-Claw is a fully autonomous local-first software factory. Describe what you want in plain English — a game, app, website, or film — and the pipeline interprets the creative intent, plans the full build, writes all the code and media, verifies every output, self-heals any issues, and delivers a production-ready artifact with no human in the loop.
 
-Runs entirely on your local machine. The worker model is a local Ollama LLM. The orchestrator is Claude (via Anthropic or OpenRouter API), with a manual fallback mode that requires no API key.
+Three layers of intelligence:
+- **Creative Director** (Claude Opus) — interprets intent, determines output type, produces a creative brief
+- **Orchestrator** (Claude Sonnet) — translates the brief into a task DAG, drives the pipeline, self-heals
+- **Worker** (local Ollama model) — writes all code and runs all generation tasks on your hardware
 
 ---
 
 ## What It Does
 
 ```
-"Build a multiplayer drawing game with React frontend and FastAPI backend"
+"Build a game like Celeste" / "Make a 30-second explainer film about AI"
             │
-            ▼  INIT
-    Orchestrator generates a project spec (FORMAT 1)
+            ▼  CREATIVE DIRECTOR (Claude Opus)
+    Interprets intent → determines output type (game / film / app / website)
+    Produces CREATIVE_BRIEF: visual style, scenes/flows, asset requirements
+            │
+            ▼  INIT (Claude Sonnet)
+    Reads CREATIVE_BRIEF → generates project spec (FORMAT 1)
             │  (auto-accepted with --yes, or you review and revise)
             ▼  SPEC_ACCEPTED
-    Orchestrator emits a task DAG (FORMAT 2) — up to 50 tasks
+    Generates task DAG (FORMAT 2) — up to 75 tasks
             │
-            ▼  Execute tasks in topological order (up to 2 parallel workers)
-            │   └─ Worker (Ollama) writes each file
-            │   └─ Harness runs verification (lint / unit_test / build / smoke)
-            │   └─ On failure → EXECUTION_ERROR → Orchestrator rewrites task → retry
-            │   └─ Experience tracker logs outcomes for future retries
+            ▼  Execute tasks in topological order (up to 4 parallel workers)
+            │   ├─ Code tasks  → Worker (Ollama) writes files
+            │   ├─ Asset tasks → Stable Diffusion WebUI (SD-enriched prompts from brief)
+            │   ├─ Audio tasks → Coqui TTS (tone/speaker from brief)
+            │   ├─ Video tasks → video_worker (ffmpeg pipeline)  [Phase 2]
+            │   └─ On failure  → EXECUTION_ERROR (Haiku) → retry
             │
-            ▼  PROJECT_REVIEW
-    Orchestrator inspects all outputs — pass or add follow-up tasks
-            │
-            ▼  Final Code Review (Claude API)
-    Claude reads every output file — checks for stubs, broken imports, missing files
+            ▼  Final Review (Claude Sonnet)
+    Reads all outputs — code stubs, broken imports, media quality
             │
             ├─ VERDICT: PASS → write HANDOFF.md, done
             │
             └─ VERDICT: ISSUES FOUND
                 │
                 ▼  REVIEW_FAILED (self-healing loop, up to 2 cycles)
-        Orchestrator generates targeted fix tasks
-        Worker re-writes the broken files
-        Claude re-reviews
+        Orchestrator generates targeted fix tasks → Worker re-writes → re-review
                 │
                 ▼  Write HANDOFF.md + git commit
-    Optional: invoke claude CLI for autonomous final stamp
             │
             ▼  Done — output in harness/projects/<name>/
 ```
 
 ---
 
-## Supported Stacks (10)
+## Supported Stacks
+
+### Current (10)
 
 | Stack | Use case | Verification |
 |---|---|---|
@@ -61,10 +65,22 @@ Runs entirely on your local machine. The worker model is a local Ollama LLM. The
 | `three-js` | Three.js 3D browser scenes (CDN, WebGL) | Playwright canvas check |
 | `electron` | Electron desktop apps (contextIsolation + contextBridge) | `npm install` |
 
+### Coming (Phase 2–4)
+
+| Stack | Use case |
+|---|---|
+| `film` | Narrative film / animated explainer — ffmpeg + SD frames + Coqui narration |
+| `video-editor` | Browser-based clip editor — ffmpeg WASM + Canvas API |
+| `tauri` | Rust + WebView desktop apps — lighter than Electron |
+| `godot` | GDScript games — Godot headless export |
+| `websocket-sse` | Real-time dashboards and data streams |
+
 All stacks also support:
-- **PWA output** (vanilla + react-vite): `manifest.json` + `sw.js` service worker — every generated app is installable on mobile/desktop
-- **JWT auth** (full-stack): when spec mentions login/register, generates `auth.py`, User model, `/auth/register` + `/auth/login` endpoints, React `LoginForm`, `RegisterForm`, `PrivateRoute`
-- **Asset generation**: image assets routed to local Stable Diffusion WebUI (AUTOMATIC1111/Forge/ComfyUI at `localhost:7860`), SVG color-block placeholders if SD not running
+- **PWA output** (vanilla + react-vite): `manifest.json` + `sw.js` — every generated app is installable on mobile/desktop
+- **JWT auth** (full-stack): `auth.py`, User model, `/auth/register` + `/auth/login`, React `LoginForm`, `RegisterForm`, `PrivateRoute`
+- **Asset generation**: Stable Diffusion WebUI with Creative Director-enriched prompts (SVG fallback if SD not running)
+- **Audio generation**: Coqui TTS with tone/speaker from Creative Brief (silent WAV fallback)
+- **E2E tests**: Playwright test files auto-generated alongside every project *(Phase 4)*
 
 ---
 
@@ -72,7 +88,8 @@ All stacks also support:
 
 ```
 j-claw/
-├── orchestrator.txt              System prompt — the planning and review brain
+├── orchestrator.txt              Orchestrator system prompt (FORMATs 1–5)
+├── creative_director.txt         Creative Director system prompt (Claude Opus)  ← Phase 1
 ├── run.bat                       Entry point (Windows)
 ├── bot.bat                       Telegram bot entry point
 ├── dashboard.py                  Mission Control dashboard server (port 8765)
@@ -81,22 +98,25 @@ j-claw/
 ├── dashboard/
 │   └── index.html                Live pipeline dashboard (dark theme, auto-polling)
 └── harness/
-    ├── main.py                   CLI + top-level pipeline loop + self-healing loop
-    ├── orchestrator.py           Orchestrator (Claude/OpenRouter) + ManualOrchestrator
-    ├── scheduler.py              DAG scheduler — topological exec, error handling, review
-    ├── worker.py                 Sends tasks to Ollama; 10 stack-specific prompt sets
-    ├── verification.py           Ecosystem detection + verification runners + PWA check
-    ├── asset_worker.py           Local SD WebUI asset generation + SVG fallback
-    ├── audio_worker.py           Local Coqui TTS audio generation + silent fallback
-    ├── experience_log.py         Local-only EXECUTION_ERROR outcome tracker
+    ├── main.py                   CLI + pipeline loop + creative director pre-pass
+    ├── creative_director.py      Creative Director — intent → CREATIVE_BRIEF  ← Phase 1
+    ├── orchestrator.py           Orchestrator (Claude/OpenRouter) + prompt caching
+    ├── scheduler.py              DAG scheduler — topological exec, media task routing
+    ├── worker.py                 Sends tasks to Ollama; stack-specific prompt sets
+    ├── video_worker.py           ffmpeg-based video/film pipeline  ← Phase 2
+    ├── music_worker.py           Music generation (placeholder → MusicGen)  ← Phase 3
+    ├── verification.py           Ecosystem detection + ffprobe/frame checks
+    ├── asset_worker.py           SD WebUI asset generation + SVG fallback
+    ├── audio_worker.py           Coqui TTS audio generation + silent fallback
+    ├── experience_log.py         EXECUTION_ERROR outcome tracker (JSONL)
     ├── telegram_bot.py           Telegram bot — /run /status /cancel /projects
     ├── start_bot.py              Bot entry point
-    ├── final_review.py           Claude API code review — stubs, broken imports, etc.
-    ├── handoff.py                HANDOFF.md writer + deployment hook + claude CLI stamp
+    ├── final_review.py           Claude API code review — stubs, imports, media quality
+    ├── handoff.py                HANDOFF.md writer + deployment hook
     ├── state_writer.py           Singleton event bus → mission_control.json
-    ├── validator.py              JSON schema + DAG integrity checks
-    ├── project.py                ProjectInstance and Task data classes
-    ├── config.py                 .env loading — models, paths, limits, all config
+    ├── validator.py              JSON schema + DAG integrity + media task types
+    ├── project.py                ProjectInstance, Task, binary_outputs
+    ├── config.py                 .env loading — all models, paths, limits
     ├── .env.example              Template — copy to .env and fill in keys
     └── projects/                 Generated project output (gitignored)
 ```
@@ -226,45 +246,27 @@ Start with `.\bot.bat` after setting `TELEGRAM_BOT_TOKEN` in `.env`:
 | Install OpenClaw | ✅ Done (2026.5.28) |
 | Fix Discord/Telegram streaming config | ✅ Done |
 | Copy j-claw skill to `~/.openclaw/workspace/skills/j-claw/` | ✅ Done |
-| Add `ANTHROPIC_API_KEY` to `~/.openclaw/.env` | ⬜ Manual step — see below |
-| Create Telegram bot via @BotFather and add token | ⬜ Manual step — see below |
-| Start the OpenClaw gateway | ⬜ Run once after above steps |
+| Add `ANTHROPIC_API_KEY` to `~/.openclaw/.env` | ✅ Done |
+| Create Telegram bot (@JarvisClaw96bot) + add token | ✅ Done |
+| Telegram account paired | ✅ Done |
+| Switch OpenClaw agent to Anthropic Haiku (no VRAM conflict) | ✅ Done |
+| Start OpenClaw gateway | ⬜ Run `openclaw gateway` to activate |
 
-### Remaining manual steps
+### To activate
 
-**1. Add your Anthropic API key to OpenClaw's environment**
-
-OpenClaw runs as a separate process with its own `.env` at `~/.openclaw/.env`. Without the key it cannot invoke the j-claw skill.
-
-```powershell
-Add-Content -Path "$env:USERPROFILE\.openclaw\.env" -Value "ANTHROPIC_API_KEY=<your-key>"
-```
-
-**2. Create a Telegram bot and wire in the token**
-
-1. Open Telegram → search `@BotFather` → send `/newbot`
-2. Give it a name (e.g. `Jarvis`) and a username (e.g. `jarvis_claw_bot`)
-3. BotFather replies with a token like `7123456789:AAHkj...`
-4. Add it to `~/.openclaw/.env`:
-   ```
-   TELEGRAM_BOT_TOKEN=<your-token>
-   ```
-5. Add it to `~/.openclaw/openclaw.json` under `channels.telegram.botToken`
-
-**3. Start the gateway and pair your account**
+Run in a separate PowerShell window (leave it running):
 
 ```powershell
-openclaw gateway          # runs in foreground; Ctrl-C to stop
+openclaw gateway
 ```
 
-Then message your bot in Telegram — it will send a pairing code. Approve it with:
-```powershell
-openclaw pairing approve telegram "<CODE>"
-```
+Startup should show: `agent model: anthropic/claude-haiku-4-5-20251001`
 
-**4. Test**
+Then send your bot `build me a snake game` in Telegram.
 
-Send your bot: `build me a snake game` — OpenClaw will invoke j-claw and stream progress back to Telegram.
+### Architecture note
+
+OpenClaw's embedded agent (Claude Haiku) acts as a thin router — it reads the j-claw SKILL.md and invokes `run.bat`. The actual build runs via the Creative Director + Orchestrator + Worker pipeline locally. Haiku is used for the routing layer only; it requires no VRAM and doesn't conflict with the Ollama worker.
 
 > **Security note**: Before installing any third-party OpenClaw plugins, audit their source code. OpenClaw plugins run in-process with full OS privileges — no sandbox. The `@alan512/ExperienceEngine` plugin was reviewed and rejected (exfiltrates task data to external LLMs). The `@openclaw/memory-lancedb` plugin is safe only when configured with local Ollama embeddings.
 
@@ -352,45 +354,64 @@ Every project writes to `harness/projects/<slug>/`:
 
 ---
 
-## What's Left To Build
+## Roadmap
 
-### Immediate — OpenClaw activation (manual, no code needed)
-
-| Step | Detail |
-|---|---|
-| Add `ANTHROPIC_API_KEY` to `~/.openclaw/.env` | See OpenClaw Integration section above |
-| Create Telegram bot via @BotFather, add token to OpenClaw config | See OpenClaw Integration section above |
-| Run `openclaw gateway` and pair your Telegram account | See OpenClaw Integration section above |
-
-### P1 — Completed
+### Done
 
 | Item | Status |
 |---|---|
-| **Database migrations** — Alembic for FastAPI (`alembic upgrade head` at startup) | ✅ Done |
-| **Audio generation** — Coqui TTS + silent placeholder fallback | ✅ Done |
-| **Experience tracker** — local JSONL fix-outcome log fed back into retries | ✅ Done |
-| **Orchestrator JSON truncation fix** — `_fix_json_strings()` sanitizer + full-stack forced to FORMAT 5 + Rule 7 prohibits code-in-objectives | ✅ Done |
-| **FORMAT 5 sub-project bug fix** — `_handle_oversize()` `manual`/`auto_accept` scope bug fixed | ✅ Done |
-| **OpenClaw integration** — config fixed, Discord streaming repaired, j-claw skill deployed to `~/.openclaw/workspace/skills/j-claw/` | ✅ Done |
+| Core pipeline: spec → DAG → code → verify → review → self-heal | ✅ |
+| 10 stacks: vanilla, react-vite, fastapi, phaser, full-stack, web3, react-native, socket-io, three-js, electron | ✅ |
+| PWA output, JWT auth, Alembic migrations | ✅ |
+| SD WebUI asset generation + Coqui TTS audio | ✅ |
+| Experience tracker (JSONL fix-outcome log) | ✅ |
+| Orchestrator JSON truncation fix + FORMAT 5 bug fix | ✅ |
+| OpenClaw skill deployed + Telegram bot paired | ✅ |
 
-### P2 — Planned
+### Phase 1 — Creative Director + API optimization
 
 | Item | What it does |
 |---|---|
-| **Tauri stack** | Rust + WebView desktop apps — lighter than Electron |
-| **E2E test generation** | Playwright test files auto-generated alongside every project |
-| **WebSocket/SSE stack** | Real-time dashboards and data streams (separate from socket-io games) |
-| **Inter-service testing** | Spin up FastAPI + React together, smoke test against real stack |
+| `creative_director.py` + `creative_director.txt` | Claude Opus pre-pass: interprets intent → CREATIVE_BRIEF JSON |
+| `orchestrator.py` prompt caching | Cache 550-line system prompt across calls — ~80% cost reduction |
+| Haiku for EXECUTION_ERROR calls | Downgrade simple fix-routing from Sonnet → Haiku |
+| Merge PROJECT_REVIEW into final_review | Eliminate one redundant API call per project |
+| `config.py` new vars | `CREATIVE_DIRECTOR_MODEL`, `EXECUTION_ERROR_MODEL`, `MAX_TASKS=75`, `MAX_PARALLEL_WORKERS=4` |
 
-### P3 — Long term
+### Phase 2 — Video/Movie Pipeline
+
+| Item | What it does |
+|---|---|
+| `video_worker.py` | ffmpeg-based video generation — LLM writes the ffmpeg command, harness executes it |
+| `verification.py` video checks | `ffprobe`, `frame_integrity`, `sync_check` |
+| `project.py` binary outputs | `binary_outputs` field on Task for `.mp4`/`.wav`/`.mov` files |
+| `validator.py` new task types | `video`, `editing`, `composition`, `vfx` |
+| `orchestrator.txt` film stacks | `film`, `video-editor` stacks + video task types |
+
+### Phase 3 — Enhanced Media
+
+| Item | What it does |
+|---|---|
+| `asset_worker.py` | Use Creative Brief visual identity to enrich SD prompts |
+| `audio_worker.py` | Speaker/tone/duration control from Creative Brief |
+| `music_worker.py` | Music generation placeholder (→ MusicGen/Audiocraft) |
+
+### Phase 4 — New Code Stacks
+
+| Item | What it does |
+|---|---|
+| Tauri | Rust + WebView desktop apps |
+| Godot | GDScript + headless export |
+| WebSocket/SSE | Real-time dashboards |
+| E2E test generation | Playwright tests auto-generated alongside every project |
+
+### Phase 5 — Long term
 
 | Item |
 |---|
-| Movie pipeline (script → storyboard → voice → video assembly) |
-| Godot 3D game generation via headless Godot CLI |
 | IPFS / on-chain deployment for Web3 projects |
-| Payment integration (Stripe/LemonSqueezy scaffolding) |
-| Real native mobile compilation (Swift/Kotlin — Expo covers JS-only today) |
+| Payment integration (Stripe/LemonSqueezy) |
+| Real native mobile (Swift/Kotlin) |
 
 ---
 
