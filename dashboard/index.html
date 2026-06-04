@@ -379,6 +379,59 @@ body {
 #copy-toast.show { opacity: 1; }
 
 .empty { color: var(--muted); font-size: 11px; font-style: italic; padding: 4px 0; }
+
+/* ── Mobile / narrow viewports ───────────────────────────────
+   Desktop locks to one 100vh frame with internally-scrolling panels
+   (340px sidebar + 2-col grid + 3-col bottom row). On a phone that's
+   unusable, so below 820px we unlock page scroll and stack everything
+   into a single readable column. */
+@media (max-width: 820px) {
+  /* Let the whole page scroll instead of locking to one viewport */
+  body { height: auto; min-height: 100vh; overflow: visible; -webkit-text-size-adjust: 100%; }
+
+  /* Header wraps; goal drops to its own full-width line; bigger tap targets */
+  .header { flex-wrap: wrap; padding: 10px 12px; gap: 6px 8px; position: sticky; top: 0; z-index: 50; }
+  .goal { flex-basis: 100%; order: 9; white-space: normal; overflow: visible; }
+  .elapsed { margin-left: auto; }
+  .copy-btn { padding: 8px 12px; font-size: 12px; }
+
+  #stage-tracker { padding: 8px 12px; }
+  #review-banner, #openclaw-banner { padding: 8px 12px; }
+
+  /* Stack the main two-column grid into one column */
+  .main { display: flex; flex-direction: column; overflow: visible; }
+  .left, .right { overflow: visible; }
+  .left { border-right: none; border-bottom: 1px solid var(--border); }
+  .right { display: flex; flex-direction: column; }
+
+  /* Panels flow to content height; the page scrolls between them */
+  .agent-section, .tasks-section, .events-section, .tests-section,
+  .errors-section, .worklog-section, .files-section { overflow: visible; padding: 12px; }
+
+  /* Bottom trio stacks; swap right-borders for bottom-borders as dividers */
+  .bottom-row { display: flex; flex-direction: column; overflow: visible; }
+  .events-section, .tests-section,
+  .errors-section, .worklog-section { border-right: none; border-bottom: 1px solid var(--border); }
+
+  /* Drop desktop-fixed truncation widths so text uses the full width / wraps */
+  .task-obj { max-width: 100%; white-space: normal; }
+  .event-msg, .wl-detail { white-space: normal; overflow: visible; }
+  .wl-model { max-width: 45vw; }
+
+  /* Cap only the two longest live lists so the page stays navigable */
+  #event-list, #work-log { max-height: 60vh; overflow-y: auto; }
+
+  /* Toast spans the bottom edge */
+  #copy-toast { left: 12px; right: 12px; bottom: 12px; text-align: center; }
+}
+
+/* Extra-small phones: tighten paddings a touch */
+@media (max-width: 430px) {
+  .logo { font-size: 14px; letter-spacing: 1px; }
+  .header { padding: 9px 10px; }
+  .agent-section, .tasks-section, .events-section, .tests-section,
+  .errors-section, .worklog-section, .files-section { padding: 10px; }
+}
 </style>
 </head>
 <body>
