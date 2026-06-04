@@ -9,6 +9,7 @@ from pathlib import Path
 from rich.console import Console
 
 from config import ANTHROPIC_API_KEY, ORCHESTRATOR_MODEL
+from cache_telemetry import log_cache_usage
 
 console = Console()
 
@@ -77,9 +78,10 @@ def run_final_review(output_dir: Path, spec: dict) -> bool:
         response = client.messages.create(
             model=ORCHESTRATOR_MODEL,
             max_tokens=1024,
-            system=_SYSTEM,
+            system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user_message}],
         )
+        log_cache_usage(response.usage, "review")
         review_text = response.content[0].text.strip()
     except Exception as exc:  # noqa: BLE001
         console.print(f"  [red]Final review API call failed: {exc}[/red]")

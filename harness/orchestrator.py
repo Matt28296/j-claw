@@ -12,6 +12,7 @@ from config import (
     ORCHESTRATOR_MAX_TOKENS, EXECUTION_ERROR_MODEL, ORCHESTRATOR_TIMEOUT,
 )
 from validator import validate_response, OrchestratorOutputError
+from cache_telemetry import log_cache_usage
 
 console = Console()
 
@@ -84,6 +85,7 @@ class Orchestrator:
                     messages=[{"role": "user", "content": user_message}],
                     timeout=ORCHESTRATOR_TIMEOUT,
                 )
+                log_cache_usage(response.usage, f"orch:{state}")
                 if response.stop_reason == "max_tokens":
                     console.print(
                         f"[yellow]⚠ Orchestrator hit max_tokens ({ORCHESTRATOR_MAX_TOKENS}) — "

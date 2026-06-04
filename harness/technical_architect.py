@@ -11,6 +11,7 @@ from config import (
     TECHNICAL_ARCHITECT_MODEL, TECHNICAL_ARCHITECT_PROMPT_PATH,
 )
 from project_memory import ProjectMemory
+from cache_telemetry import log_cache_usage
 
 console = Console()
 
@@ -51,6 +52,7 @@ class TechnicalArchitect:
                     }],
                     messages=[{"role": "user", "content": user_message}],
                 )
+                log_cache_usage(response.usage, "architect")
                 text = response.content[0].text.strip()
                 text = _strip_fences(text)
                 tech_spec = json.loads(text)
