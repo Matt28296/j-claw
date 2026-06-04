@@ -6,6 +6,8 @@ No cloud API keys needed — fully local.
 """
 from __future__ import annotations
 import base64
+import struct
+import zlib
 import urllib.request
 import urllib.error
 import json
@@ -17,6 +19,16 @@ from config import SD_API_URL, ASSET_PROVIDER
 console = Console()
 
 _TXT2IMG_PATH = "/sdapi/v1/txt2img"
+
+# Image/asset extensions this worker handles. Tasks producing only these are routed here
+# (see scheduler._is_asset_task) so the code worker never has to emit binary base64 in JSON.
+_ASSET_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico", ".bmp", ".svg"}
+_RASTER_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+# Deterministic placeholder palette (RGB), picked by filename hash for variety.
+_PLACEHOLDER_COLORS = [
+    (99, 102, 241), (16, 185, 129), (245, 158, 11),
+    (239, 68, 68), (59, 130, 246), (139, 92, 246),
+]
 
 
 def can_generate() -> bool:
@@ -37,10 +49,10 @@ def generate_assets(task, spec: dict, output_dir: Path) -> list[str]:
     """
     if not can_generate():
         console.print(
-            f"  [yellow]SD WebUI not reachable at {SD_API_URL} — writing SVG placeholders. "
+            f"  [yellow]SD WebUI not reachable at {SD_API_URL} — writing valid placeholder assets. "
             "Start AUTOMATIC1111/Forge and set SD_API_URL in .env to enable real asset generation.[/yellow]"
         )
-        return _write_placeholder_svgs(task, output_dir)
+        return _write_placeholders(task, output_dir)
 
     goal = spec.get("goal", "game asset")
     style_hint = _extract_style(spec)
@@ -48,7 +60,11 @@ def generate_assets(task, spec: dict, output_dir: Path) -> list[str]:
 
     for file_path in task.files:
         ext = Path(file_path).suffix.lower()
-        if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+        if ext not in _ASSET_EXTS:
+            continue
+        if ext not in _RASTER_EXTS:
+            # SD only emits raster images; .svg/.ico/.gif/.bmp get a deterministic placeholder.
+            written.extend(_write_placeholder_for(file_path, output_dir))
             continue
 
         asset_name = Path(file_path).stem.replace("_", " ").replace("-", " ")
@@ -95,7 +111,7 @@ def generate_assets(task, spec: dict, output_dir: Path) -> list[str]:
 
         except Exception as exc:
             console.print(f"  [yellow]SD generation failed for {file_path}: {exc} — using placeholder.[/yellow]")
-            written.extend(_write_placeholder_svgs_for(file_path, output_dir))
+            written.extend(_write_placeholder_for(file_path, output_dir))
 
     return written
 
@@ -112,27 +128,55 @@ def _extract_style(spec: dict) -> str:
     return ", ".join(hints) if hints else "clean 2D game art style, flat shading"
 
 
-def _write_placeholder_svgs(task, output_dir: Path) -> list[str]:
-    written = []
-    for file_path in task.files:
-        if Path(file_path).suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".svg"):
-            written.extend(_write_placeholder_svgs_for(file_path, output_dir))
-    return written
+def _make_solid_png(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:
+    """Build a valid solid-color truecolor PNG using only the stdlib.
 
+    Deterministic and always-valid — replaces the local model trying (and reliably failing)
+    to emit base64 PNG bytes inside a JSON content field.
+    """
+    def _chunk(typ: bytes, data: bytes) -> bytes:
+        body = typ + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
 
-def _write_placeholder_svgs_for(file_path: str, output_dir: Path) -> list[str]:
-    """Write a simple colored SVG placeholder when SD is unavailable."""
-    colors = ["#6366f1", "#10b981", "#f59e0b", "#ef4444", "#3b82f6", "#8b5cf6"]
-    color = colors[hash(file_path) % len(colors)]
-    name = Path(file_path).stem[:12]
-    svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">'
-        f'<rect width="64" height="64" rx="8" fill="{color}"/>'
-        f'<text x="32" y="38" font-size="10" fill="white" text-anchor="middle" font-family="sans-serif">{name}</text>'
-        f'</svg>'
+    r, g, b = rgb
+    raw = (b"\x00" + bytes((r, g, b)) * width) * height  # filter byte 0 per scanline + RGB pixels
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + _chunk(b"IDAT", zlib.compress(raw, 9))
+        + _chunk(b"IEND", b"")
     )
-    svg_path = Path(file_path).with_suffix(".svg")
-    dest = output_dir / svg_path
+
+
+def _write_placeholder_for(file_path: str, output_dir: Path) -> list[str]:
+    """Write a valid placeholder at the EXACT requested path so references resolve (no 404).
+
+    Raster extensions get a real solid-color PNG written under their own name; .svg gets a
+    colored SVG block. Other extensions fall back to a PNG (valid bytes, harmless).
+    """
+    ext = Path(file_path).suffix.lower()
+    color = _PLACEHOLDER_COLORS[hash(file_path) % len(_PLACEHOLDER_COLORS)]
+    dest = output_dir / file_path
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(svg, encoding="utf-8")
-    return [str(svg_path)]
+    if ext == ".svg":
+        name = Path(file_path).stem[:12]
+        hexc = "#%02x%02x%02x" % color
+        dest.write_text(
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256">'
+            f'<rect width="256" height="256" rx="24" fill="{hexc}"/>'
+            f'<text x="128" y="140" font-size="28" fill="white" text-anchor="middle" '
+            f'font-family="sans-serif">{name}</text></svg>',
+            encoding="utf-8",
+        )
+    else:
+        dest.write_bytes(_make_solid_png(256, 256, color))
+    return [str(Path(file_path))]
+
+
+def _write_placeholders(task, output_dir: Path) -> list[str]:
+    """Write valid placeholders for every asset file a task declares (used when SD is off)."""
+    written: list[str] = []
+    for file_path in task.files:
+        if Path(file_path).suffix.lower() in _ASSET_EXTS:
+            written.extend(_write_placeholder_for(file_path, output_dir))
+    return written

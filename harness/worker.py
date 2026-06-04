@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import re
 import ollama
 from rich.console import Console
 
@@ -696,7 +697,7 @@ def execute_task(
             continue
         try:
             raw = _call_provider(provider, model, system_prompt, user_message)
-            parsed = _parse_and_validate(raw)
+            parsed = _parse_and_validate(raw, task)
             label = model if provider == "ollama" else f"{provider}/{model}"
             parsed["model_used"] = label
             return parsed
@@ -803,19 +804,77 @@ def _build_user_message(task, spec: dict, dependency_files: dict, context: dict 
     return json.dumps(payload, indent=2)
 
 
-def _parse_and_validate(raw: str) -> dict:
-    raw = _strip_fences(raw)
+def _loads_tolerant(raw: str):
+    """Parse worker JSON, tolerating trailing prose/data after the first object."""
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Worker returned invalid JSON: {exc}\n--- raw (first 600 chars) ---\n{raw[:600]}"
-        ) from exc
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    start = raw.find("{")
+    if start != -1:
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(raw[start:])
+            return obj if isinstance(obj, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
 
-    if not isinstance(parsed.get("files"), list):
-        raise ValueError(
-            f"Worker output missing 'files' list. Got keys: {list(parsed.keys())}"
-        )
+
+def _extract_code_block(raw: str) -> str | None:
+    """Return the largest fenced ``` code block in raw, or None."""
+    blocks = re.findall(r"```[a-zA-Z0-9_+\-]*\n(.*?)```", raw, re.DOTALL)
+    if not blocks:
+        return None
+    return (max(blocks, key=len).strip() or None)
+
+
+def _salvage_single_file(raw: str, parsed, task) -> dict | None:
+    """Conservatively recover a single-file task's content from malformed output.
+
+    Only fires when the task declares exactly one output file (multi-file guessing is unsafe).
+    Sources, in order: an explicit content/code/file string field, then the largest fenced
+    code block. Returns a reconstructed {files:[...]} dict, or None to let the caller escalate.
+    This cuts the paid-escalation tax on "write a script" tasks where the local model produces
+    valid code but botches the surrounding JSON.
+    """
+    files = getattr(task, "files", None) if task is not None else None
+    if not files or len(files) != 1:
+        return None
+    path = files[0]
+
+    content: str | None = None
+    if isinstance(parsed, dict):
+        for key in ("content", "code", "file"):
+            val = parsed.get(key)
+            if isinstance(val, str) and val.strip():
+                content = val
+                break
+    if content is None:
+        content = _extract_code_block(raw)
+    if content is None or len(content.strip()) < 20:
+        return None
+
+    console.print(
+        f"  [yellow]⚠ Salvaged single-file output for '{path}' from malformed worker JSON "
+        "(avoided an escalation)[/yellow]"
+    )
+    return {"files": [{"path": path, "content": content}]}
+
+
+def _parse_and_validate(raw: str, task=None) -> dict:
+    raw = _strip_fences(raw)
+    parsed = _loads_tolerant(raw)
+
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("files"), list):
+        # Before escalating, try to salvage a single-file task's body from malformed /
+        # mis-schema'd output (the local model often nails the code but botches JSON escaping).
+        salvaged = _salvage_single_file(raw, parsed, task)
+        if salvaged is not None:
+            parsed = salvaged
+        elif not isinstance(parsed, dict):
+            raise ValueError(f"Worker returned invalid JSON:\n--- raw (first 600 chars) ---\n{raw[:600]}")
+        else:
+            raise ValueError(f"Worker output missing 'files' list. Got keys: {list(parsed.keys())}")
 
     for entry in parsed["files"]:
         if not isinstance(entry.get("path"), str) or not isinstance(entry.get("content"), str):

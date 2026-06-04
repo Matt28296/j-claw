@@ -42,6 +42,20 @@ def _scan_for_stubs(output_files: dict) -> str | None:
     return None
 
 
+# Binary raster extensions. A task producing ONLY these is routed to asset_worker regardless of
+# its declared type, so the code worker never has to emit binary (base64-in-JSON) content —
+# which reliably fails on local models and forces expensive paid escalation.
+_ASSET_BINARY_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico", ".bmp"}
+
+
+def _is_asset_task(task) -> bool:
+    """True for declared asset tasks, or any task whose outputs are all binary images."""
+    if task.type == "asset":
+        return True
+    files = getattr(task, "files", None) or []
+    return bool(files) and all(Path(f).suffix.lower() in _ASSET_BINARY_EXTS for f in files)
+
+
 class Scheduler:
     def __init__(self, instance: ProjectInstance, orchestrator) -> None:
         self.instance = instance
@@ -121,8 +135,9 @@ class Scheduler:
 
         dep_files = self.instance.get_dependency_files(task)
 
-        # Asset tasks: route to asset_worker instead of code worker
-        if task.type == "asset":
+        # Asset tasks (declared, or any task that produces only binary image files) route to
+        # asset_worker — keeps binary base64-in-JSON generation out of the code worker.
+        if _is_asset_task(task):
             written = generate_assets(task, self.instance.spec, self.instance.output_dir)
             result = {"files": [], "model_used": "sd-webui" if can_generate() else "placeholder"}
             task.status = "done"
