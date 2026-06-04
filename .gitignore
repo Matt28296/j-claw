@@ -6,6 +6,8 @@ mission_control.json
 harness/mission_control.json
 orchestrator_input.json
 orchestrator_response.json
+harness/experience.jsonl
+harness/run_fix.ps1
 
 # Python
 __pycache__/
