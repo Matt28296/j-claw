@@ -412,6 +412,67 @@ Stack: Node.js real-time dashboard (Express + WebSocket or SSE, no build step)
 - Do NOT use TypeScript, webpack, Vite, or any build tooling — pure Node.js + browser JS only.
 """,
 
+    "film": """\
+Stack: Film / video render via ffmpeg (LLM-as-director → ffmpeg-as-renderer)
+You do NOT emit HTML and you do NOT emit raw video bytes. You are the DIRECTOR: you
+write a deterministic ffmpeg edit script plus a machine-readable shot list/manifest
+that the harness feeds to ffmpeg to render the final film. Write every file completely.
+- The single most important rule: for EVERY output video file the task declares
+  (*.mp4 / *.webm / *.mov), emit a line that starts EXACTLY with "ffmpeg " (lowercase,
+  one trailing space) and ends with that output file path as the LAST token. The harness
+  scans for the first "ffmpeg " line and substitutes the real output path for that last
+  token, so the output path MUST be the final argument and nothing may follow it.
+- Put the ffmpeg command(s) in a render script named render.sh (or build_film.sh). One
+  command per line. Use only ffmpeg built-in sources/filters that need no external assets:
+  lavfi sources (color=, testsrc=, sine=), drawtext, concat filter, xfade transitions,
+  and overlay. Do NOT reference image/audio files that are not also produced by an
+  upstream task — a self-contained synthetic render must always succeed.
+- Always set: -y (overwrite), -pix_fmt yuv420p (broad compatibility), -movflags +faststart
+  for mp4, and an explicit -t <seconds> or duration on every lavfi input so the render
+  terminates. Encode video with libx264 and audio with aac.
+- For titles/credits use drawtext with a fontsize and fontcolor; for multi-shot films build
+  the timeline with the concat or xfade filtergraph rather than many intermediate files.
+- shotlist.json (REQUIRED manifest): an array of shots, each
+  { "id", "duration_seconds", "description", "source" (the lavfi/source spec),
+  "audio" (sine spec or "none"), "transition" ("cut"|"fade"|"xfade") }. This documents the
+  director's intent so the render is reviewable and reproducible.
+- README.md: explain how to render locally (bash render.sh) and that the harness runs the
+  ffmpeg line automatically; note that ffmpeg must be installed.
+- NEVER emit placeholder ffmpeg flags, NEVER leave the output path unresolved, and NEVER
+  produce an index.html — this is a film, not a web page.
+""",
+
+    "video-editor": """\
+Stack: Video editing / compositing via ffmpeg (LLM-as-editor → ffmpeg-as-renderer)
+You do NOT emit HTML and you do NOT emit raw video bytes. You are the EDITOR: you write a
+deterministic ffmpeg edit script (cuts, trims, concatenation, transitions, overlays,
+audio mixing) plus a machine-readable edit decision list that the harness renders with
+ffmpeg. Write every file completely.
+- The single most important rule: for EVERY output video file the task declares
+  (*.mp4 / *.webm / *.mov), emit a line that starts EXACTLY with "ffmpeg " (lowercase, one
+  trailing space) and ends with the output file path as the LAST token. The harness scans
+  for the first "ffmpeg " line and replaces that last token with the real output path, so
+  the output path MUST be the final argument with nothing after it.
+- Put the ffmpeg command(s) in edit.sh. One command per line. Prefer a single filtergraph
+  (-filter_complex) over many intermediate render passes. Common editor operations:
+  * Trim/cut: trim=start=..:end=.. , atrim for audio, setpts/asetpts to reset timestamps.
+  * Concatenate clips: the concat filter (for differing codecs) or concat demuxer (matching
+    codecs). When inputs may be absent in CI, fall back to self-contained lavfi sources
+    (color=, testsrc=, sine=) so the render still succeeds without external assets.
+  * Transitions: xfade (video) + acrossfade (audio) between segments.
+  * Overlays / picture-in-picture / lower-thirds: overlay + drawtext.
+  * Audio mix: amix / amerge to combine music + voiceover; volume to balance levels.
+- Always set -y, -pix_fmt yuv420p, -movflags +faststart (mp4), encode with libx264 + aac,
+  and give every synthetic input an explicit duration (-t) so the render terminates.
+- edl.json (REQUIRED edit decision list): an array of operations, each
+  { "op" ("trim"|"concat"|"overlay"|"transition"|"audio_mix"), "inputs", "params",
+  "output_segment" }. This makes the edit reviewable and reproducible.
+- README.md: how to render locally (bash edit.sh), note the harness runs the ffmpeg line
+  automatically and that ffmpeg must be installed.
+- NEVER leave the output path unresolved, NEVER emit placeholder/example flags, and NEVER
+  produce an index.html — this is a rendered video, not a web page.
+""",
+
     "devops": """\
 Stack: DevOps / infrastructure (Dockerfile, Docker Compose, nginx, CI/CD, environment config)
 Generate production-ready infrastructure files for the project. Write every file completely.

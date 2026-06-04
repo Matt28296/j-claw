@@ -203,14 +203,17 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
             return True, "auto-passed: no video files"
         return _run_ffprobe_check(video_files[0])
 
-    if method in ("frame_integrity", "sync_check"):
+    if method == "frame_integrity":
         video_files = list(project_dir.glob("*.mp4")) + list(project_dir.glob("*.webm"))
         if not video_files:
             return True, "auto-passed: no video files"
-        video_file = video_files[0]
-        if video_file.stat().st_size < 100:
-            return False, "file too small"
-        return True, "passed"
+        return _run_frame_integrity_check(video_files[0])
+
+    if method == "sync_check":
+        video_files = list(project_dir.glob("*.mp4")) + list(project_dir.glob("*.webm"))
+        if not video_files:
+            return True, "auto-passed: no video files"
+        return _run_sync_check(video_files[0])
 
     if method == "security":
         return _run_security_check(project_dir)
@@ -776,8 +779,103 @@ def _run_ffprobe_check(video_path: Path) -> tuple[bool, str]:
                 codec = stream.get("codec_name", "unknown")
                 return True, f"ffprobe: {duration:.2f}s {codec}"
         return False, "no video stream found in file"
+    except subprocess.TimeoutExpired:
+        return False, "ffprobe: timed out"
     except Exception as exc:  # noqa: BLE001
         return True, f"auto-passed: error ({exc})"
+
+
+def _run_frame_integrity_check(video_path: Path, sample_frames: int = 10) -> tuple[bool, str]:
+    """Sample-decode N frames with ffmpeg to confirm the video is really decodable.
+
+    Returns a SKIP (not a pass) when ffmpeg is unavailable, per the project's
+    verification-honesty convention. A real decode failure is a hard FAIL.
+    """
+    if not shutil.which("ffmpeg"):
+        return True, f"{SKIP_PREFIX} frame_integrity: ffmpeg not installed"
+    cmd = [
+        "ffmpeg", "-v", "error",
+        "-i", str(video_path),
+        "-frames:v", str(sample_frames),
+        "-f", "null", "-",
+    ]
+    console.print(f"  [dim]frame_integrity: ffmpeg decode {sample_frames} frame(s) of {video_path.name}[/dim]")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return False, "frame_integrity: ffmpeg decode timed out"
+    except FileNotFoundError:
+        return True, f"{SKIP_PREFIX} frame_integrity: ffmpeg not found on PATH"
+
+    err = (result.stderr or "").strip()
+    if result.returncode != 0 or err:
+        console.print("  [red]frame_integrity: decode errors detected[/red]")
+        return False, f"frame_integrity: decode failed:\n{err[:1000] or 'non-zero exit'}"
+    console.print("  [green]frame_integrity: frames decoded cleanly.[/green]")
+    return True, f"frame_integrity: {sample_frames} frame(s) decoded without error"
+
+
+def _run_sync_check(video_path: Path) -> tuple[bool, str]:
+    """Verify audio + video streams are present and roughly aligned via ffprobe.
+
+    Returns a SKIP (not a pass) when ffprobe is unavailable. A missing video stream
+    is a hard FAIL; a missing audio stream is reported but not failed (some clips are
+    intentionally silent). When both are present, a gross duration drift (> 1.0s) FAILs.
+    """
+    import json as _json
+    if not shutil.which("ffprobe"):
+        return True, f"{SKIP_PREFIX} sync_check: ffprobe not installed"
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", str(video_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "sync_check: ffprobe timed out"
+    except FileNotFoundError:
+        return True, f"{SKIP_PREFIX} sync_check: ffprobe not found on PATH"
+
+    try:
+        data = _json.loads(result.stdout)
+    except Exception:
+        return True, f"{SKIP_PREFIX} sync_check: ffprobe output not parseable"
+
+    streams = data.get("streams", [])
+
+    def _stream_duration(stream: dict) -> float | None:
+        val = stream.get("duration")
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    video_streams = [s for s in streams if s.get("codec_type") == "video"]
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+
+    if not video_streams:
+        return False, "sync_check: no video stream found"
+
+    v_dur = _stream_duration(video_streams[0])
+    if v_dur is not None and v_dur <= 0.05:
+        return False, f"sync_check: video stream duration too short: {v_dur}s"
+
+    if not audio_streams:
+        console.print("  [yellow]sync_check: no audio stream present (silent clip).[/yellow]")
+        return True, "sync_check: video stream present, no audio (silent clip OK)"
+
+    a_dur = _stream_duration(audio_streams[0])
+    if v_dur is not None and a_dur is not None:
+        drift = abs(v_dur - a_dur)
+        if drift > 1.0:
+            console.print(f"  [red]sync_check: A/V drift {drift:.2f}s exceeds 1.0s[/red]")
+            return False, f"sync_check: audio/video duration drift {drift:.2f}s > 1.0s (v={v_dur:.2f}s a={a_dur:.2f}s)"
+        console.print(f"  [green]sync_check: A/V aligned (drift {drift:.2f}s).[/green]")
+        return True, f"sync_check: audio+video present, drift {drift:.2f}s (v={v_dur:.2f}s a={a_dur:.2f}s)"
+
+    console.print("  [green]sync_check: audio + video streams present.[/green]")
+    return True, "sync_check: audio + video streams present (durations unavailable)"
 
 
 def _run_manual(task, prompt: str | None = None) -> tuple[bool, str]:

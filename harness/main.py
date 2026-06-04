@@ -312,9 +312,13 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         return ok, issues
 
     if not manual:
+        from heal_metrics import issue_set_similarity, classify_trend
+
         _MAX_HEAL = 2
         passed = False
         heal_cycle = 0
+        prev_issues: list[str] | None = None   # issue set from the previous cycle
+        escalated = False                        # have we already escalated the fix round?
         for heal_cycle in range(_MAX_HEAL + 1):
             review_passed = run_final_review(output_dir, instance.spec)
             dynamic_passed, dynamic_issues = _run_dynamic_checks()
@@ -335,13 +339,44 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
             for i, issue in enumerate(issues, 1):
                 console.print(f"  {i}. {issue}")
 
+            # ── Convergence / oscillation detection ───────────────────────────
+            # If this cycle's issues aren't shrinking vs the last (same issues recur,
+            # or the count grew), the heal budget is being burned counter-productively.
+            # First such signal → escalate the fix round (stronger rung + sharper
+            # guidance); a second consecutive signal → stop early rather than regress.
+            convergence_hint: str | None = None
+            if prev_issues is not None:
+                trend = classify_trend(prev_issues, issues)
+                sim = issue_set_similarity(prev_issues, issues)
+                if trend in ("regressing", "stalled"):
+                    detail = f"count {len(prev_issues)}→{len(issues)}, issue-overlap {sim:.0%}"
+                    if escalated:
+                        console.print(
+                            f"  [bold red]Heal loop not converging ({trend}: {detail}) "
+                            f"after escalation — stopping early to avoid regression.[/bold red]"
+                        )
+                        break
+                    console.print(
+                        f"  [bold yellow]Heal loop {trend} ({detail}) — escalating the fix "
+                        f"round (stronger attempt, sharper guidance).[/bold yellow]"
+                    )
+                    escalated = True
+                    convergence_hint = (
+                        f"PREVIOUS FIX ROUND DID NOT CONVERGE ({trend}; issue overlap {sim:.0%}). "
+                        f"Do NOT reintroduce removed/disallowed frameworks or rename established "
+                        f"classes. Address the ROOT CAUSE of the recurring issues directly and minimally."
+                    )
+
             sw.on_agent_call("orchestrator", ORCHESTRATOR_MODEL, "REVIEW_FAILED")
-            fix_resp = orch.call({
+            _fix_payload = {
                 "system_state": "REVIEW_FAILED",
                 "accepted_spec": instance.spec,
                 "completed_tasks": instance.tasks_as_list(),
                 "review_issues": issues,
-            })
+            }
+            if convergence_hint:
+                _fix_payload["convergence_hint"] = convergence_hint
+            fix_resp = orch.call(_fix_payload)
             sw.on_agent_done()
 
             followups = fix_resp.get("followup_tasks", [])
@@ -350,8 +385,17 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
                 break
 
             instance.apply_format4_followups(followups)
+            # When escalating, pre-set retry_count on the injected followups so the scheduler
+            # routes them to a stronger rung (routed_rung = base + retry_count) rather than a
+            # fresh first attempt.
+            if escalated:
+                for _d in followups:
+                    _t = instance.tasks.get(_d.get("id"))
+                    if _t is not None:
+                        _t.retry_count = max(_t.retry_count, 1)
             sw.on_tasks_added(followups)
             console.print(f"  Added {len(followups)} fix task(s). Re-running…\n")
+            prev_issues = issues
             Scheduler(instance, orch).run()
 
         handoff_path = write_handoff(output_dir, instance.spec, passed, heal_cycle)

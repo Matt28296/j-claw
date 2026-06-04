@@ -1,10 +1,14 @@
 """Music generation worker for J-Claw.
 
-Placeholder implementation using the standard-library wave module.
-Set can_generate() to True and swap generate_music() body when MusicGen is available.
+Detects a real MusicGen backend (the `audiocraft` package if importable, or an
+external MusicGen HTTP endpoint via the MUSICGEN_API_URL env var) and reports
+availability accordingly. When no backend is present it gracefully falls back to
+a silent-WAV placeholder so the pipeline still produces a real file.
 """
 from __future__ import annotations
+import importlib.util
 import logging
+import os
 import re
 import wave
 from pathlib import Path
@@ -15,14 +19,29 @@ _SAMPLE_RATE = 44100
 _CHANNELS = 1
 _SAMPLE_WIDTH = 2  # bytes (16-bit)
 
+# Optional external MusicGen HTTP endpoint (e.g. a local Gradio/FastAPI server).
+_MUSICGEN_API_URL = os.getenv("MUSICGEN_API_URL", "").strip()
+
 
 def can_generate() -> bool:
     """Return True when a real music-generation backend is available.
 
-    Currently always False — this is a placeholder implementation.
-    Set to True and replace generate_music() body when MusicGen is installed.
+    A backend counts as available when either:
+      * the `audiocraft` package (Meta MusicGen) is importable, OR
+      * a MUSICGEN_API_URL env var points at an external MusicGen HTTP endpoint.
+
+    The backend does NOT need to be installed for the worker to function — when
+    neither is present this returns False and generate_music() falls back to a
+    silent-WAV placeholder.
     """
-    return False
+    if _MUSICGEN_API_URL:
+        return True
+    # importlib.util.find_spec does not import the (heavy) package — it only
+    # checks that it is installed/importable.
+    try:
+        return importlib.util.find_spec("audiocraft") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def generate_music(task, spec: dict, output_dir: Path) -> list[Path]:
@@ -38,17 +57,57 @@ def generate_music(task, spec: dict, output_dir: Path) -> list[Path]:
     written: list[Path] = []
     audio_exts = {".wav", ".mp3", ".ogg"}
 
+    prompt = getattr(task, "objective", "") or "instrumental background music"
+
     for filename in getattr(task, "files", []):
         p = Path(filename)
         if p.suffix.lower() not in audio_exts:
             continue
         dest = output_dir / p.name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        _write_silent_wav(dest, duration_seconds)
-        logger.info("music_worker: wrote %s (%ds silent placeholder)", dest, duration_seconds)
+
+        generated = False
+        if _MUSICGEN_API_URL:
+            generated = _try_http_musicgen(dest, prompt, duration_seconds)
+
+        if not generated:
+            _write_silent_wav(dest, duration_seconds)
+            logger.info("music_worker: wrote %s (%ds silent placeholder)", dest, duration_seconds)
         written.append(dest)
 
     return written
+
+
+def _try_http_musicgen(dest: Path, prompt: str, duration_seconds: int) -> bool:
+    """Request audio bytes from an external MusicGen HTTP endpoint.
+
+    Returns True on success (bytes written to dest), False on any failure so the
+    caller can fall back to the silent-WAV placeholder. Never raises.
+    """
+    import json
+    import urllib.request
+
+    payload = json.dumps({
+        "prompt": prompt[:500],
+        "duration": duration_seconds,
+    }).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            _MUSICGEN_API_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            audio_bytes = resp.read()
+        if not audio_bytes:
+            return False
+        dest.write_bytes(audio_bytes)
+        logger.info("music_worker: wrote %s via MusicGen endpoint (%ds)", dest, duration_seconds)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("music_worker: MusicGen endpoint failed (%s) — using placeholder", exc)
+        return False
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
