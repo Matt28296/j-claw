@@ -291,35 +291,48 @@ Start with `.\bot.bat` after setting `TELEGRAM_BOT_TOKEN` in `.env`:
 | Create Telegram bot (@JarvisClaw96bot) + add token | ✅ Done |
 | Telegram account paired | ✅ Done |
 | OpenClaw auto-restart watchdog | ✅ Done (`C:\Users\Tyler\openclaw-watchdog.ps1`) |
-| Reliable bot replies | ❌ **BROKEN — see known issue below** |
+| Reliable bot replies | ✅ **Done (2026-06-04)** — Haiku router, replies confirmed live on @JarvisClaw96bot |
 
-> ### ⚠️ Known issue (2026-06-04): the bot does not reliably reply
+> ### ✅ Resolved (2026-06-04): the bot now replies reliably
 >
-> The OpenClaw agent model is currently `ollama/qwen3:8b`, which **crashes** on real
-> messages on the AMD RX 9070 XT runner (`model runner has unexpectedly stopped`) — and
-> there is **no working failover** (the gateway logs `next=none`), so a crash yields silence
-> rather than a Haiku fallback. The crash is *not* an oversized-context issue (it runs at
-> 4096 ctx); it's AMD/Ollama runner instability, made worse by VRAM contention with the
-> J-Claw worker. The Ollama model store also has ~12 dangling/half-deleted manifests.
+> **Fix applied & confirmed live.** The router model was switched from the crash-prone
+> `ollama/qwen3:8b` to `anthropic/claude-haiku-4-5-20251001`, with `tools.profile: minimal`
+> (router-light). A direct agent turn and a real Telegram message both return a coherent
+> Haiku reply. The router is *not* the J-Claw worker, so the "Ollama-only worker" constraint
+> doesn't apply — Haiku-as-router is the intended design.
 >
-> **Planned fix** (see *What's Left to Finalize* §2): switch the router to a reliable model
-> (`Qwen3-14B`-thinking or Haiku — the router is *not* the J-Claw worker, so the
-> "Ollama-only worker" constraint doesn't apply to it), set `OLLAMA_MAX_LOADED_MODELS=1`,
-> trim `tools.profile` to minimal, wire a real failover, and prune the model store.
+> **Root cause was subtler than the config.** The config on disk was already correct, but the
+> *running* gateway was a **stale orphaned process** (started before the config edit) still
+> serving the old `qwen3:8b` router in memory — so inbound messages were received but no reply
+> was produced. The trap: `openclaw daemon restart` / `gateway stop` only manage the Windows
+> **Scheduled Task**, not a gateway launched independently. The fix was to kill the PID
+> listening on `:18789` directly, then `openclaw daemon start` (fresh process re-reads the
+> Haiku config). Verify the live router with:
+> `openclaw agent --agent main --message "PONG and your model"` → expect `anthropic/claude-haiku-4-5`.
 >
-> **J-Claw itself is unaffected** — run builds directly with `run.bat`. Only the Telegram
-> front-end is down.
+> **Underlying qwen3 instability still stands** (`model runner has unexpectedly stopped` on the
+> AMD RX 9070 XT — runner instability, not context size), which is *why* the bot runs on Haiku.
+> Optional hardening remains: `OLLAMA_MAX_LOADED_MODELS=1` (bot/worker VRAM contention),
+> `ollama signin` (web_search), and pruning the ~12 dangling Ollama manifests.
 
-### To activate
+### Managing the gateway
 
-The gateway is managed by a watchdog script that auto-restarts on crash with exponential back-off:
+The gateway runs as a Windows Scheduled Task (`OpenClaw Gateway`), managed via the CLI:
 
 ```powershell
-# Start gateway with auto-restart watchdog
-C:\Users\Tyler\start-openclaw.bat
+openclaw daemon status      # install state + connectivity probe
+openclaw daemon start        # start the supervised gateway (reads ~/.openclaw/openclaw.json)
+openclaw daemon restart      # stop + start the Scheduled Task
+openclaw health              # live gateway: channels, sessions, event-loop health
 ```
 
-To update the Windows Task Scheduler entry: point it to `C:\Users\Tyler\start-openclaw.bat` with `-WindowStyle Hidden` so it runs silently on login.
+> ⚠️ **Gotcha:** `daemon`/`gateway stop` only act on the Scheduled Task. If a gateway was ever
+> launched independently, it can keep running an old in-memory config even after you edit
+> `openclaw.json`. If config changes don't take effect, find the PID on `:18789`
+> (`Get-NetTCPConnection -LocalPort 18789`), `Stop-Process` it, then `openclaw daemon start`.
+
+Config edits to `openclaw.json` hot-reload for *most* settings, but a **model/router change is
+only guaranteed to take effect after a full restart** (see the resolved issue above).
 
 ### Architecture note
 
@@ -449,12 +462,18 @@ Every project writes to `harness/projects/<slug>/`:
 | **Phase 1 — verification honesty (2026-06-04, live-validated):** E2E + project-Playwright checks now **gate** the project and feed the self-heal loop (previously computed then ignored); generated Playwright tests use relative `goto('/')` against the configured `:18090` baseURL (was a dead `:3000`) | ✅ |
 | **Phase 1 — SKIP ≠ PASS:** checks that auto-pass only because a tool/runner is missing are marked `⊘ SKIPPED` (not a verified pass) in `HANDOFF.md`, so a green report is no longer silently hollow | ✅ |
 | **Phase 1 — real game check:** Playwright game check now fails on a zero-size canvas and observes a 1.5s window so game-loop runtime errors surface, not just init-time errors | ✅ |
+| **Sprint A — worker ladder + budget:** weakest→strongest ladder (`qwen3:8b → qwen2.5-coder:14b → claude-sonnet-4-6`), `MAX_PAID_WORKER_CALLS` paid-escalation cap, unified dispatch timeouts, bounded heal loop, mypy/ruff wired (`ac3bdce`) | ✅ |
+| **Escalation-tax fix:** binary/image tasks → `asset_worker` (valid PNG placeholder when SD offline), single-file script salvage before paying for Sonnet (`b479e57`) | ✅ |
+| **Heal-loop convergence:** `heal_metrics.py` issue-set similarity + escalate-then-stop on non-convergence (`056ad67`) | ✅ |
+| **Phase 2 — movies pipeline:** `generate_video` reads `task.files` + ffmpeg render, real film/video-editor director→renderer prompts, `music_worker` real-backend gate, honest `frame_integrity`/`sync_check` (`056ad67`) | ✅ |
+| **OpenClaw bot fixed (2026-06-04):** Haiku router + `tools.profile: minimal`; replies confirmed live (root cause: stale orphaned gateway process) | ✅ |
+| **Pre-merge review fixes:** failure-handoff phase tracking made functional; worker-timeout liveness limitation documented (`7c7656e`) | ✅ |
 
 ---
 
 ## Current Status & What's Left to Finalize
 
-A supervised live build (a vanilla multi-page site, 2026-06-04) validated the pipeline end-to-end: the full Creative Director → Architect → Orchestrator → worker → verify → **honest gate** → self-heal flow ran with no hang, correctly exited **"ISSUES FOUND"** instead of false-greening, and the Phase 1 changes above all fired as designed. That run also surfaced the real, honest state of the system.
+A supervised live build (a vanilla multi-page site, 2026-06-04) validated the pipeline end-to-end: the full Creative Director → Architect → Orchestrator → worker → verify → **honest gate** → self-heal flow ran with no hang, correctly exited **"ISSUES FOUND"** instead of false-greening, and the Phase 1 changes above all fired as designed. That run also surfaced the real, honest state of the system — **and every actionable issue it surfaced has since been fixed and merged to `main` via PR #5** (escalation tax, heal-loop convergence, movies Phase 2, OpenClaw bot). The pipeline now awaits a fresh supervised run to confirm the engine fixes against merged `main`.
 
 ### Honest capability scorecard
 
@@ -465,23 +484,43 @@ Rough confidence that an unattended run from a *detailed* prompt yields a finish
 | 🟢 **Websites** (static / SPA / simple full-stack) | ~80% | Strong stacks + the one category with a real verification backbone (`npm`/`pip` build gates genuinely block). Closest to true one-shot. |
 | 🟡 **Videogames** (Phaser / Three.js) | ~70% | Strong generation; gates now catch JS errors + dead canvas, but there is still no *gameplay* validation ("is it winnable"). |
 | 🟡 **Apps / Dapps** | ~65% web | Web apps + web3 dapps are solid; desktop (Electron/Tauri) generates but verifies thinly; native mobile (Swift/Kotlin) **cannot be built/verified on Windows** — generate-only. |
-| 🔴 **Movies** (film / video / music) | ~5–10% | Theater end-to-end: `film`/`video-editor` have no real stack prompt, `generate_video` produces zero output (reads an empty `task.output_files`), `music_worker.can_generate()` is hardcoded `False`. |
+| 🟡 **Movies** (film / video / music) | ~40% *(pending live test)* | **Phase 2 landed:** `generate_video` now reads `task.files` and renders via ffmpeg; real `film`/`video-editor` director→renderer prompts; `music_worker` gates on a real backend (audiocraft / `MUSICGEN_API_URL`); honest `frame_integrity`/`sync_check` (ffprobe). **Not yet live-validated** — needs `ffmpeg`/`ffprobe` installed to actually render+verify (honest SKIP otherwise). |
 
-### Known issues surfaced by validation
+### Issues surfaced by validation — now addressed on `main`
 
-- **The local 14B worker reliably escalates to paid Sonnet on "write a script / generate a binary" tasks** (code or base64 inside a JSON `content` field). This is an *output-format* problem, not a model-quality one — a bigger local model won't fix it. Highest-ROI engine fix.
-- **The self-heal loop bounds stuck cycles but does not detect non-convergence.** In the validation run it spent its full 2-round budget *regressing* (re-introduced a framework it had been told not to use, created new class mismatches). It never hangs, but it can burn its budget making things worse.
-- **The OpenClaw Telegram bot is currently broken** — see the OpenClaw Integration section. `qwen3:8b` crashes on the AMD GPU runner and there is no working failover, so the bot does not reliably reply. J-Claw itself runs fine directly via `run.bat`; only the chat front-end is affected.
-- **Verification honesty depends on installed tooling.** On a box missing `ffprobe`/`mypy`/`ruff`/`bandit`/Playwright, those checks SKIP (now honestly marked) rather than gate — so "green" only means "verified" where the tools exist.
+The 2026-06-04 validation run surfaced four issues. Three are **fixed and merged** (PR #5); the
+fourth is structural and remains by design.
+
+- ✅ **Escalation tax (FIXED):** the local worker no longer auto-escalates to paid Sonnet on
+  script/binary tasks. Binary/image tasks route to `asset_worker` (valid PNG placeholder when SD
+  is offline — no 404), and single-file script output is salvaged from a tolerant JSON parse
+  before escalating. *(`b479e57`)*
+- ✅ **Heal-loop non-convergence (FIXED):** `heal_metrics.py` now measures issue-set similarity
+  round-over-round; the first non-converging signal escalates the fix round (stronger rung +
+  sharper guidance), a second consecutive signal stops early instead of regressing. *(`056ad67`)*
+- ✅ **OpenClaw bot (FIXED):** Haiku router, replies confirmed live — see the OpenClaw Integration
+  section for the root cause (stale orphaned gateway) and the verify command.
+- ⚠️ **Verification honesty depends on installed tooling (structural).** On a box missing
+  `ffprobe`/`ffmpeg`/`mypy`/`ruff`/`bandit`/Playwright, those checks SKIP (now honestly marked
+  `⊘ SKIPPED`) rather than gate — so "green" only means "verified" where the tools exist. This is
+  intentional honesty, not a bug.
+
+### ✅ Done since validation (merged to `main` via PR #5)
+
+1. ~~Cut the escalation tax~~ — done (`b479e57`): binary/image → `asset_worker`, single-file script salvage.
+2. ~~Fix the OpenClaw bot~~ — done (2026-06-04): Haiku router, replies confirmed live.
+3. ~~Heal-loop convergence detection~~ — done (`056ad67`): `heal_metrics.py` similarity + escalate-then-stop.
+4. ~~Phase 2 — movies pipeline~~ — done (`056ad67`): `generate_video` data-flow fix, real director→renderer prompts, music backend gate, honest frame/sync checks. *(Still needs a live render test — see below.)*
+5. **Sprint A** — worker ladder (`qwen3:8b → qwen2.5-coder:14b → sonnet`) + paid-call budget + dispatch timeouts + bounded heal loop. *(`ac3bdce`)*
+6. **Pre-merge review fixes** — failure-handoff phase tracking made functional; worker-timeout liveness limitation documented. *(`7c7656e`)*
 
 ### Remaining work to finalize (priority order)
 
-1. **Cut the escalation tax (engine, highest ROI):** route binary/image tasks to `asset_worker` (they currently mis-type as `frontend` → code worker) and accept a non-JSON output format for single-file script tasks so the local model isn't escaping code inside JSON.
-2. **Fix the OpenClaw bot:** pick a reliable router model (Qwen3-14B-thinking or Haiku), set `OLLAMA_MAX_LOADED_MODELS=1` to stop bot/worker VRAM contention, trim `tools.profile`, wire a real failover, and prune the corrupted Ollama model store.
-3. **Heal-loop convergence detection:** diff the issue set round-over-round; stop early (or escalate the *fix* tasks) when issues aren't shrinking or a fix re-violates a constraint.
-4. **Phase 2 — movies pipeline:** fix the `generate_video` data-flow bug, write real `film`/`video-editor` stack prompts (LLM-as-director → ffmpeg-as-renderer), wire a real music backend (MusicGen), and replace the stub `frame_integrity`/`sync_check` video checks.
-5. **Phase 3 — native mobile verification:** stand up a macOS/Android CI runner, or explicitly mark Swift/Kotlin as "generate-only, human-verified" so the pipeline doesn't over-claim.
-6. **Carry-overs:** Playwright runner task inside the orchestrator DAG; IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect multi-vendor.
+1. **Re-run a supervised build against merged `main`** — confirm the escalation-tax + convergence fixes drop the Sonnet-escalation count vs the 2026-06-04 baseline. *(Pre-req: free GPU VRAM — unload any pinned model so `qwen2.5-coder:14b` loads cleanly; optionally `OLLAMA_MAX_LOADED_MODELS=1`.)*
+2. **Movies — live-validate:** install `ffmpeg`/`ffprobe`, run a "10-second video" build, and confirm it actually renders + verifies (otherwise honest SKIP).
+3. **Phase 3 — native mobile verification:** stand up a macOS/Android CI runner, or explicitly mark Swift/Kotlin as "generate-only, human-verified" so the pipeline doesn't over-claim.
+4. **Carry-overs:** Playwright runner task inside the orchestrator DAG; IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect multi-vendor.
+5. **Optional hardening / polish:** worker-timeout hard bound (`shutdown(wait=False, cancel_futures=True)` + audit inner timeouts); OpenClaw bot self-description (says it routes to `qwen2.5-coder:14b` — actually the 3-rung ladder); prune the 6 stale `worktree-agent-*` branches and the dangling Ollama manifests.
 
 ---
 
@@ -514,7 +553,7 @@ Rough confidence that an unattended run from a *detailed* prompt yields a finish
 
 **Verification** (`verification.py`): Auto-detects ecosystem (Node, Python, FastAPI, React+Vite, Phaser, vanilla, web3, electron, socket-io, three-js, Godot). Runs appropriate checks. Security: bandit (Python) / npm audit (Node) — FAIL on HIGH/CRITICAL. Lighthouse: Playwright static server + headless Lighthouse — FAIL if perf < 0.5 or a11y < 0.7. Godot headless: `godot --headless --check-only`. HTML meta: WARN on missing lang, description, img alt. Expo: `npx expo export --platform web`. Validates PWA files (`manifest.json` + `sw.js`) for vanilla/react-vite projects. **Honesty (Phase 1):** a check that returns `True` only because its tool/runner is unavailable now begins its message with the `SKIP_PREFIX` sentinel, so the HANDOFF report can render it as `⊘ SKIPPED` instead of a verified pass. The Playwright project/game check fails on a zero-size canvas and observes a 1.5s window so loop-time runtime errors are caught, not just init errors.
 
-**Self-healing loop** (`main.py`): After all tasks complete, runs the final Claude review **and** the dynamic checks (E2E + project Playwright) each cycle. The project only passes if review AND the dynamic gates pass — an E2E/Playwright failure now blocks the project and is injected into the issue list so the orchestrator generates fix tasks for it (previously the E2E result was computed and silently ignored). On `ISSUES FOUND`, calls orchestrator in `REVIEW_FAILED`, re-runs scheduler. Up to 2 cycles. *Known gap:* the loop bounds stuck cycles but does not yet detect non-convergence (it can spend its budget regressing).
+**Self-healing loop** (`main.py`): After all tasks complete, runs the final Claude review **and** the dynamic checks (E2E + project Playwright) each cycle. The project only passes if review AND the dynamic gates pass — an E2E/Playwright failure now blocks the project and is injected into the issue list so the orchestrator generates fix tasks for it (previously the E2E result was computed and silently ignored). On `ISSUES FOUND`, calls orchestrator in `REVIEW_FAILED`, re-runs scheduler. Up to 2 cycles. **Convergence detection (`heal_metrics.py`):** issue sets are compared round-over-round (Jaccard similarity over normalized issue tokens); a `regressing`/`stalled` trend first escalates the fix round (stronger worker rung + a sharper "address the root cause, don't reintroduce removed frameworks" hint), and a second consecutive non-converging signal stops the loop early instead of burning the budget regressing.
 
 ---
 
