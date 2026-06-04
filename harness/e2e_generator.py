@@ -33,7 +33,9 @@ Rules:
   {"files": [{"path": "relative/path.ext", "content": "complete file content"}]}
 - Write only tests/e2e.spec.ts (TypeScript Playwright).
 - Tests must import from "@playwright/test" and use test.describe blocks.
-- Always use page.goto('http://localhost:3000') as the base URL.
+- Always navigate with relative paths, e.g. page.goto('/'). The host/port is supplied
+  by the baseURL (http://localhost:18090) configured in playwright.config.ts — do NOT
+  hardcode http://localhost:3000 or any absolute host.
 - Use data-testid attributes if present in the source; otherwise use role/text selectors.
 - Do not include placeholder comments. Write complete, working test content.
 """
@@ -130,7 +132,7 @@ def _build_prompt(project_dir: Path, spec: dict, ecosystem: str, tasks_done: lis
             "acceptance_criteria": [
                 "tests/e2e.spec.ts uses @playwright/test imports",
                 "tests use test.describe and test() blocks",
-                "page.goto('http://localhost:3000') is the entry URL",
+                "page.goto('/') is the entry path (baseURL is set in playwright.config.ts)",
                 "at least 3 meaningful assertions",
                 "no uncaught JS error check is included",
             ],
@@ -316,7 +318,7 @@ def run_e2e_tests(project_dir: Path) -> tuple[bool, str]:
     """
     spec_file = project_dir / "tests" / "e2e.spec.ts"
     if not spec_file.exists():
-        return (True, "no e2e tests generated")
+        return (True, "auto-passed: no e2e tests generated")
 
     config_file = project_dir / "playwright.config.ts"
     if not config_file.exists():
@@ -343,4 +345,4 @@ def run_e2e_tests(project_dir: Path) -> tuple[bool, str]:
         return (passed, log)
     except Exception as e:  # noqa: BLE001
         console.print(f"  [yellow]Playwright runner skipped: {e}[/yellow]")
-        return (True, f"playwright runner skipped: {e}")
+        return (True, f"auto-passed: playwright runner skipped: {e}")

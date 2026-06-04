@@ -12,6 +12,7 @@ import anthropic
 from rich.console import Console
 
 from config import ANTHROPIC_API_KEY, ORCHESTRATOR_MODEL
+from verification import SKIP_PREFIX
 import config as cfg
 
 _STATE_FILE = Path(__file__).parent.parent / "mission_control.json"
@@ -54,14 +55,29 @@ def write_handoff(output_dir: Path, spec: dict, passed: bool, heal_cycles: int) 
 
     status_line = "✓ PASS — ready for final review" if passed else "✗ ISSUES REMAIN — needs attention"
 
-    # Pull test results from mission_control.json
+    # Pull test results from mission_control.json. A check that returned True only
+    # because its tool/runner was unavailable is a SKIP, not a real PASS — mark those
+    # distinctly (⊘) so a green report isn't silently hollow.
     test_lines: list[str] = []
+    skipped_count = 0
     try:
         mc = json.loads(_STATE_FILE.read_text(encoding="utf-8"))
         for t in mc.get("test_results", []):
-            icon = "✓" if t["passed"] else "✗"
+            log = t.get("log", "")
+            if t["passed"] and log.startswith(SKIP_PREFIX):
+                skipped_count += 1
+                test_lines.append(
+                    f"- ⊘ [{t['method']}/{t['ecosystem']}] {t['task_id']} — {log}"
+                )
+            else:
+                icon = "✓" if t["passed"] else "✗"
+                test_lines.append(
+                    f"- {icon} [{t['method']}/{t['ecosystem']}] {t['task_id']}"
+                )
+        if skipped_count:
             test_lines.append(
-                f"- {icon} [{t['method']}/{t['ecosystem']}] {t['task_id']}"
+                f"\n> ⚠ {skipped_count} check(s) were SKIPPED (tool/runner unavailable) — "
+                "these are NOT verified passes."
             )
     except Exception:  # noqa: BLE001
         pass

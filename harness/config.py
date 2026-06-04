@@ -16,7 +16,7 @@ ORCHESTRATOR_FALLBACK_MODELS: list[str] = [
 ]
 
 WORKER_PROVIDER: str = os.getenv("WORKER_PROVIDER", "ollama")  # "ollama" | "groq" | "openrouter"
-WORKER_MODEL: str = os.getenv("WORKER_MODEL", "qwen2.5-coder:7b")
+WORKER_MODEL: str = os.getenv("WORKER_MODEL", "qwen2.5-coder:14b")
 
 # Fallback worker providers tried in order on rate limit / error.
 # Format: "provider::model"  (double-colon separates provider from model so model colons don't confuse parsing)
@@ -32,8 +32,26 @@ def _parse_fallbacks(raw: str) -> list[tuple[str, str]]:
     return result
 
 WORKER_FALLBACKS: list[tuple[str, str]] = _parse_fallbacks(
-    os.getenv("WORKER_FALLBACKS", "openrouter::qwen/qwen-2.5-coder-32b-instruct:free,ollama::qwen2.5-coder:7b")
+    # Default local fallback is qwen3:8b — the previously-defaulted qwen2.5-coder:7b is not
+    # installed on this host, so it would error rather than fall back.
+    os.getenv("WORKER_FALLBACKS", "openrouter::qwen/qwen-2.5-coder-32b-instruct:free,ollama::qwen3:8b")
 )
+
+# Ordered worker model ladder, weakest → strongest. The router (worker.route_task) picks a
+# starting rung by task complexity; on each retry the effective rung escalates one step up this
+# ladder (see worker.routed_rung). Empty/unset disables laddering and falls back to the legacy
+# WORKER_PROVIDER + WORKER_FALLBACKS chain. Env override uses the same "provider::model" syntax.
+WORKER_LADDER: list[tuple[str, str]] = _parse_fallbacks(
+    os.getenv(
+        "WORKER_LADDER",
+        "ollama::qwen3:8b,ollama::qwen2.5-coder:14b,anthropic::claude-sonnet-4-6",
+    )
+)
+
+# Hard cap on the number of PAID (non-ollama) worker calls allowed per project run. Escalation
+# to a cloud rung is gated by this budget; once spent, tasks clamp to the strongest local rung
+# instead of paying. Prevents a multi-task project from silently burning the API budget.
+MAX_PAID_WORKER_CALLS: int = int(os.getenv("MAX_PAID_WORKER_CALLS", "15"))
 
 # Maximum tasks to run in parallel (1 = sequential, 2-4 = parallel)
 MAX_PARALLEL_WORKERS: int = int(os.getenv("MAX_PARALLEL_WORKERS", "4"))
@@ -77,6 +95,7 @@ EXPERIENCE_LOG: str = os.getenv("EXPERIENCE_LOG", "experience.jsonl")
 ORCHESTRATOR_PROMPT_PATH: Path = Path(__file__).parent.parent / "orchestrator.txt"
 
 TECHNICAL_ARCHITECT_ENABLED: bool = os.getenv("TECHNICAL_ARCHITECT_ENABLED", "true") == "true"
+TECHNICAL_ARCHITECT_MODEL: str = os.getenv("TECHNICAL_ARCHITECT_MODEL", "claude-sonnet-4-6")
 TECHNICAL_ARCHITECT_PROMPT_PATH: Path = Path(__file__).parent.parent / "technical_architect.txt"
 DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "8765"))
 DASHBOARD_AUTOOPEN: bool = os.getenv("DASHBOARD_AUTOOPEN", "true") == "true"
@@ -84,3 +103,8 @@ GODOT_PATH: str = os.getenv("GODOT_PATH", "godot")
 PINATA_API_KEY: str = os.getenv("PINATA_API_KEY", "")
 PINATA_SECRET_KEY: str = os.getenv("PINATA_SECRET_KEY", "")
 IPFS_AUTO_PIN: bool = os.getenv("IPFS_AUTO_PIN", "false").lower() == "true"
+
+# Pipeline resilience
+PIPELINE_MAX_RETRIES: int = int(os.getenv("PIPELINE_MAX_RETRIES", "2"))
+ORCHESTRATOR_TIMEOUT: int = int(os.getenv("ORCHESTRATOR_TIMEOUT", "300"))   # seconds per API call
+WORKER_TASK_TIMEOUT: int = int(os.getenv("WORKER_TASK_TIMEOUT", "600"))     # seconds per task batch

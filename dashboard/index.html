@@ -363,6 +363,8 @@ body {
 }
 .copy-btn:hover { background: #1a2744; color: var(--text); border-color: #2d4a7a; }
 .copy-btn.copied { background: #061a0a; color: var(--green); border-color: #0e3a14; }
+#restart-btn:hover { background: #2a0a0a; color: #ff8080; border-color: var(--red); }
+#restart-btn.restarting { background: #1a0808; color: var(--amber); border-color: var(--amber); }
 
 /* ── Toast ───────────────────────────────────────────────── */
 #copy-toast {
@@ -396,6 +398,7 @@ body {
   <span id="badge-worker-model" class="model-badge local" style="display:none" title="Worker / code-writing model"></span>
   <span id="elapsed" class="elapsed">0:00</span>
   <button class="copy-btn" id="copy-btn" onclick="copyLogs()" title="Copy all logs to clipboard">&#x1F4CB; Copy Logs</button>
+  <button class="copy-btn" id="restart-btn" onclick="restartPipeline()" title="Kill current run and restart with the same intent" style="border-color:#f47067;color:#f47067">&#x21BA; Restart</button>
 </div>
 <div id="copy-toast">Logs copied to clipboard</div>
 
@@ -795,6 +798,36 @@ function render(d) {
       <span class="file-task">${esc(f.task_id)}</span>
     </div>`;
   }).join('') || '<div class="empty">No files written yet.</div>';
+}
+
+// ── Restart pipeline ─────────────────────────────────────────────────────────
+
+async function restartPipeline() {
+  const btn = document.getElementById('restart-btn');
+  const intent = _lastData?.project?.intent || _lastData?.project?.goal;
+  if (!intent) { showToast('No previous build to restart.'); return; }
+  if (!confirm(`Restart build?\n\n"${intent.slice(0, 120)}"`)) return;
+
+  btn.classList.add('restarting');
+  btn.textContent = '⟳ Restarting…';
+
+  try {
+    const r = await fetch('/api/restart', { method: 'POST' });
+    const data = await r.json();
+    if (data.ok) {
+      showToast(`Pipeline restarted (PID ${data.pid})`);
+      btn.textContent = '✓ Started';
+      setTimeout(() => { btn.classList.remove('restarting'); btn.textContent = '↺ Restart'; }, 3000);
+    } else {
+      showToast('Restart failed: ' + (data.error || 'unknown error'));
+      btn.classList.remove('restarting');
+      btn.textContent = '↺ Restart';
+    }
+  } catch (e) {
+    showToast('Could not reach dashboard server.');
+    btn.classList.remove('restarting');
+    btn.textContent = '↺ Restart';
+  }
 }
 
 // ── Copy logs to clipboard ────────────────────────────────────────────────────

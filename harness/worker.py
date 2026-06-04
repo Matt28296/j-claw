@@ -1,11 +1,16 @@
 from __future__ import annotations
 import json
+import re
 import ollama
 from rich.console import Console
+
+import threading
 
 from config import (
     WORKER_MODEL, OLLAMA_HOST, WORKER_PROVIDER,
     WORKER_FALLBACKS, ANTHROPIC_API_KEY, OPENROUTER_API_KEY,
+    WORKER_LADDER, LOCAL_FIRST_TASK_TYPES, MAX_PAID_WORKER_CALLS,
+    WORKER_TASK_TIMEOUT,
 )
 
 console = Console()
@@ -407,6 +412,67 @@ Stack: Node.js real-time dashboard (Express + WebSocket or SSE, no build step)
 - Do NOT use TypeScript, webpack, Vite, or any build tooling — pure Node.js + browser JS only.
 """,
 
+    "film": """\
+Stack: Film / video render via ffmpeg (LLM-as-director → ffmpeg-as-renderer)
+You do NOT emit HTML and you do NOT emit raw video bytes. You are the DIRECTOR: you
+write a deterministic ffmpeg edit script plus a machine-readable shot list/manifest
+that the harness feeds to ffmpeg to render the final film. Write every file completely.
+- The single most important rule: for EVERY output video file the task declares
+  (*.mp4 / *.webm / *.mov), emit a line that starts EXACTLY with "ffmpeg " (lowercase,
+  one trailing space) and ends with that output file path as the LAST token. The harness
+  scans for the first "ffmpeg " line and substitutes the real output path for that last
+  token, so the output path MUST be the final argument and nothing may follow it.
+- Put the ffmpeg command(s) in a render script named render.sh (or build_film.sh). One
+  command per line. Use only ffmpeg built-in sources/filters that need no external assets:
+  lavfi sources (color=, testsrc=, sine=), drawtext, concat filter, xfade transitions,
+  and overlay. Do NOT reference image/audio files that are not also produced by an
+  upstream task — a self-contained synthetic render must always succeed.
+- Always set: -y (overwrite), -pix_fmt yuv420p (broad compatibility), -movflags +faststart
+  for mp4, and an explicit -t <seconds> or duration on every lavfi input so the render
+  terminates. Encode video with libx264 and audio with aac.
+- For titles/credits use drawtext with a fontsize and fontcolor; for multi-shot films build
+  the timeline with the concat or xfade filtergraph rather than many intermediate files.
+- shotlist.json (REQUIRED manifest): an array of shots, each
+  { "id", "duration_seconds", "description", "source" (the lavfi/source spec),
+  "audio" (sine spec or "none"), "transition" ("cut"|"fade"|"xfade") }. This documents the
+  director's intent so the render is reviewable and reproducible.
+- README.md: explain how to render locally (bash render.sh) and that the harness runs the
+  ffmpeg line automatically; note that ffmpeg must be installed.
+- NEVER emit placeholder ffmpeg flags, NEVER leave the output path unresolved, and NEVER
+  produce an index.html — this is a film, not a web page.
+""",
+
+    "video-editor": """\
+Stack: Video editing / compositing via ffmpeg (LLM-as-editor → ffmpeg-as-renderer)
+You do NOT emit HTML and you do NOT emit raw video bytes. You are the EDITOR: you write a
+deterministic ffmpeg edit script (cuts, trims, concatenation, transitions, overlays,
+audio mixing) plus a machine-readable edit decision list that the harness renders with
+ffmpeg. Write every file completely.
+- The single most important rule: for EVERY output video file the task declares
+  (*.mp4 / *.webm / *.mov), emit a line that starts EXACTLY with "ffmpeg " (lowercase, one
+  trailing space) and ends with the output file path as the LAST token. The harness scans
+  for the first "ffmpeg " line and replaces that last token with the real output path, so
+  the output path MUST be the final argument with nothing after it.
+- Put the ffmpeg command(s) in edit.sh. One command per line. Prefer a single filtergraph
+  (-filter_complex) over many intermediate render passes. Common editor operations:
+  * Trim/cut: trim=start=..:end=.. , atrim for audio, setpts/asetpts to reset timestamps.
+  * Concatenate clips: the concat filter (for differing codecs) or concat demuxer (matching
+    codecs). When inputs may be absent in CI, fall back to self-contained lavfi sources
+    (color=, testsrc=, sine=) so the render still succeeds without external assets.
+  * Transitions: xfade (video) + acrossfade (audio) between segments.
+  * Overlays / picture-in-picture / lower-thirds: overlay + drawtext.
+  * Audio mix: amix / amerge to combine music + voiceover; volume to balance levels.
+- Always set -y, -pix_fmt yuv420p, -movflags +faststart (mp4), encode with libx264 + aac,
+  and give every synthetic input an explicit duration (-t) so the render terminates.
+- edl.json (REQUIRED edit decision list): an array of operations, each
+  { "op" ("trim"|"concat"|"overlay"|"transition"|"audio_mix"), "inputs", "params",
+  "output_segment" }. This makes the edit reviewable and reproducible.
+- README.md: how to render locally (bash edit.sh), note the harness runs the ffmpeg line
+  automatically and that ffmpeg must be installed.
+- NEVER leave the output path unresolved, NEVER emit placeholder/example flags, and NEVER
+  produce an index.html — this is a rendered video, not a web page.
+""",
+
     "devops": """\
 Stack: DevOps / infrastructure (Dockerfile, Docker Compose, nginx, CI/CD, environment config)
 Generate production-ready infrastructure files for the project. Write every file completely.
@@ -560,6 +626,68 @@ This stack prompt applies to auth tasks within a full-stack project. Write COMPL
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
+# ── Complexity router ─────────────────────────────────────────────────────────
+
+# Paid-call budget: shared across all worker threads in one project run. Reset at project
+# start (reset_paid_budget) and consumed by each non-ollama attempt (reserve_paid_call).
+_paid_calls_made = 0
+_paid_lock = threading.Lock()
+
+
+def reset_paid_budget() -> None:
+    """Reset the per-project paid (cloud) worker-call counter. Call at project start."""
+    global _paid_calls_made
+    with _paid_lock:
+        _paid_calls_made = 0
+
+
+def _reserve_paid_call() -> bool:
+    """Atomically reserve one paid worker call. Returns False if the budget is exhausted."""
+    global _paid_calls_made
+    with _paid_lock:
+        if _paid_calls_made >= MAX_PAID_WORKER_CALLS:
+            return False
+        _paid_calls_made += 1
+        return True
+
+
+def _strongest_local_rung() -> int:
+    """Index of the strongest ollama (local, free) rung in the ladder, or top if none."""
+    local = [i for i, (prov, _) in enumerate(WORKER_LADDER) if prov == "ollama"]
+    return local[-1] if local else len(WORKER_LADDER) - 1
+
+
+def route_task(task) -> int:
+    """Pick the *base* worker ladder rung (0 = weakest) from task complexity.
+
+    Base routing is always LOCAL — a task never starts on a paid cloud rung. Genuinely hard
+    tasks reach cloud only via escalation-on-retry (see routed_rung), i.e. after a local
+    attempt has actually failed verification. This keeps the system local-first by default.
+      - rung 0 (cheapest local): trivial single-file scaffold/style/data/config
+      - strongest-local rung: everything else (the normal-code workhorse)
+    """
+    if not WORKER_LADDER:
+        return 0
+    local_top = _strongest_local_rung()
+    ttype = (getattr(task, "type", "") or "").lower()
+    n_files = len(getattr(task, "files", []) or [])
+
+    if ttype in LOCAL_FIRST_TASK_TYPES and n_files <= 1:
+        return 0
+    return local_top
+
+
+def routed_rung(task) -> int:
+    """Effective ladder rung = base complexity rung + retry_count, capped at the top.
+
+    The +retry_count term is what makes retries *escalate*: each failed attempt bumps the
+    task one rung up the ladder (e.g. 14b → Sonnet) instead of re-running the same model.
+    """
+    if not WORKER_LADDER:
+        return 0
+    return min(route_task(task) + getattr(task, "retry_count", 0), len(WORKER_LADDER) - 1)
+
+
 def execute_task(
     task,
     spec: dict,
@@ -570,7 +698,9 @@ def execute_task(
     Ask the worker model to implement a task.
     Returns {"files": [...], "model_used": "<provider>/<model>"}.
 
-    Tries WORKER_PROVIDER first, then each entry in WORKER_FALLBACKS on provider failure.
+    Routing: a complexity-based ladder (WORKER_LADDER) selects a starting rung; the chain
+    runs from there up to the strongest rung, escalating one rung per retry. Falls back to
+    the legacy WORKER_PROVIDER + WORKER_FALLBACKS chain if WORKER_LADDER is unset.
     Raises ValueError immediately on bad JSON format so the scheduler can send EXECUTION_ERROR.
     """
     arch  = spec.get("architecture", {})
@@ -601,14 +731,34 @@ def execute_task(
     system_prompt = _SYSTEM_PROMPT + "\n" + _STACK_PROMPTS.get(effective_stack, _STACK_PROMPTS["vanilla"])
     user_message = _build_user_message(task, spec, dependency_files, context)
 
-    # Build attempt chain: primary first, then fallbacks
-    attempts: list[tuple[str, str]] = [(WORKER_PROVIDER, WORKER_MODEL)] + list(WORKER_FALLBACKS)
+    # Build attempt chain. With a ladder configured: start at the routed rung and walk UP to
+    # the strongest rung (escalation). If the chain is all-cloud, append the strongest LOCAL
+    # rung as a last-ditch attempt so a host without an API key (or one over its paid budget)
+    # still degrades to local output instead of failing outright.
+    if WORKER_LADDER:
+        effective = routed_rung(task)
+        attempts = list(WORKER_LADDER[effective:])
+        if not any(prov == "ollama" for prov, _ in attempts):
+            local_rungs = [r for r in WORKER_LADDER if r[0] == "ollama"]
+            if local_rungs:
+                attempts.append(local_rungs[-1])
+    else:
+        # Legacy behaviour: primary first, then fallbacks.
+        attempts = [(WORKER_PROVIDER, WORKER_MODEL)] + list(WORKER_FALLBACKS)
 
     last_err: Exception | None = None
     for provider, model in attempts:
+        # Gate paid (non-local) calls on the per-project budget. When exhausted, skip the
+        # cloud rung and fall through to the local last-ditch instead of spending more.
+        if provider != "ollama" and not _reserve_paid_call():
+            console.print(
+                f"  [yellow]Paid-call budget ({MAX_PAID_WORKER_CALLS}) exhausted — "
+                f"skipping {provider}/{model}, staying local.[/yellow]"
+            )
+            continue
         try:
             raw = _call_provider(provider, model, system_prompt, user_message)
-            parsed = _parse_and_validate(raw)
+            parsed = _parse_and_validate(raw, task)
             label = model if provider == "ollama" else f"{provider}/{model}"
             parsed["model_used"] = label
             return parsed
@@ -641,7 +791,8 @@ def _call_provider(provider: str, model: str, system: str, user: str) -> str:
 
 
 def _call_ollama(model: str, system: str, user: str) -> str:
-    client = ollama.Client(host=OLLAMA_HOST)
+    # Bound the request so a hung local generation can't stall the pipeline indefinitely.
+    client = ollama.Client(host=OLLAMA_HOST, timeout=WORKER_TASK_TIMEOUT)
     response = client.chat(
         model=model,
         messages=[
@@ -714,19 +865,77 @@ def _build_user_message(task, spec: dict, dependency_files: dict, context: dict 
     return json.dumps(payload, indent=2)
 
 
-def _parse_and_validate(raw: str) -> dict:
-    raw = _strip_fences(raw)
+def _loads_tolerant(raw: str):
+    """Parse worker JSON, tolerating trailing prose/data after the first object."""
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Worker returned invalid JSON: {exc}\n--- raw (first 600 chars) ---\n{raw[:600]}"
-        ) from exc
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    start = raw.find("{")
+    if start != -1:
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(raw[start:])
+            return obj if isinstance(obj, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
 
-    if not isinstance(parsed.get("files"), list):
-        raise ValueError(
-            f"Worker output missing 'files' list. Got keys: {list(parsed.keys())}"
-        )
+
+def _extract_code_block(raw: str) -> str | None:
+    """Return the largest fenced ``` code block in raw, or None."""
+    blocks = re.findall(r"```[a-zA-Z0-9_+\-]*\n(.*?)```", raw, re.DOTALL)
+    if not blocks:
+        return None
+    return (max(blocks, key=len).strip() or None)
+
+
+def _salvage_single_file(raw: str, parsed, task) -> dict | None:
+    """Conservatively recover a single-file task's content from malformed output.
+
+    Only fires when the task declares exactly one output file (multi-file guessing is unsafe).
+    Sources, in order: an explicit content/code/file string field, then the largest fenced
+    code block. Returns a reconstructed {files:[...]} dict, or None to let the caller escalate.
+    This cuts the paid-escalation tax on "write a script" tasks where the local model produces
+    valid code but botches the surrounding JSON.
+    """
+    files = getattr(task, "files", None) if task is not None else None
+    if not files or len(files) != 1:
+        return None
+    path = files[0]
+
+    content: str | None = None
+    if isinstance(parsed, dict):
+        for key in ("content", "code", "file"):
+            val = parsed.get(key)
+            if isinstance(val, str) and val.strip():
+                content = val
+                break
+    if content is None:
+        content = _extract_code_block(raw)
+    if content is None or len(content.strip()) < 20:
+        return None
+
+    console.print(
+        f"  [yellow]⚠ Salvaged single-file output for '{path}' from malformed worker JSON "
+        "(avoided an escalation)[/yellow]"
+    )
+    return {"files": [{"path": path, "content": content}]}
+
+
+def _parse_and_validate(raw: str, task=None) -> dict:
+    raw = _strip_fences(raw)
+    parsed = _loads_tolerant(raw)
+
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("files"), list):
+        # Before escalating, try to salvage a single-file task's body from malformed /
+        # mis-schema'd output (the local model often nails the code but botches JSON escaping).
+        salvaged = _salvage_single_file(raw, parsed, task)
+        if salvaged is not None:
+            parsed = salvaged
+        elif not isinstance(parsed, dict):
+            raise ValueError(f"Worker returned invalid JSON:\n--- raw (first 600 chars) ---\n{raw[:600]}")
+        else:
+            raise ValueError(f"Worker output missing 'files' list. Got keys: {list(parsed.keys())}")
 
     for entry in parsed["files"]:
         if not isinstance(entry.get("path"), str) or not isinstance(entry.get("content"), str):

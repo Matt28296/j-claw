@@ -197,9 +197,11 @@ pip install -r requirements.txt
 ### Pull a worker model
 
 ```powershell
-ollama pull qwen2.5-coder:14b   # recommended — 8–16 GB VRAM at Q4
-ollama pull qwen2.5-coder:7b    # lighter — 8 GB VRAM
+ollama pull qwen2.5-coder:14b   # primary code worker — ~8.4 GB at Q4 (fits 16 GB VRAM)
+ollama pull qwen3:8b            # lighter rung-0 worker — ~4.9 GB
 ```
+
+The default `WORKER_LADDER` uses both: `qwen3:8b` for trivial single-file tasks, `qwen2.5-coder:14b` for the rest, escalating to `claude-sonnet-4-6` only on retry (capped by `MAX_PAID_WORKER_CALLS`). On 16 GB VRAM, set `OLLAMA_MAX_LOADED_MODELS=1` if you also run the OpenClaw bot, to avoid VRAM contention.
 
 ### Configure
 
@@ -212,13 +214,15 @@ copy harness\.env.example harness\.env
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Required for Creative Director, Technical Architect, Orchestrator, Final Review |
 | `OPENROUTER_API_KEY` | — | Alternative orchestrator — set `ORCHESTRATOR_PROVIDER=openrouter` |
-| `WORKER_MODEL` | `qwen2.5-coder:7b` | Ollama model for code writing (never Claude) |
+| `WORKER_MODEL` | `qwen2.5-coder:14b` | Legacy single Ollama worker model (never Claude); superseded by `WORKER_LADDER` |
+| `WORKER_LADDER` | `ollama::qwen3:8b,ollama::qwen2.5-coder:14b,anthropic::claude-sonnet-4-6` | Weakest→strongest worker ladder. Base routing is always local; a task escalates one rung per retry. |
+| `MAX_PAID_WORKER_CALLS` | `15` | Hard cap on paid (non-Ollama) worker escalations per project run; once spent, tasks clamp to the strongest local rung |
 | `ORCHESTRATOR_MODEL` | `claude-sonnet-4-6` | Claude model for architect, planning, and review |
 | `TECHNICAL_ARCHITECT_ENABLED` | `true` | Set `false` to skip architect pass (legacy mode) |
 | `DASHBOARD_AUTOOPEN` | `true` | Auto-open browser to dashboard when pipeline starts |
 | `DASHBOARD_PORT` | `8765` | Dashboard server port |
-| `WORKER_FALLBACKS` | openrouter free models | Fallback chain if Ollama is down |
-| `MAX_PARALLEL_WORKERS` | `2` | Concurrent Ollama workers (independent DAG branches) |
+| `WORKER_FALLBACKS` | openrouter free + `ollama::qwen3:8b` | Legacy fallback chain (used only when `WORKER_LADDER` is unset) |
+| `MAX_PARALLEL_WORKERS` | `4` | Concurrent Ollama workers (independent DAG branches) |
 | `ORCHESTRATOR_MAX_TOKENS` | `16384` | Raise to `32768` for very large full-stack DAGs |
 | `SD_API_URL` | `http://localhost:7860` | Stable Diffusion WebUI endpoint for asset tasks |
 | `ASSET_PROVIDER` | `sd` | `sd` or `none` |
@@ -286,9 +290,25 @@ Start with `.\bot.bat` after setting `TELEGRAM_BOT_TOKEN` in `.env`:
 | Add `ANTHROPIC_API_KEY` to `~/.openclaw/.env` | ✅ Done |
 | Create Telegram bot (@JarvisClaw96bot) + add token | ✅ Done |
 | Telegram account paired | ✅ Done |
-| Switch OpenClaw agent to Anthropic Haiku (no VRAM conflict) | ✅ Done |
-| Start OpenClaw gateway | ✅ Done (running, PID managed by watchdog) |
 | OpenClaw auto-restart watchdog | ✅ Done (`C:\Users\Tyler\openclaw-watchdog.ps1`) |
+| Reliable bot replies | ❌ **BROKEN — see known issue below** |
+
+> ### ⚠️ Known issue (2026-06-04): the bot does not reliably reply
+>
+> The OpenClaw agent model is currently `ollama/qwen3:8b`, which **crashes** on real
+> messages on the AMD RX 9070 XT runner (`model runner has unexpectedly stopped`) — and
+> there is **no working failover** (the gateway logs `next=none`), so a crash yields silence
+> rather than a Haiku fallback. The crash is *not* an oversized-context issue (it runs at
+> 4096 ctx); it's AMD/Ollama runner instability, made worse by VRAM contention with the
+> J-Claw worker. The Ollama model store also has ~12 dangling/half-deleted manifests.
+>
+> **Planned fix** (see *What's Left to Finalize* §2): switch the router to a reliable model
+> (`Qwen3-14B`-thinking or Haiku — the router is *not* the J-Claw worker, so the
+> "Ollama-only worker" constraint doesn't apply to it), set `OLLAMA_MAX_LOADED_MODELS=1`,
+> trim `tools.profile` to minimal, wire a real failover, and prune the model store.
+>
+> **J-Claw itself is unaffected** — run builds directly with `run.bat`. Only the Telegram
+> front-end is down.
 
 ### To activate
 
@@ -301,13 +321,9 @@ C:\Users\Tyler\start-openclaw.bat
 
 To update the Windows Task Scheduler entry: point it to `C:\Users\Tyler\start-openclaw.bat` with `-WindowStyle Hidden` so it runs silently on login.
 
-Startup should show: `agent model: anthropic/claude-haiku-4-5-20251001`
-
-Then send your bot `build me a snake game` in Telegram.
-
 ### Architecture note
 
-OpenClaw's embedded agent (Claude Haiku) acts as a thin router — it reads the j-claw SKILL.md and invokes `run.bat`. The actual build runs via the Creative Director + Orchestrator + Worker pipeline locally. Haiku is used for the routing layer only; it requires no VRAM and doesn't conflict with the Ollama worker.
+OpenClaw's embedded agent acts as a thin **router** — it reads the j-claw SKILL.md and invokes `run.bat`. The actual build runs via the Creative Director + Orchestrator + Worker pipeline locally. The router model only needs to route, so a small reliable model (Haiku, or a stable local model) is appropriate; this is a separate concern from the J-Claw code-generation worker, which is always local Ollama.
 
 > **Security note**: Before installing any third-party OpenClaw plugins, audit their source code. OpenClaw plugins run in-process with full OS privileges — no sandbox. The `@alan512/ExperienceEngine` plugin was reviewed and rejected (exfiltrates task data to external LLMs). The `@openclaw/memory-lancedb` plugin is safe only when configured with local Ollama embeddings.
 
@@ -430,15 +446,42 @@ Every project writes to `harness/projects/<slug>/`:
 | IPFS deployment — `scripts/pin-to-ipfs.js` (Pinata API) auto-generated for Web3 projects | ✅ |
 | Stripe integration — payment prompts in fastapi + react-vite stacks (checkout, webhook, .env) | ✅ |
 | Swift (iOS/SwiftUI) + Kotlin (Android/Compose) native mobile stacks | ✅ |
+| **Phase 1 — verification honesty (2026-06-04, live-validated):** E2E + project-Playwright checks now **gate** the project and feed the self-heal loop (previously computed then ignored); generated Playwright tests use relative `goto('/')` against the configured `:18090` baseURL (was a dead `:3000`) | ✅ |
+| **Phase 1 — SKIP ≠ PASS:** checks that auto-pass only because a tool/runner is missing are marked `⊘ SKIPPED` (not a verified pass) in `HANDOFF.md`, so a green report is no longer silently hollow | ✅ |
+| **Phase 1 — real game check:** Playwright game check now fails on a zero-size canvas and observes a 1.5s window so game-loop runtime errors surface, not just init-time errors | ✅ |
 
-### Next
+---
 
-| Item |
-|---|
-| Playwright test runner task in orchestrator DAG (alongside e2e_generator.py step) |
-| IPFS/on-chain CI deployment hook |
-| LemonSqueezy / Stripe Connect multi-vendor support |
-| Real native mobile build validation (xcrun simctl / Android emulator) |
+## Current Status & What's Left to Finalize
+
+A supervised live build (a vanilla multi-page site, 2026-06-04) validated the pipeline end-to-end: the full Creative Director → Architect → Orchestrator → worker → verify → **honest gate** → self-heal flow ran with no hang, correctly exited **"ISSUES FOUND"** instead of false-greening, and the Phase 1 changes above all fired as designed. That run also surfaced the real, honest state of the system.
+
+### Honest capability scorecard
+
+Rough confidence that an unattended run from a *detailed* prompt yields a finished, **working** deliverable (generation quality × verification honesty):
+
+| Category | Confidence | Reality |
+|---|---|---|
+| 🟢 **Websites** (static / SPA / simple full-stack) | ~80% | Strong stacks + the one category with a real verification backbone (`npm`/`pip` build gates genuinely block). Closest to true one-shot. |
+| 🟡 **Videogames** (Phaser / Three.js) | ~70% | Strong generation; gates now catch JS errors + dead canvas, but there is still no *gameplay* validation ("is it winnable"). |
+| 🟡 **Apps / Dapps** | ~65% web | Web apps + web3 dapps are solid; desktop (Electron/Tauri) generates but verifies thinly; native mobile (Swift/Kotlin) **cannot be built/verified on Windows** — generate-only. |
+| 🔴 **Movies** (film / video / music) | ~5–10% | Theater end-to-end: `film`/`video-editor` have no real stack prompt, `generate_video` produces zero output (reads an empty `task.output_files`), `music_worker.can_generate()` is hardcoded `False`. |
+
+### Known issues surfaced by validation
+
+- **The local 14B worker reliably escalates to paid Sonnet on "write a script / generate a binary" tasks** (code or base64 inside a JSON `content` field). This is an *output-format* problem, not a model-quality one — a bigger local model won't fix it. Highest-ROI engine fix.
+- **The self-heal loop bounds stuck cycles but does not detect non-convergence.** In the validation run it spent its full 2-round budget *regressing* (re-introduced a framework it had been told not to use, created new class mismatches). It never hangs, but it can burn its budget making things worse.
+- **The OpenClaw Telegram bot is currently broken** — see the OpenClaw Integration section. `qwen3:8b` crashes on the AMD GPU runner and there is no working failover, so the bot does not reliably reply. J-Claw itself runs fine directly via `run.bat`; only the chat front-end is affected.
+- **Verification honesty depends on installed tooling.** On a box missing `ffprobe`/`mypy`/`ruff`/`bandit`/Playwright, those checks SKIP (now honestly marked) rather than gate — so "green" only means "verified" where the tools exist.
+
+### Remaining work to finalize (priority order)
+
+1. **Cut the escalation tax (engine, highest ROI):** route binary/image tasks to `asset_worker` (they currently mis-type as `frontend` → code worker) and accept a non-JSON output format for single-file script tasks so the local model isn't escaping code inside JSON.
+2. **Fix the OpenClaw bot:** pick a reliable router model (Qwen3-14B-thinking or Haiku), set `OLLAMA_MAX_LOADED_MODELS=1` to stop bot/worker VRAM contention, trim `tools.profile`, wire a real failover, and prune the corrupted Ollama model store.
+3. **Heal-loop convergence detection:** diff the issue set round-over-round; stop early (or escalate the *fix* tasks) when issues aren't shrinking or a fix re-violates a constraint.
+4. **Phase 2 — movies pipeline:** fix the `generate_video` data-flow bug, write real `film`/`video-editor` stack prompts (LLM-as-director → ffmpeg-as-renderer), wire a real music backend (MusicGen), and replace the stub `frame_integrity`/`sync_check` video checks.
+5. **Phase 3 — native mobile verification:** stand up a macOS/Android CI runner, or explicitly mark Swift/Kotlin as "generate-only, human-verified" so the pipeline doesn't over-claim.
+6. **Carry-overs:** Playwright runner task inside the orchestrator DAG; IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect multi-vendor.
 
 ---
 
@@ -469,9 +512,9 @@ Every project writes to `harness/projects/<slug>/`:
 
 **Scheduler** (`scheduler.py`): Topological DAG execution with parallel workers. Routes asset tasks to `asset_worker.py`, audio tasks to `audio_worker.py`, code tasks to `worker.py`. On failure: calls orchestrator in `EXECUTION_ERROR`, reads experience hints, retries up to `MAX_RETRIES_PER_TASK`.
 
-**Verification** (`verification.py`): Auto-detects ecosystem (Node, Python, FastAPI, React+Vite, Phaser, vanilla, web3, electron, socket-io, three-js, Godot). Runs appropriate checks. Security: bandit (Python) / npm audit (Node) — FAIL on HIGH/CRITICAL. Lighthouse: Playwright static server + headless Lighthouse — FAIL if perf < 0.5 or a11y < 0.7. Godot headless: `godot --headless --check-only`. HTML meta: WARN on missing lang, description, img alt. Expo: `npx expo export --platform web`. Validates PWA files (`manifest.json` + `sw.js`) for vanilla/react-vite projects.
+**Verification** (`verification.py`): Auto-detects ecosystem (Node, Python, FastAPI, React+Vite, Phaser, vanilla, web3, electron, socket-io, three-js, Godot). Runs appropriate checks. Security: bandit (Python) / npm audit (Node) — FAIL on HIGH/CRITICAL. Lighthouse: Playwright static server + headless Lighthouse — FAIL if perf < 0.5 or a11y < 0.7. Godot headless: `godot --headless --check-only`. HTML meta: WARN on missing lang, description, img alt. Expo: `npx expo export --platform web`. Validates PWA files (`manifest.json` + `sw.js`) for vanilla/react-vite projects. **Honesty (Phase 1):** a check that returns `True` only because its tool/runner is unavailable now begins its message with the `SKIP_PREFIX` sentinel, so the HANDOFF report can render it as `⊘ SKIPPED` instead of a verified pass. The Playwright project/game check fails on a zero-size canvas and observes a 1.5s window so loop-time runtime errors are caught, not just init errors.
 
-**Self-healing loop** (`main.py`): When final review returns `ISSUES FOUND`, parses the `ISSUES:` list, calls orchestrator in `REVIEW_FAILED` state, re-runs scheduler. Up to 2 cycles.
+**Self-healing loop** (`main.py`): After all tasks complete, runs the final Claude review **and** the dynamic checks (E2E + project Playwright) each cycle. The project only passes if review AND the dynamic gates pass — an E2E/Playwright failure now blocks the project and is injected into the issue list so the orchestrator generates fix tasks for it (previously the E2E result was computed and silently ignored). On `ISSUES FOUND`, calls orchestrator in `REVIEW_FAILED`, re-runs scheduler. Up to 2 cycles. *Known gap:* the loop bounds stuck cycles but does not yet detect non-convergence (it can spend its budget regressing).
 
 ---
 
