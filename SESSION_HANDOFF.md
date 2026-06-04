@@ -78,6 +78,11 @@ web_search), and `ollama rm` the ~12 dangling/half-deleted manifests.
 - Worker quality is bounded by 14B-class local models (Ollama-only worker constraint is locked).
 - Verification honesty depends on installed tooling — checks SKIP (now honestly marked) when a tool
   is absent.
+- Worker-task timeout is liveness-bounded by the *wait*, not by interrupting a running thread:
+  `_dispatch_batch` relies on each worker I/O path (Ollama HTTP, subprocesses) carrying its own
+  internal timeout — currently true (`ollama.Client(timeout=WORKER_TASK_TIMEOUT)`). Don't remove
+  those inner timeouts. A truly uninterruptible worker would still block at the pool's shutdown.
+  (Follow-up: `shutdown(wait=False, cancel_futures=True)` on 3.9+ for a harder bound.)
 
 ---
 

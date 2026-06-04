@@ -162,14 +162,17 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     from worker import reset_paid_budget
     reset_paid_budget()
 
+    # Mutable holder so the failure handoff below can report the phase the
+    # pipeline actually crashed in (updated in-place by _run_project_inner).
+    phase = {"current": "pipeline"}
     try:
-        _run_project_inner(intent, output_dir, depth, manual, auto_accept, wiring)
+        _run_project_inner(intent, output_dir, depth, manual, auto_accept, wiring, phase)
     except Exception as exc:
-        _write_failure_handoff(output_dir, intent, getattr(exc, "_pipeline_phase", "pipeline"), exc)
+        _write_failure_handoff(output_dir, intent, phase["current"], exc)
         raise
 
 
-def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, auto_accept: bool, wiring: dict | None) -> None:
+def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, auto_accept: bool, wiring: dict | None, phase: dict) -> None:
     """Inner pipeline body — separated so run_project() can catch + report failures."""
 
     _start_dashboard()
@@ -182,7 +185,7 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         orch = Orchestrator()
 
     sw.on_project_start(intent, str(output_dir))
-    _phase = "creative-director"
+    phase["current"] = "creative-director"
 
     # ── Creative Director pre-pass ────────────────────────────────────────────
     console.print("\n[bold]Creative Director interpreting intent...[/bold]")
@@ -197,7 +200,7 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         creative_brief = {}
 
     # ── Technical Architect pass ──────────────────────────────────────────────
-    _phase = "technical-architect"
+    phase["current"] = "technical-architect"
     tech_spec: dict = {}
     if TECHNICAL_ARCHITECT_ENABLED and creative_brief:
         console.print("\n[bold]Technical Architect reviewing brief...[/bold]")
@@ -211,7 +214,7 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
             console.print(f"  [yellow]Technical Architect skipped ({_ta_exc})[/yellow]")
 
     # ── INIT ──────────────────────────────────────────────────────────────────
-    _phase = "init"
+    phase["current"] = "init"
     console.print("\n[bold]Generating project spec…[/bold]")
     sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "INIT")
     init_payload: dict = {
@@ -249,7 +252,7 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
             return
 
     # ── SPEC_ACCEPTED ─────────────────────────────────────────────────────────
-    _phase = "dag-generation"
+    phase["current"] = "dag-generation"
     sw.on_spec_accepted(spec)
     import json as _json
     (output_dir / "spec.json").write_text(_json.dumps(spec, indent=2), encoding="utf-8")
@@ -267,7 +270,7 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
     sw.on_dag_loaded(dag_response["tasks"])
     instance.load_tasks(dag_response["tasks"])
 
-    _phase = "execution"
+    phase["current"] = "execution"
     console.print(f"\n[bold]Executing {len(instance.tasks)} task(s)…[/bold]")
     Scheduler(instance, orch).run()
     (output_dir / "tasks_done.json").write_text(

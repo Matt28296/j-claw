@@ -105,6 +105,13 @@ class Scheduler:
 
         ALL batches go through the timeout path — including single-task batches — so one hung
         worker cannot stall the pipeline indefinitely (the previous serial path had no timeout).
+
+        KNOWN LIMITATION: _cf_wait() bounds how long we WAIT, and fut.cancel() cannot stop a
+        thread that has already started, so the `with` block's implicit shutdown(wait=True) will
+        still block on a truly uninterruptible worker until it returns. The timeout therefore
+        only guarantees liveness if every worker I/O path (Ollama HTTP, subprocesses) carries its
+        own internal timeout — which they currently do (WORKER_TASK_TIMEOUT / request timeouts).
+        Do not remove those inner timeouts assuming this wait alone bounds wall-clock.
         """
         workers = max(1, min(MAX_PARALLEL_WORKERS, len(ready)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
