@@ -9,7 +9,7 @@ from rich.syntax import Syntax
 from config import (
     ORCHESTRATOR_MODEL, ANTHROPIC_API_KEY, ORCHESTRATOR_PROMPT_PATH,
     ORCHESTRATOR_API_MODEL, ORCHESTRATOR_FALLBACK_MODELS, OPENROUTER_API_KEY,
-    ORCHESTRATOR_MAX_TOKENS, EXECUTION_ERROR_MODEL,
+    ORCHESTRATOR_MAX_TOKENS, EXECUTION_ERROR_MODEL, ORCHESTRATOR_TIMEOUT,
 )
 from validator import validate_response, OrchestratorOutputError
 
@@ -82,6 +82,7 @@ class Orchestrator:
                     max_tokens=ORCHESTRATOR_MAX_TOKENS,
                     system=[{"type": "text", "text": self._system_prompt, "cache_control": {"type": "ephemeral"}}],
                     messages=[{"role": "user", "content": user_message}],
+                    timeout=ORCHESTRATOR_TIMEOUT,
                 )
                 if response.stop_reason == "max_tokens":
                     console.print(
@@ -94,6 +95,15 @@ class Orchestrator:
                 parsed = json.loads(text)
                 validate_response(state, parsed)
                 return parsed
+
+            except anthropic.APITimeoutError as exc:
+                last_error = exc
+                console.print(
+                    f"[yellow]Orchestrator timed out after {ORCHESTRATOR_TIMEOUT}s "
+                    f"(attempt {attempt + 1}/{max_retries + 1}) — retrying...[/yellow]"
+                )
+                if attempt < max_retries:
+                    time.sleep(2 + attempt)
 
             except (json.JSONDecodeError, OrchestratorOutputError) as exc:
                 last_error = exc

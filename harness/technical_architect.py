@@ -7,8 +7,8 @@ import anthropic
 from rich.console import Console
 
 from config import (
-    ANTHROPIC_API_KEY, ORCHESTRATOR_MODEL, ORCHESTRATOR_MAX_TOKENS,
-    TECHNICAL_ARCHITECT_PROMPT_PATH,
+    ANTHROPIC_API_KEY, ORCHESTRATOR_MAX_TOKENS,
+    TECHNICAL_ARCHITECT_MODEL, TECHNICAL_ARCHITECT_PROMPT_PATH,
 )
 from project_memory import ProjectMemory
 
@@ -42,7 +42,7 @@ class TechnicalArchitect:
         for attempt in range(max_retries + 1):
             try:
                 response = self._client.messages.create(
-                    model=ORCHESTRATOR_MODEL,
+                    model=TECHNICAL_ARCHITECT_MODEL,
                     max_tokens=ORCHESTRATOR_MAX_TOKENS,
                     system=[{
                         "type": "text",

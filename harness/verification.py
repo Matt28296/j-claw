@@ -14,6 +14,13 @@ console = Console()
 _TIMEOUT_DEFAULT = 120
 _TIMEOUT_BUILD = 300
 
+# Sentinel marking a check that returned True only because its tool/runner was
+# unavailable (or the check could not actually run) — i.e. a SKIP, not a verified
+# PASS. Every such auto-pass path begins its message with this prefix so the
+# handoff report can distinguish a skipped check from a genuine pass and avoid
+# reporting a hollow green run. Real passes use descriptive messages instead.
+SKIP_PREFIX = "auto-passed:"
+
 # Commands per ecosystem per verification type.
 # None means "no command available — auto-pass with a warning".
 _COMMANDS: dict[str, dict[str, list[str] | None]] = {
@@ -247,10 +254,21 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
         return _run_react_vite_test(project_dir)
 
     if ecosystem in ("fastapi", "python") and method == "unit_test":
-        return _run_python_test(project_dir)
+        ok, log = _run_python_test(project_dir)
+        if not ok:
+            return ok, log
+        mypy_ok, mypy_log = _run_mypy_check(project_dir)
+        if not mypy_ok:
+            return mypy_ok, mypy_log
+        ruff_ok, ruff_log = _run_ruff_check(project_dir)
+        return ruff_ok, "\n".join(filter(None, [log, mypy_log, ruff_log]))
 
     if ecosystem == "fastapi" and method == "build":
-        return _run_fastapi_install(project_dir)
+        ok, log = _run_fastapi_install(project_dir)
+        if not ok:
+            return ok, log
+        ruff_ok, ruff_log = _run_ruff_check(project_dir)
+        return ruff_ok, "\n".join(filter(None, [log, ruff_log]))
 
     if ecosystem == "phaser":
         # If package.json exists, treat as node so npm scripts (including Playwright) run.
@@ -289,6 +307,24 @@ def _run_python_test(project_dir: Path) -> tuple[bool, str]:
         console.print("  [yellow]pytest not installed — auto-passing unit_test.[/yellow]")
         return True, "auto-passed: pytest not installed"
     return _run_cmd(["python", "-m", "pytest", "-q"], project_dir, _TIMEOUT_DEFAULT)
+
+
+def _run_mypy_check(project_dir: Path) -> tuple[bool, str]:
+    """Run mypy type-checking; auto-pass if mypy is not installed."""
+    if not shutil.which("mypy"):
+        console.print("  [yellow]mypy not installed — auto-passing type_check.[/yellow]")
+        return True, "auto-passed: mypy not installed"
+    console.print("  [dim]Type check: mypy --ignore-missing-imports .[/dim]")
+    return _run_cmd(["mypy", "--ignore-missing-imports", "."], project_dir, _TIMEOUT_DEFAULT)
+
+
+def _run_ruff_check(project_dir: Path) -> tuple[bool, str]:
+    """Run ruff linting; auto-pass if ruff is not installed."""
+    if not shutil.which("ruff"):
+        console.print("  [yellow]ruff not installed — auto-passing lint.[/yellow]")
+        return True, "auto-passed: ruff not installed"
+    console.print("  [dim]Lint: ruff check .[/dim]")
+    return _run_cmd(["ruff", "check", "."], project_dir, _TIMEOUT_DEFAULT)
 
 
 def _run_react_vite_test(project_dir: Path) -> tuple[bool, str]:
@@ -628,6 +664,27 @@ def _run_playwright_check(project_dir: Path) -> tuple[bool, str]:
                     "Expected for a Phaser game.[/yellow]"
                 )
 
+            # Gameplay sanity: a present canvas must have a non-zero render surface.
+            # A 0x0 canvas means the game booted but never sized/rendered — a real
+            # defect the bare "canvas exists" check used to miss.
+            canvas_dims = None
+            if canvas_count > 0:
+                try:
+                    canvas_dims = page.evaluate(
+                        "() => { const c = document.querySelector('canvas');"
+                        " return c ? {w: c.width, h: c.height,"
+                        " cw: c.clientWidth, ch: c.clientHeight} : null; }"
+                    )
+                except Exception:
+                    canvas_dims = None
+
+            # Observe a short window so runtime errors thrown by the game loop
+            # (not just init-time errors) are captured by the console handler.
+            try:
+                page.wait_for_timeout(1500)
+            except Exception:
+                pass
+
             # Check page title
             title = page.title()
             if not title:
@@ -641,6 +698,12 @@ def _run_playwright_check(project_dir: Path) -> tuple[bool, str]:
             for err in js_errors:
                 console.print(f"  [dim]{err}[/dim]")
             return False, f"Playwright JS errors:\n{summary}"
+
+        if canvas_count > 0 and canvas_dims and (not canvas_dims.get("w") or not canvas_dims.get("h")):
+            console.print(
+                f"  [red]Playwright: canvas present but has zero render size {canvas_dims}.[/red]"
+            )
+            return False, f"canvas has zero render size: {canvas_dims}"
 
         if warnings:
             console.print(f"  [yellow]Playwright: {len(warnings)} warning(s) (non-fatal).[/yellow]")

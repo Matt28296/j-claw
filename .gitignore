@@ -22,3 +22,6 @@ harness/.env
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code (local settings + temporary agent worktrees)
+.claude/

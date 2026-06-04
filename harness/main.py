@@ -5,6 +5,7 @@ import sys
 import json
 import shutil
 import argparse
+import time
 from pathlib import Path
 from graphlib import TopologicalSorter
 
@@ -15,6 +16,7 @@ from rich.prompt import Prompt, Confirm
 from config import (
     PROJECTS_DIR, MAX_FORMAT5_DEPTH, ORCHESTRATOR_PROVIDER, ORCHESTRATOR_MODEL,
     ORCHESTRATOR_API_MODEL, TECHNICAL_ARCHITECT_ENABLED, DASHBOARD_PORT, DASHBOARD_AUTOOPEN,
+    PIPELINE_MAX_RETRIES,
 )
 
 # Display name shown in dashboard active-agent box during orchestrator calls
@@ -31,6 +33,25 @@ from creative_director import CreativeDirector
 from technical_architect import TechnicalArchitect
 
 console = Console()
+
+
+def _write_failure_handoff(output_dir: Path, intent: str, phase: str, exc: Exception) -> None:
+    """Write a minimal HANDOFF.md when the pipeline crashes so the folder is never empty."""
+    content = (
+        "# J-Claw Handoff Report\n\n"
+        f"**Status:** ✗ PIPELINE FAILURE — crashed in {phase} phase\n"
+        f"**Project:** {intent}\n"
+        f"**Error:** {type(exc).__name__}: {str(exc)[:500]}\n"
+        f"**Output directory:** {output_dir.resolve()}\n\n"
+        "## Recovery\n"
+        f'Re-run: `python main.py --yes "{intent}" --output "{output_dir}"`\n'
+    )
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "HANDOFF.md").write_text(content, encoding="utf-8")
+        console.print(f"  [yellow]Failure report written to: {output_dir / 'HANDOFF.md'}[/yellow]")
+    except Exception:
+        pass
 
 
 def _start_dashboard() -> None:
@@ -137,6 +158,20 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Reset the per-project paid (cloud) worker-call budget for this run.
+    from worker import reset_paid_budget
+    reset_paid_budget()
+
+    try:
+        _run_project_inner(intent, output_dir, depth, manual, auto_accept, wiring)
+    except Exception as exc:
+        _write_failure_handoff(output_dir, intent, getattr(exc, "_pipeline_phase", "pipeline"), exc)
+        raise
+
+
+def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, auto_accept: bool, wiring: dict | None) -> None:
+    """Inner pipeline body — separated so run_project() can catch + report failures."""
+
     _start_dashboard()
 
     if manual:
@@ -147,6 +182,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
         orch = Orchestrator()
 
     sw.on_project_start(intent, str(output_dir))
+    _phase = "creative-director"
 
     # ── Creative Director pre-pass ────────────────────────────────────────────
     console.print("\n[bold]Creative Director interpreting intent...[/bold]")
@@ -161,6 +197,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
         creative_brief = {}
 
     # ── Technical Architect pass ──────────────────────────────────────────────
+    _phase = "technical-architect"
     tech_spec: dict = {}
     if TECHNICAL_ARCHITECT_ENABLED and creative_brief:
         console.print("\n[bold]Technical Architect reviewing brief...[/bold]")
@@ -174,6 +211,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
             console.print(f"  [yellow]Technical Architect skipped ({_ta_exc})[/yellow]")
 
     # ── INIT ──────────────────────────────────────────────────────────────────
+    _phase = "init"
     console.print("\n[bold]Generating project spec…[/bold]")
     sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "INIT")
     init_payload: dict = {
@@ -211,6 +249,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
             return
 
     # ── SPEC_ACCEPTED ─────────────────────────────────────────────────────────
+    _phase = "dag-generation"
     sw.on_spec_accepted(spec)
     import json as _json
     (output_dir / "spec.json").write_text(_json.dumps(spec, indent=2), encoding="utf-8")
@@ -228,6 +267,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     sw.on_dag_loaded(dag_response["tasks"])
     instance.load_tasks(dag_response["tasks"])
 
+    _phase = "execution"
     console.print(f"\n[bold]Executing {len(instance.tasks)} task(s)…[/bold]")
     Scheduler(instance, orch).run()
     (output_dir / "tasks_done.json").write_text(
@@ -236,38 +276,60 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
 
     console.print(f"\n[bold green]Project output written to: {output_dir}[/bold green]")
 
-    # Auto-generate Playwright E2E tests for web ecosystems.
+    # Auto-generate Playwright E2E tests for web ecosystems (once, before healing).
     ecosystem = detect_ecosystem(output_dir)
     if ecosystem in ("vanilla", "react-vite", "phaser", "three-js"):
         try:
             generate_e2e_tests(output_dir, instance.spec, instance.tasks_as_list(), ecosystem)
         except Exception as _e2e_exc:
             console.print(f"  [yellow]E2E test generation skipped ({_e2e_exc})[/yellow]")
-        e2e_passed, e2e_log = run_e2e_tests(output_dir)
-        sw.on_verification_result("e2e", "playwright", ecosystem, e2e_passed, e2e_log)
 
-    # Project-level Playwright check for phaser/vanilla — runs regardless of
-    # task verification settings (which are always "none" for these stacks).
-    if ecosystem in ("phaser", "three-js", "unknown") and (output_dir / "index.html").exists():
-        passed_pw, log_pw = run_playwright_project_check(output_dir)
-        sw.on_verification_result("project", "playwright", ecosystem, passed_pw, log_pw)
+    def _run_dynamic_checks() -> tuple[bool, list[str]]:
+        """Run E2E + project-level Playwright checks and record them.
+
+        Returns (all_passed, issues). Only genuine assertion / JS-error failures
+        count as failures; an unavailable runner returns passed=True (skip) and
+        does not block. Issues are phrased so the orchestrator can act on them.
+        """
+        ok = True
+        issues: list[str] = []
+        if ecosystem in ("vanilla", "react-vite", "phaser", "three-js"):
+            e2e_passed, e2e_log = run_e2e_tests(output_dir)
+            sw.on_verification_result("e2e", "playwright", ecosystem, e2e_passed, e2e_log)
+            if not e2e_passed:
+                ok = False
+                detail = next((ln for ln in reversed(e2e_log.splitlines()) if ln.strip()), "see log")
+                issues.append(f"E2E Playwright tests failed: {detail[:200]}")
+        # Project-level Playwright check for phaser/vanilla — runs regardless of
+        # task verification settings (which are always "none" for these stacks).
+        if ecosystem in ("phaser", "three-js", "unknown") and (output_dir / "index.html").exists():
+            passed_pw, log_pw = run_playwright_project_check(output_dir)
+            sw.on_verification_result("project", "playwright", ecosystem, passed_pw, log_pw)
+            if not passed_pw:
+                ok = False
+                detail = next((ln for ln in log_pw.splitlines() if ln.strip()), "see log")
+                issues.append(f"Playwright project check failed: {detail[:200]}")
+        return ok, issues
 
     if not manual:
         _MAX_HEAL = 2
         passed = False
         heal_cycle = 0
         for heal_cycle in range(_MAX_HEAL + 1):
-            passed = run_final_review(output_dir, instance.spec)
+            review_passed = run_final_review(output_dir, instance.spec)
+            dynamic_passed, dynamic_issues = _run_dynamic_checks()
+            passed = review_passed and dynamic_passed
             if passed or heal_cycle == _MAX_HEAL:
                 break
 
             issues = parse_review_issues(output_dir / "REVIEW.md")
+            issues.extend(dynamic_issues)
             if not issues:
                 console.print("  [yellow]No parseable issues in REVIEW.md — stopping heal loop.[/yellow]")
                 break
 
             console.print(
-                f"\n[yellow]Review flagged {len(issues)} issue(s) — requesting fix tasks "
+                f"\n[yellow]Review/E2E flagged {len(issues)} issue(s) — requesting fix tasks "
                 f"(heal cycle {heal_cycle + 1}/{_MAX_HEAL})…[/yellow]"
             )
             for i, issue in enumerate(issues, 1):
@@ -299,6 +361,9 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
 
         if not passed:
             sys.exit(1)
+    else:
+        # Manual mode: surface dynamic checks for the operator (no automated gating).
+        _run_dynamic_checks()
 
 
 def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bool = False, manual: bool = False) -> None:
@@ -369,14 +434,25 @@ def main() -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        run_project(intent, output_dir, manual=args.manual, auto_accept=args.yes)
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted.[/yellow]")
-        sys.exit(1)
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"\n[bold red]Fatal error:[/bold red] {exc}")
-        raise
+    for attempt in range(PIPELINE_MAX_RETRIES + 1):
+        try:
+            run_project(intent, output_dir, manual=args.manual, auto_accept=args.yes)
+            break  # success
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Interrupted.[/yellow]")
+            sys.exit(1)
+        except Exception as exc:  # noqa: BLE001
+            if attempt < PIPELINE_MAX_RETRIES:
+                console.print(
+                    f"\n[bold yellow]Pipeline failed (attempt {attempt + 1}/{PIPELINE_MAX_RETRIES + 1}): "
+                    f"{exc}[/bold yellow]\n[yellow]Retrying in 5s…[/yellow]"
+                )
+                time.sleep(5)
+            else:
+                console.print(
+                    f"\n[bold red]Pipeline failed after {PIPELINE_MAX_RETRIES + 1} attempt(s): {exc}[/bold red]"
+                )
+                raise
 
 
 if __name__ == "__main__":

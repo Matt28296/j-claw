@@ -1,13 +1,13 @@
 from __future__ import annotations
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait as _cf_wait, FIRST_EXCEPTION
 from pathlib import Path
 from rich.console import Console
 
-from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, MAX_PARALLEL_WORKERS, MAX_TASKS
+from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, MAX_PARALLEL_WORKERS, MAX_TASKS, WORKER_TASK_TIMEOUT, WORKER_LADDER
 from experience_log import log_outcome, get_relevant_hints
 from project import ProjectInstance, Task
-from worker import execute_task
+from worker import execute_task, routed_rung
 from verification import run_verification, detect_ecosystem
 from validator import validate_dag, OrchestratorOutputError
 from state_writer import writer as sw
@@ -48,40 +48,66 @@ class Scheduler:
         self.orch = orchestrator
 
     def run(self) -> None:
-        """Execute all tasks to completion (or terminal failure)."""
-        while not self.instance.all_tasks_done():
-            ready = self._ready_tasks()
+        """Execute all tasks to completion (or terminal failure).
 
-            if not ready:
-                failed = self.instance.failed_tasks()
-                pending = [t for t in self.instance.tasks.values() if t.status == "pending"]
-                if failed:
-                    console.print(
-                        f"\n[red]Scheduler stalled: {len(failed)} task(s) failed with no retries left.[/red]"
-                    )
-                    for t in failed:
-                        console.print(f"  • {t.id}: {t.error_log[:200]}")
-                elif pending:
-                    console.print(
-                        "[red]Scheduler deadlock: tasks are pending but none are ready "
-                        "(unsatisfied dependencies?).[/red]"
-                    )
+        Outer loop: after all tasks finish, run PROJECT_REVIEW; if it injects follow-up fix
+        tasks, loop back and execute them (bounded by _MAX_REVIEW_ROUNDS) instead of silently
+        dropping them.
+        """
+        _MAX_REVIEW_ROUNDS = 2
+        review_rounds = 0
+
+        while True:
+            while not self.instance.all_tasks_done():
+                ready = self._ready_tasks()
+
+                if not ready:
+                    failed = self.instance.failed_tasks()
+                    pending = [t for t in self.instance.tasks.values() if t.status == "pending"]
+                    if failed:
+                        console.print(
+                            f"\n[red]Scheduler stalled: {len(failed)} task(s) failed with no retries left.[/red]"
+                        )
+                        for t in failed:
+                            console.print(f"  • {t.id}: {t.error_log[:200]}")
+                    elif pending:
+                        console.print(
+                            "[red]Scheduler deadlock: tasks are pending but none are ready "
+                            "(unsatisfied dependencies?).[/red]"
+                        )
+                    return  # stalled/deadlocked — not actually done, skip review
+
+                self._dispatch_batch(ready)
+
+            # All tasks done. Run PROJECT_REVIEW once; if it added follow-ups, loop to run them.
+            if review_rounds >= _MAX_REVIEW_ROUNDS:
+                break
+            review_rounds += 1
+            if not self._project_review():
                 break
 
-            if MAX_PARALLEL_WORKERS <= 1 or len(ready) == 1:
-                for task in ready:
-                    self._run_task(task)
-            else:
-                workers = min(MAX_PARALLEL_WORKERS, len(ready))
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futures = {pool.submit(self._run_task, task): task for task in ready}
-                    for fut in as_completed(futures):
-                        exc = fut.exception()
-                        if exc:
-                            console.print(f"  [red]Worker thread raised: {exc}[/red]")
+    def _dispatch_batch(self, ready: list[Task]) -> None:
+        """Run a batch of ready tasks under a per-batch timeout.
 
-        if self.instance.all_tasks_done():
-            self._project_review()
+        ALL batches go through the timeout path — including single-task batches — so one hung
+        worker cannot stall the pipeline indefinitely (the previous serial path had no timeout).
+        """
+        workers = max(1, min(MAX_PARALLEL_WORKERS, len(ready)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(self._run_task, task): task for task in ready}
+            done, not_done = _cf_wait(list(futures.keys()), timeout=WORKER_TASK_TIMEOUT)
+            for fut in not_done:
+                task = futures[fut]
+                task.status = "failed"
+                task.error_log = f"Task timed out after {WORKER_TASK_TIMEOUT}s"
+                sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
+                console.print(f"  [red]Task {task.id} timed out ({WORKER_TASK_TIMEOUT}s) — retrying.[/red]")
+                fut.cancel()
+                self._handle_error(task)
+            for fut in done:
+                exc = fut.exception()
+                if exc:
+                    console.print(f"  [red]Worker thread raised: {exc}[/red]")
 
     # ── task execution ────────────────────────────────────────────────────────
 
@@ -132,6 +158,15 @@ class Scheduler:
             sw.on_task_done(task.id, "music_worker")
             console.print(f"  [green]✓ music done[/green]  [dim]({len(written)} file(s) written)[/dim]")
             return
+
+        if WORKER_LADDER:
+            rung = routed_rung(task)
+            prov, mdl = WORKER_LADDER[rung]
+            esc = "  [yellow](escalated)[/yellow]" if task.retry_count else ""
+            console.print(
+                f"  [dim]routed → rung {rung}: {prov}/{mdl}  "
+                f"(type={task.type}, files={len(task.files)}, deps={len(task.dependencies)})[/dim]{esc}"
+            )
 
         try:
             context = _build_context(task, self.instance.output_dir)
@@ -237,7 +272,9 @@ class Scheduler:
 
     # ── project review ────────────────────────────────────────────────────────
 
-    def _project_review(self) -> None:
+    def _project_review(self) -> bool:
+        """Run PROJECT_REVIEW. Returns True if follow-up fix tasks were injected (so run()
+        should loop and execute them), False if the project passed or no follow-ups apply."""
         console.print("\n[bold]All tasks done — requesting PROJECT_REVIEW…[/bold]")
 
         completed_summary = [
@@ -259,29 +296,29 @@ class Scheduler:
 
         if result == "pass":
             sw.on_project_done(result, review["summary"])
-            return
+            return False
 
         followups = review.get("followup_tasks", [])
         if not followups:
-            return
+            return False
 
         budget = self.instance.active_dag_count() + len(followups)
         if budget > MAX_TASKS:
             console.print(
                 f"[red]Follow-up tasks would push Active DAG to {budget} (> {MAX_TASKS} limit). Stopping.[/red]"
             )
-            return
+            return False
 
         try:
             validate_dag(followups, self.instance.tasks_as_list())
         except OrchestratorOutputError as exc:
             console.print(f"[red]Follow-up DAG invalid: {exc}  — skipping follow-ups.[/red]")
-            return
+            return False
 
         self.instance.apply_format4_followups(followups)
         console.print(f"  Added {len(followups)} follow-up task(s). Continuing execution…")
-        # Loop back into run() naturally — caller will re-invoke if needed.
-        # We just return; the while loop in run() will pick up the new tasks.
+        # run()'s outer loop will now re-enter the execution loop and run these tasks.
+        return True
 
     # ── helpers ───────────────────────────────────────────────────────────────
 

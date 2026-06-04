@@ -3,9 +3,13 @@ import json
 import ollama
 from rich.console import Console
 
+import threading
+
 from config import (
     WORKER_MODEL, OLLAMA_HOST, WORKER_PROVIDER,
     WORKER_FALLBACKS, ANTHROPIC_API_KEY, OPENROUTER_API_KEY,
+    WORKER_LADDER, LOCAL_FIRST_TASK_TYPES, MAX_PAID_WORKER_CALLS,
+    WORKER_TASK_TIMEOUT,
 )
 
 console = Console()
@@ -560,6 +564,68 @@ This stack prompt applies to auth tasks within a full-stack project. Write COMPL
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
+# ── Complexity router ─────────────────────────────────────────────────────────
+
+# Paid-call budget: shared across all worker threads in one project run. Reset at project
+# start (reset_paid_budget) and consumed by each non-ollama attempt (reserve_paid_call).
+_paid_calls_made = 0
+_paid_lock = threading.Lock()
+
+
+def reset_paid_budget() -> None:
+    """Reset the per-project paid (cloud) worker-call counter. Call at project start."""
+    global _paid_calls_made
+    with _paid_lock:
+        _paid_calls_made = 0
+
+
+def _reserve_paid_call() -> bool:
+    """Atomically reserve one paid worker call. Returns False if the budget is exhausted."""
+    global _paid_calls_made
+    with _paid_lock:
+        if _paid_calls_made >= MAX_PAID_WORKER_CALLS:
+            return False
+        _paid_calls_made += 1
+        return True
+
+
+def _strongest_local_rung() -> int:
+    """Index of the strongest ollama (local, free) rung in the ladder, or top if none."""
+    local = [i for i, (prov, _) in enumerate(WORKER_LADDER) if prov == "ollama"]
+    return local[-1] if local else len(WORKER_LADDER) - 1
+
+
+def route_task(task) -> int:
+    """Pick the *base* worker ladder rung (0 = weakest) from task complexity.
+
+    Base routing is always LOCAL — a task never starts on a paid cloud rung. Genuinely hard
+    tasks reach cloud only via escalation-on-retry (see routed_rung), i.e. after a local
+    attempt has actually failed verification. This keeps the system local-first by default.
+      - rung 0 (cheapest local): trivial single-file scaffold/style/data/config
+      - strongest-local rung: everything else (the normal-code workhorse)
+    """
+    if not WORKER_LADDER:
+        return 0
+    local_top = _strongest_local_rung()
+    ttype = (getattr(task, "type", "") or "").lower()
+    n_files = len(getattr(task, "files", []) or [])
+
+    if ttype in LOCAL_FIRST_TASK_TYPES and n_files <= 1:
+        return 0
+    return local_top
+
+
+def routed_rung(task) -> int:
+    """Effective ladder rung = base complexity rung + retry_count, capped at the top.
+
+    The +retry_count term is what makes retries *escalate*: each failed attempt bumps the
+    task one rung up the ladder (e.g. 14b → Sonnet) instead of re-running the same model.
+    """
+    if not WORKER_LADDER:
+        return 0
+    return min(route_task(task) + getattr(task, "retry_count", 0), len(WORKER_LADDER) - 1)
+
+
 def execute_task(
     task,
     spec: dict,
@@ -570,7 +636,9 @@ def execute_task(
     Ask the worker model to implement a task.
     Returns {"files": [...], "model_used": "<provider>/<model>"}.
 
-    Tries WORKER_PROVIDER first, then each entry in WORKER_FALLBACKS on provider failure.
+    Routing: a complexity-based ladder (WORKER_LADDER) selects a starting rung; the chain
+    runs from there up to the strongest rung, escalating one rung per retry. Falls back to
+    the legacy WORKER_PROVIDER + WORKER_FALLBACKS chain if WORKER_LADDER is unset.
     Raises ValueError immediately on bad JSON format so the scheduler can send EXECUTION_ERROR.
     """
     arch  = spec.get("architecture", {})
@@ -601,11 +669,31 @@ def execute_task(
     system_prompt = _SYSTEM_PROMPT + "\n" + _STACK_PROMPTS.get(effective_stack, _STACK_PROMPTS["vanilla"])
     user_message = _build_user_message(task, spec, dependency_files, context)
 
-    # Build attempt chain: primary first, then fallbacks
-    attempts: list[tuple[str, str]] = [(WORKER_PROVIDER, WORKER_MODEL)] + list(WORKER_FALLBACKS)
+    # Build attempt chain. With a ladder configured: start at the routed rung and walk UP to
+    # the strongest rung (escalation). If the chain is all-cloud, append the strongest LOCAL
+    # rung as a last-ditch attempt so a host without an API key (or one over its paid budget)
+    # still degrades to local output instead of failing outright.
+    if WORKER_LADDER:
+        effective = routed_rung(task)
+        attempts = list(WORKER_LADDER[effective:])
+        if not any(prov == "ollama" for prov, _ in attempts):
+            local_rungs = [r for r in WORKER_LADDER if r[0] == "ollama"]
+            if local_rungs:
+                attempts.append(local_rungs[-1])
+    else:
+        # Legacy behaviour: primary first, then fallbacks.
+        attempts = [(WORKER_PROVIDER, WORKER_MODEL)] + list(WORKER_FALLBACKS)
 
     last_err: Exception | None = None
     for provider, model in attempts:
+        # Gate paid (non-local) calls on the per-project budget. When exhausted, skip the
+        # cloud rung and fall through to the local last-ditch instead of spending more.
+        if provider != "ollama" and not _reserve_paid_call():
+            console.print(
+                f"  [yellow]Paid-call budget ({MAX_PAID_WORKER_CALLS}) exhausted — "
+                f"skipping {provider}/{model}, staying local.[/yellow]"
+            )
+            continue
         try:
             raw = _call_provider(provider, model, system_prompt, user_message)
             parsed = _parse_and_validate(raw)
@@ -641,7 +729,8 @@ def _call_provider(provider: str, model: str, system: str, user: str) -> str:
 
 
 def _call_ollama(model: str, system: str, user: str) -> str:
-    client = ollama.Client(host=OLLAMA_HOST)
+    # Bound the request so a hung local generation can't stall the pipeline indefinitely.
+    client = ollama.Client(host=OLLAMA_HOST, timeout=WORKER_TASK_TIMEOUT)
     response = client.chat(
         model=model,
         messages=[
