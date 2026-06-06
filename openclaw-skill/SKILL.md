@@ -42,19 +42,21 @@ When the user asks you to **build**, **create**, **generate**, or **make** a sof
 
 ### Build a new project
 
+**Builds run in the BACKGROUND** (10–20 min, far longer than one chat turn). Use `bot_build.bat`,
+which launches the build detached and returns in under a second — then reply immediately that the
+build started and point the user at Mission Control. Do NOT wait for it to finish.
+
 ```
-cd C:\Users\Tyler\Desktop\Jarvis-Claw && .\run.bat --yes "<user's description>"
+cd C:\Users\Tyler\Desktop\Jarvis-Claw && .\bot_build.bat "<user's description>"
 ```
 
 **Examples:**
-- `.\run.bat --yes "A snake game in the browser"`
-- `.\run.bat --yes "A task manager with React frontend and FastAPI backend"`
-- `.\run.bat --yes "A Solidity NFT contract with a minting frontend"`
-- `.\run.bat --yes "A real-time multiplayer drawing game"`
-- `.\run.bat --yes "build me a 30-second explainer about machine learning"`
-- `.\run.bat --yes "make a Tauri desktop app that shows system CPU usage"`
-- `.\run.bat --yes "create a Godot 4 platformer game"`
-- `.\run.bat --yes "build a real-time dashboard showing live WebSocket data"`
+- `.\bot_build.bat "A snake game in the browser"`
+- `.\bot_build.bat "A browser-based HTML5 Pac-Man game with touch controls"`
+- `.\bot_build.bat "A task manager with React frontend and FastAPI backend"`
+- `.\bot_build.bat "A Solidity NFT contract with a minting frontend"`
+- `.\bot_build.bat "make a Tauri desktop app that shows system CPU usage"`
+- `.\bot_build.bat "build a real-time dashboard showing live WebSocket data"`
 
 **Typical build times:**
 - Code / app / website projects: 5–15 minutes
