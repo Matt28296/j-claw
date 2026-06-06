@@ -6,6 +6,7 @@ from rich.console import Console
 
 from config import CREATIVE_DIRECTOR_MODEL, ANTHROPIC_API_KEY, CREATIVE_DIRECTOR_PROMPT_PATH
 from cache_telemetry import log_cache_usage
+from cost import record_usage
 
 console = Console()
 
@@ -35,6 +36,7 @@ class CreativeDirector:
             messages=[{"role": "user", "content": intent}],
         )
         log_cache_usage(response.usage, "creative")
+        record_usage(response.usage, CREATIVE_DIRECTOR_MODEL, "creative")
 
         text = response.content[0].text.strip()
         text = _strip_fences(text)

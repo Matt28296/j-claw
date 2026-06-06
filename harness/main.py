@@ -33,6 +33,7 @@ from verification import detect_ecosystem, run_playwright_project_check
 from e2e_generator import generate_e2e_tests, run_e2e_tests
 from creative_director import CreativeDirector
 from technical_architect import TechnicalArchitect
+from cost import reset_costs, cost_summary, format_cost_line
 
 console = Console()
 
@@ -163,6 +164,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     # Reset the per-project paid (cloud) worker-call budget for this run.
     from worker import reset_paid_budget
     reset_paid_budget()
+    reset_costs()
 
     # Mutable holder so the failure handoff below can report the phase the
     # pipeline actually crashed in (updated in-place by _run_project_inner).
@@ -412,6 +414,9 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         try_claude_stamp(handoff_path, output_dir)
         git_commit_project(output_dir, instance.spec)
         deploy_project(output_dir, instance.spec)
+        _cost = cost_summary()
+        sw.on_cost(_cost)
+        console.print(f"  [cyan]{format_cost_line()}[/cyan]")
 
         if not passed:
             sys.exit(1)

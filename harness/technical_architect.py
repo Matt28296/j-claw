@@ -12,6 +12,7 @@ from config import (
 )
 from project_memory import ProjectMemory
 from cache_telemetry import log_cache_usage
+from cost import record_usage
 
 console = Console()
 
@@ -53,6 +54,7 @@ class TechnicalArchitect:
                     messages=[{"role": "user", "content": user_message}],
                 )
                 log_cache_usage(response.usage, "architect")
+                record_usage(response.usage, TECHNICAL_ARCHITECT_MODEL, "architect")
                 text = response.content[0].text.strip()
                 text = _strip_fences(text)
                 tech_spec = json.loads(text)
