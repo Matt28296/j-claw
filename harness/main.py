@@ -17,7 +17,9 @@ from config import (
     PROJECTS_DIR, MAX_FORMAT5_DEPTH, ORCHESTRATOR_PROVIDER, ORCHESTRATOR_MODEL,
     ORCHESTRATOR_API_MODEL, TECHNICAL_ARCHITECT_ENABLED, DASHBOARD_PORT, DASHBOARD_AUTOOPEN,
     PIPELINE_MAX_RETRIES,
+    HEAL_MAX_CYCLES,
 )
+from completeness import check_completeness
 
 # Display name shown in dashboard active-agent box during orchestrator calls
 _ORCH_DISPLAY = ORCHESTRATOR_API_MODEL if ORCHESTRATOR_PROVIDER == "openrouter" else ORCHESTRATOR_MODEL
@@ -312,12 +314,17 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
                 ok = False
                 detail = next((ln for ln in log_pw.splitlines() if ln.strip()), "see log")
                 issues.append(f"Playwright project check failed: {detail[:200]}")
+        comp_ok, comp_issues = check_completeness(project_dir=output_dir, ecosystem=ecosystem)
+        sw.on_verification_result("project", "completeness", ecosystem, comp_ok, "\n".join(comp_issues))
+        if not comp_ok:
+            ok = False
+            issues.extend(f"Completeness: {i}" for i in comp_issues)
         return ok, issues
 
     if not manual:
         from heal_metrics import issue_set_similarity, classify_trend
 
-        _MAX_HEAL = 2
+        _MAX_HEAL = HEAL_MAX_CYCLES
         passed = False
         heal_cycle = 0
         prev_issues: list[str] | None = None   # issue set from the previous cycle

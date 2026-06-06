@@ -688,6 +688,34 @@ def _run_playwright_check(project_dir: Path) -> tuple[bool, str]:
             except Exception:
                 pass
 
+            # Blank-canvas probe: fail if the canvas booted but rendered nothing
+            # (a fully uniform / single-color surface). WebGL canvases that cannot
+            # expose a 2d context are skipped (inconclusive = pass). Any exception
+            # also leaves the result as False (inconclusive = pass).
+            canvas_blank = False
+            if canvas_count > 0 and canvas_dims and canvas_dims.get("w") and canvas_dims.get("h"):
+                try:
+                    _probe = page.evaluate(
+                        "() => {"
+                        "  const c = document.querySelector('canvas');"
+                        "  if (!c) return null;"
+                        "  const ctx = c.getContext('2d');"
+                        "  if (!ctx) return null;"
+                        "  let img;"
+                        "  try { img = ctx.getImageData(0, 0, c.width, c.height); } catch (e) { return null; }"
+                        "  const d = img.data; const step = Math.max(4, Math.floor(d.length / 4 / 400) * 4);"
+                        "  const colors = new Set(); let n = 0;"
+                        "  for (let i = 0; i + 3 < d.length; i += step) {"
+                        "    colors.add(d[i] + ',' + d[i+1] + ',' + d[i+2] + ',' + d[i+3]); n++;"
+                        "  }"
+                        "  return { distinct: colors.size, sampled: n };"
+                        "}"
+                    )
+                    if _probe and _probe.get("sampled", 0) >= 8 and _probe.get("distinct", 0) <= 1:
+                        canvas_blank = True
+                except Exception:
+                    canvas_blank = False
+
             # Check page title
             title = page.title()
             if not title:
@@ -707,6 +735,10 @@ def _run_playwright_check(project_dir: Path) -> tuple[bool, str]:
                 f"  [red]Playwright: canvas present but has zero render size {canvas_dims}.[/red]"
             )
             return False, f"canvas has zero render size: {canvas_dims}"
+
+        if canvas_blank:
+            console.print("  [red]Playwright: canvas rendered nothing (blank/uniform surface).[/red]")
+            return False, "canvas is blank — nothing was rendered"
 
         if warnings:
             console.print(f"  [yellow]Playwright: {len(warnings)} warning(s) (non-fatal).[/yellow]")
