@@ -100,13 +100,14 @@ def check_completeness(
     issues: list[str] = []
 
     # Build the set of files that physically exist (for asset-reference checks).
-    existing_names: set[str] = set()
+    # Stored as lowercased project-relative posix paths so the asset check is
+    # EXACT (a path mismatch like root 'AudioManager.js' vs 'js/AudioManager.js'
+    # is caught) but case-insensitive (Windows filesystems are).
     existing_rel: set[str] = set()
     if project_dir is not None and project_dir.exists():
         for p in project_dir.rglob("*"):
             if p.is_file():
-                existing_names.add(p.name)
-                existing_rel.add(p.relative_to(project_dir).as_posix())
+                existing_rel.add(p.relative_to(project_dir).as_posix().lower())
 
     for fname, content in sources.items():
         suffix = Path(fname).suffix.lower()
@@ -118,13 +119,13 @@ def check_completeness(
                 issues += _empty_functions(block, fname)
             issues += _duplicate_decls(combined, fname)
             issues += _called_but_undefined(combined, fname)
-            issues += _missing_html_assets(content, fname, existing_names, existing_rel, project_dir)
+            issues += _missing_html_assets(content, fname, existing_rel, project_dir)
         elif suffix in _JS_SUFFIXES:
             issues += _empty_sections(content, fname)
             issues += _empty_functions(content, fname)
             issues += _duplicate_decls(content, fname)
             issues += _called_but_undefined(content, fname)
-            issues += _missing_js_assets(content, fname, existing_names, existing_rel)
+            issues += _missing_js_assets(content, fname, existing_rel)
 
     # De-dupe while preserving order.
     seen: set[str] = set()
@@ -242,23 +243,40 @@ def _duplicate_decls(js: str, fname: str) -> list[str]:
     ]
 
 
+def _strip_comments_strings(js: str) -> str:
+    """Blank out comments and string/template literals so prose inside them can't
+    be mistaken for code (e.g. a JSDoc line `world X position (pixels)` must not
+    look like a call to `position(`). Best-effort, regex-based."""
+    js = re.sub(r"/\*.*?\*/", " ", js, flags=re.DOTALL)   # block comments
+    js = re.sub(r"//[^\n]*", " ", js)                       # line comments
+    js = re.sub(r"'(?:\\.|[^'\\])*'", "''", js)             # single-quoted strings
+    js = re.sub(r'"(?:\\.|[^"\\])*"', '""', js)             # double-quoted strings
+    js = re.sub(r"`(?:\\.|[^`\\])*`", "``", js)             # template literals
+    return js
+
+
 def _called_but_undefined(js: str, fname: str) -> list[str]:
-    """Conservatively flag bare camelCase calls that are never defined anywhere."""
+    """Conservatively flag bare camelCase calls that are never defined anywhere.
+
+    Comments and string literals are stripped FIRST — prose like `position (px)`
+    in a JSDoc block must never be read as a call (this exact false positive
+    permanently failed a valid Player.js task and cascade-blocked a whole build)."""
+    code = _strip_comments_strings(js)
     defined: set[str] = set()
-    for m in _FUNC_DECL_RE.finditer(js):
+    for m in _FUNC_DECL_RE.finditer(code):
         defined.add(m.group("name").lower())
     # const/let/var NAME = (... arrow or function)
-    for m in re.finditer(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=", js):
+    for m in re.finditer(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=", code):
         defined.add(m.group(1).lower())
     # object-method shorthand:  NAME(...) {   and   NAME: function
-    for m in re.finditer(r"([A-Za-z_$][\w$]*)\s*:\s*(?:function|\()", js):
+    for m in re.finditer(r"([A-Za-z_$][\w$]*)\s*:\s*(?:function|\()", code):
         defined.add(m.group(1).lower())
-    for m in re.finditer(r"([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{", js):
+    for m in re.finditer(r"([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{", code):
         defined.add(m.group(1).lower())
 
     missing: list[str] = []
     seen: set[str] = set()
-    for m in _CALL_RE.finditer(js):
+    for m in _CALL_RE.finditer(code):
         name = m.group("name")
         low = name.lower()
         if low in _CALL_ALLOWLIST or low in defined or low in seen:
@@ -284,31 +302,33 @@ def _ref_is_local(path: str) -> bool:
     return True
 
 
-def _asset_exists(path: str, existing_names: set[str], existing_rel: set[str]) -> bool:
-    norm = path.lstrip("./").split("?")[0].split("#")[0]
-    if norm in existing_rel:
-        return True
-    return Path(norm).name in existing_names
+def _asset_exists(path: str, existing_rel: set[str]) -> bool:
+    """EXACT (case-insensitive) project-relative match. No basename fallback, so a
+    reference to a file that exists only under a different directory (a 404 in the
+    browser) is correctly reported as missing."""
+    norm = path.split("?")[0].split("#")[0].lstrip("/")
+    if norm.startswith("./"):
+        norm = norm[2:]
+    return norm.lower() in existing_rel
 
 
 def _missing_html_assets(
-    html: str, fname: str, existing_names: set[str], existing_rel: set[str],
-    project_dir: Path | None,
+    html: str, fname: str, existing_rel: set[str], project_dir: Path | None,
 ) -> list[str]:
     if project_dir is None:
         return []  # can't verify existence without a project dir
     issues: list[str] = []
     for m in _HTML_REF_RE.finditer(html):
         ref = m.group("path")
-        if _ref_is_local(ref) and not _asset_exists(ref, existing_names, existing_rel):
+        if _ref_is_local(ref) and not _asset_exists(ref, existing_rel):
             issues.append(f"{fname}: references missing local file '{ref}'")
     return issues
 
 
 def _missing_js_assets(
-    js: str, fname: str, existing_names: set[str], existing_rel: set[str],
+    js: str, fname: str, existing_rel: set[str],
 ) -> list[str]:
-    if not existing_names and not existing_rel:
+    if not existing_rel:
         return []  # per-task scope without a project dir — skip
     issues: list[str] = []
     seen: set[str] = set()
@@ -317,7 +337,7 @@ def _missing_js_assets(
         if ref in seen:
             continue
         seen.add(ref)
-        if _ref_is_local(ref) and not _asset_exists(ref, existing_names, existing_rel):
+        if _ref_is_local(ref) and not _asset_exists(ref, existing_rel):
             issues.append(f"{fname}: references missing local file '{ref}'")
     return issues
 
@@ -387,5 +407,17 @@ if __name__ == "__main__":
         files={"c.js": "function eatPellet(){ activatePower(); }\n"}, ecosystem="vanilla"
     )
     assert not ok and any("activatePower" in i for i in issues), issues
+
+    # 8. Prose inside comments must NOT be read as calls — regression for the JSDoc
+    #    "world X position (pixels)" false positive that cascade-failed a real build.
+    ok, issues = check_completeness(
+        files={"e.js": (
+            "/** Initial world X position (pixels). Texture before instantiation (or blank).\n"
+            " * Time since last frame (milliseconds). */\n"
+            "function update(){ return 1; }\n"
+        )},
+        ecosystem="vanilla",
+    )
+    assert ok, f"comment prose must not be flagged as calls, got: {issues}"
 
     print("completeness self-test passed ✓")
