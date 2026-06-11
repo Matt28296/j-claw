@@ -11,12 +11,12 @@ from pathlib import Path
 import anthropic
 from rich.console import Console
 
-from config import ANTHROPIC_API_KEY, ORCHESTRATOR_MODEL
+from config import ANTHROPIC_API_KEY, ORCHESTRATOR_MODEL, HEAL_MAX_CYCLES
 from verification import SKIP_PREFIX
 import config as cfg
 
 _STATE_FILE = Path(__file__).parent.parent / "mission_control.json"
-_MAX_HEAL = 2
+_MAX_HEAL = HEAL_MAX_CYCLES
 
 console = Console()
 
@@ -350,6 +350,61 @@ def deploy_project(output_dir: Path, spec: dict) -> str | None:
     except Exception as exc:
         console.print(f"  [yellow]Deployment hook error: {exc}[/yellow]")
     return None
+
+
+def write_parent_handoff(
+    base_dir: Path,
+    intent: str,
+    results: dict[str, str],
+    final_video: Path | None = None,
+    assembly_note: str = "",
+) -> Path:
+    """Write the aggregate HANDOFF.md for a FORMAT 5 parent project.
+
+    results maps sub-project name → "passed" | "failed" | "skipped". The parent
+    verdict is PASS only when every non-skipped sub-project passed (and, for
+    film decompositions, final assembly succeeded — reflected by final_video).
+    """
+    icons = {"passed": "✓", "failed": "✗", "skipped": "⊘"}
+    all_passed = all(v != "failed" for v in results.values()) and any(
+        v == "passed" for v in results.values()
+    )
+    status_line = (
+        "✓ PASS — all sub-projects complete"
+        if all_passed
+        else "✗ ISSUES REMAIN — one or more sub-projects failed"
+    )
+
+    sub_lines = [
+        f"- {icons.get(v, '?')} `{name}` — {v}"
+        + (f" (see `{name}/HANDOFF.md`)" if v != "skipped" else "")
+        for name, v in results.items()
+    ]
+
+    assembly_lines: list[str] = []
+    if final_video is not None:
+        assembly_lines = [f"- ✓ Final film assembled: `{final_video.name}`"]
+        if assembly_note:
+            assembly_lines.append(f"  - {assembly_note}")
+    elif assembly_note:
+        assembly_lines = [f"- ⊘ {assembly_note}"]
+
+    content = f"""# HANDOFF — {intent[:120]}
+
+**Status:** {status_line}
+**Type:** FORMAT 5 decomposition ({len(results)} sub-project(s))
+
+## Sub-projects
+
+{chr(10).join(sub_lines)}
+"""
+    if assembly_lines:
+        content += f"\n## Final Assembly\n\n{chr(10).join(assembly_lines)}\n"
+
+    handoff_path = base_dir / "HANDOFF.md"
+    handoff_path.write_text(content, encoding="utf-8")
+    console.print(f"\n[bold]Parent handoff written:[/bold] [dim]{handoff_path}[/dim]")
+    return handoff_path
 
 
 # ── Shared ────────────────────────────────────────────────────────────────────

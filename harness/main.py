@@ -3,6 +3,7 @@
 from __future__ import annotations
 import sys
 import json
+import re
 import shutil
 import argparse
 import time
@@ -28,7 +29,7 @@ from state_writer import writer as sw
 from project import ProjectInstance
 from scheduler import Scheduler
 from final_review import run_final_review, parse_review_issues
-from handoff import write_handoff, try_claude_stamp, git_commit_project, deploy_project
+from handoff import write_handoff, write_parent_handoff, try_claude_stamp, git_commit_project, deploy_project
 from verification import detect_ecosystem, run_playwright_project_check
 from e2e_generator import generate_e2e_tests, run_e2e_tests
 from creative_director import CreativeDirector
@@ -87,8 +88,8 @@ def _start_dashboard() -> None:
         console.print(f"  [yellow]Dashboard failed to start: {exc}[/yellow]")
 
 
-def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = False) -> None:
-    """Add features to an already-generated project."""
+def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = False) -> bool:
+    """Add features to an already-generated project. Returns True on PASS."""
     import json as _json
     spec_path = project_dir / "spec.json"
     tasks_path = project_dir / "tasks_done.json"
@@ -129,7 +130,7 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
 
     if not dag_response.get("tasks"):
         console.print("[yellow]Orchestrator returned no new tasks.[/yellow]")
-        return
+        return False
 
     instance = ProjectInstance(project_dir)
     instance.spec = spec
@@ -163,16 +164,20 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
         stamp_issues=_handoff_has_stamp_issues(handoff_path),
         deploy_url=deploy_url,
     )
+    return passed
 
 
-def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = False, auto_accept: bool = False, wiring: dict | None = None) -> None:
-    """Run one project instance from intent to completion (recursive for FORMAT 5)."""
+def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = False, auto_accept: bool = False, wiring: dict | None = None) -> bool:
+    """Run one project instance from intent to completion (recursive for FORMAT 5).
+
+    Returns True when the build passed (review + dynamic checks, or the
+    aggregate of all sub-projects for a FORMAT 5 decomposition)."""
     if depth > MAX_FORMAT5_DEPTH:
         console.print(
             f"[bold red]FORMAT 5 recursion depth exceeded ({depth}). "
             "Stopping — manual decomposition required.[/bold red]"
         )
-        return
+        return False
 
     console.print(Panel(f"[bold cyan]{intent}[/bold cyan]", title=f"J-Claw {'Sub-project ' + str(depth) if depth else 'Project'}"))
 
@@ -191,13 +196,13 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     # pipeline actually crashed in (updated in-place by _run_project_inner).
     phase = {"current": "pipeline"}
     try:
-        _run_project_inner(intent, output_dir, depth, manual, auto_accept, wiring, phase)
+        return _run_project_inner(intent, output_dir, depth, manual, auto_accept, wiring, phase)
     except Exception as exc:
         _write_failure_handoff(output_dir, intent, phase["current"], exc)
         raise
 
 
-def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, auto_accept: bool, wiring: dict | None, phase: dict) -> None:
+def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, auto_accept: bool, wiring: dict | None, phase: dict) -> bool:
     """Inner pipeline body — separated so run_project() can catch + report failures."""
 
     _start_dashboard()
@@ -260,8 +265,8 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
     sw.on_agent_done()
 
     if spec.get("oversize"):
-        _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual)
-        return
+        return _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual,
+                                intent=intent)
 
     # Spec review loop
     while True:
@@ -278,8 +283,8 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
             "revision_feedback": feedback,
         })
         if spec.get("oversize"):
-            _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual)
-            return
+            return _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual,
+                                    intent=intent)
 
     # ── SPEC_ACCEPTED ─────────────────────────────────────────────────────────
     phase["current"] = "dag-generation"
@@ -464,25 +469,53 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         _cost = cost_summary()
         sw.on_cost(_cost)
         console.print(f"  [cyan]{format_cost_line()}[/cyan]")
-        notify_build_outcome(
-            project=instance.spec.get("goal", intent)[:120],
-            passed=passed,
-            heal_cycles=heal_cycle,
-            max_heal=_MAX_HEAL,
-            handoff_path=handoff_path,
-            cost_line=format_cost_line(),
-            stamp_issues=_handoff_has_stamp_issues(handoff_path),
-            deploy_url=deploy_url,
-        )
+        # Sub-projects (depth > 0) stay quiet — the FORMAT 5 parent sends one
+        # aggregate push instead of one per scene.
+        if depth == 0:
+            notify_build_outcome(
+                project=instance.spec.get("goal", intent)[:120],
+                passed=passed,
+                heal_cycles=heal_cycle,
+                max_heal=_MAX_HEAL,
+                handoff_path=handoff_path,
+                cost_line=format_cost_line(),
+                stamp_issues=_handoff_has_stamp_issues(handoff_path),
+                deploy_url=deploy_url,
+            )
 
-        if not passed:
-            sys.exit(1)
+        return passed
     else:
         # Manual mode: surface dynamic checks for the operator (no automated gating).
         _run_dynamic_checks()
+        return True
 
 
-def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bool = False, manual: bool = False) -> None:
+def _sub_project_stack(sp_dir: Path) -> str:
+    """Stack of a completed sub-project, read from the spec.json its run wrote."""
+    try:
+        import json as _js
+        spec = _js.loads((sp_dir / "spec.json").read_text(encoding="utf-8"))
+        return spec.get("stack", "") or spec.get("architecture", {}).get("stack", "")
+    except Exception:
+        return ""
+
+
+def _best_scene_clip(sp_dir: Path) -> Path | None:
+    """The clip to feed final assembly: prefer an edited/final clip, else the
+    largest video (the edited cut carries the audio layer)."""
+    from verification import _find_project_videos
+    videos = _find_project_videos(sp_dir, min_bytes=1024)
+    if not videos:
+        return None
+    return sorted(
+        videos,
+        key=lambda p: (not any(k in p.stem.lower() for k in ("final", "edit")),
+                       -p.stat().st_size),
+    )[0]
+
+
+def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bool = False,
+                     manual: bool = False, intent: str = "") -> bool:
     console.print(
         f"\n[bold yellow]Oversize project — decomposing into sub-projects.[/bold yellow]\n"
         f"  Reason: {response['reason']}"
@@ -491,14 +524,40 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
     sub_projects = response["sub_projects"]
     graph = {sp["name"]: set(sp.get("depends_on", [])) for sp in sub_projects}
     wiring: dict = {}  # accumulated from completed sub-projects, forwarded to dependents
+    results: dict[str, str] = {}  # name → "passed" | "failed" | "skipped"
+    film_decomposition = False
+    # Each sub-project's run_project() resets the global cost accumulator, so
+    # the aggregate cost must be summed here as each one finishes.
+    total_usd = 0.0
+    total_calls = 0
 
     for name in TopologicalSorter(graph).static_order():
         sp = next(s for s in sub_projects if s["name"] == name)
         sp_dir = base_dir / name
+
+        # Film decompositions: the parent assembles the final film itself (below),
+        # so an orchestrator-emitted assembly sub-project is skipped — isolated in
+        # its own directory it cannot reach the sibling scene clips and would fail.
+        if film_decomposition and re.search(r"assembl|full_film|final_film", name, re.IGNORECASE):
+            console.print(f"  [dim]⊘ {name} skipped — parent performs final assembly[/dim]")
+            results[name] = "skipped"
+            continue
+
         sp_dir.mkdir(parents=True, exist_ok=True)
         console.rule(f"[cyan]Sub-project: {name}[/cyan]")
-        run_project(sp["goal"], sp_dir, depth + 1, manual=manual, auto_accept=auto_accept,
-                    wiring=wiring)
+        try:
+            ok = run_project(sp["goal"], sp_dir, depth + 1, manual=manual,
+                             auto_accept=auto_accept, wiring=wiring)
+        except Exception as exc:  # noqa: BLE001 — one crashed scene must not sink the rest
+            console.print(f"  [red]Sub-project {name} crashed: {exc} — continuing with remaining sub-projects.[/red]")
+            ok = False
+        results[name] = "passed" if ok else "failed"
+        _sub_cost = cost_summary()
+        total_usd += _sub_cost.get("total_usd", 0.0)
+        total_calls += _sub_cost.get("paid_calls", 0)
+        if _sub_project_stack(sp_dir) in ("film", "video-editor"):
+            film_decomposition = True
+
         # Carry wiring.json from this sub-project forward to all later sub-projects
         wiring_path = sp_dir / "wiring.json"
         if wiring_path.exists():
@@ -508,6 +567,63 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
                 console.print(f"  [dim]Wiring from {name}: {list(wiring.keys())}[/dim]")
             except Exception:
                 pass
+
+    all_passed = all(v != "failed" for v in results.values()) and any(
+        v == "passed" for v in results.values()
+    )
+
+    # ── Film final assembly: concatenate scene clips into final.mp4 ──────────
+    final_video: Path | None = None
+    assembly_note = ""
+    if film_decomposition:
+        if all_passed:
+            clips = []
+            for name, verdict in results.items():
+                if verdict != "passed":
+                    continue
+                clip = _best_scene_clip(base_dir / name)
+                if clip is not None:
+                    clips.append(clip)
+            if clips:
+                from video_worker import assemble_film
+                from verification import _run_ffprobe_check, _run_frame_integrity_check
+                out = base_dir / "final.mp4"
+                asm_ok, asm_log = assemble_film(clips, out)
+                if asm_ok:
+                    probe_ok, probe_log = _run_ffprobe_check(out)
+                    frame_ok, frame_log = _run_frame_integrity_check(out)
+                    if probe_ok and frame_ok:
+                        final_video = out
+                        assembly_note = f"{asm_log}; {probe_log}"
+                    else:
+                        all_passed = False
+                        assembly_note = f"assembled file failed probing: {probe_log}; {frame_log}"
+                else:
+                    all_passed = False
+                    assembly_note = asm_log
+            else:
+                all_passed = False
+                assembly_note = "no scene clips found to assemble"
+        else:
+            assembly_note = "final assembly skipped — one or more scene sub-projects failed"
+    elif any(v == "skipped" for v in results.values()):
+        assembly_note = "assembly skipped — not a film decomposition"
+
+    handoff_path = write_parent_handoff(base_dir, intent or response.get("reason", ""),
+                                        results, final_video, assembly_note)
+
+    # One aggregate push for the whole decomposition (sub-projects stay quiet).
+    if depth == 0:
+        notify_build_outcome(
+            project=(intent or response.get("reason", ""))[:120],
+            passed=all_passed,
+            heal_cycles=0,
+            max_heal=HEAL_MAX_CYCLES,
+            handoff_path=handoff_path,
+            cost_line=f"est. cost ${total_usd:.2f} over {total_calls} paid call(s), all sub-projects",
+        )
+
+    return all_passed
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -536,7 +652,7 @@ def main() -> None:
             console.print(f"[red]Project directory not found: {cont_dir}[/red]")
             sys.exit(1)
         try:
-            run_continuation(intent, cont_dir, auto_accept=args.yes)
+            cont_ok = run_continuation(intent, cont_dir, auto_accept=args.yes)
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
             sys.exit(1)
@@ -544,6 +660,8 @@ def main() -> None:
             notify_crash(project=intent[:120], error=f"{type(exc).__name__}: {exc}",
                          output_dir=cont_dir)
             raise
+        if not cont_ok:
+            sys.exit(1)
         return
 
     if args.output:
@@ -556,7 +674,11 @@ def main() -> None:
 
     for attempt in range(PIPELINE_MAX_RETRIES + 1):
         try:
-            run_project(intent, output_dir, manual=args.manual, auto_accept=args.yes)
+            ok = run_project(intent, output_dir, manual=args.manual, auto_accept=args.yes)
+            if not ok:
+                # The build completed but failed review/checks — an honest
+                # verdict, not a crash. Don't retry; exit non-zero.
+                sys.exit(1)
             break  # success
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
