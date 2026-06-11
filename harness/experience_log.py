@@ -18,6 +18,7 @@ def log_outcome(
     fix_action: str,
     fix_objective: str,
     succeeded: bool,
+    stack: str = "",
 ) -> None:
     """Append one JSON line recording the outcome of an EXECUTION_ERROR fix attempt."""
     entry = {
@@ -28,6 +29,7 @@ def log_outcome(
         "fix_action": fix_action,
         "fix_objective": fix_objective[:200],
         "succeeded": succeeded,
+        "stack": stack,
     }
     try:
         with EXPERIENCE_FILE.open("a", encoding="utf-8") as fh:
@@ -108,3 +110,63 @@ def get_relevant_hints(
             break
 
     return hints
+
+
+def get_stack_lessons(stack: str, max_lessons: int = 6, min_count: int = 2) -> list[str]:
+    """Aggregate recurring failure patterns into planning-time lessons for the
+    orchestrator (INIT / SPEC_ACCEPTED payloads).
+
+    Deterministic — counts + most-recent successful exemplar per task type, no
+    LLM, no network. Entries from other stacks are excluded; legacy entries
+    without a stack field count for every stack (they predate stack tagging).
+    Patterns seen fewer than min_count times are noise and skipped. Output is
+    bounded: max_lessons lines of ~2 sentences (~500 tokens total).
+    """
+    if not EXPERIENCE_FILE.exists():
+        return []
+
+    by_type: dict[str, dict] = {}
+    try:
+        with EXPERIENCE_FILE.open("r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    entry = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+
+                entry_stack = entry.get("stack", "")
+                if entry_stack and stack and entry_stack != stack:
+                    continue
+
+                t = entry.get("task_type", "unknown")
+                rec = by_type.setdefault(t, {"failures": 0, "actions": {}, "exemplar": ""})
+                rec["failures"] += 1
+                if entry.get("succeeded"):
+                    action = entry.get("fix_action", "unknown")
+                    rec["actions"][action] = rec["actions"].get(action, 0) + 1
+                    if entry.get("fix_objective"):
+                        rec["exemplar"] = entry["fix_objective"][:160]  # most recent wins
+    except OSError:
+        return []
+
+    lessons: list[str] = []
+    for t, rec in sorted(by_type.items(), key=lambda kv: kv[1]["failures"], reverse=True):
+        if rec["failures"] < min_count:
+            continue
+        top_actions = sorted(rec["actions"].items(), key=lambda kv: kv[1], reverse=True)[:2]
+        actions = ", ".join(f"{a} x{n}" for a, n in top_actions) or "none succeeded"
+        lesson = (
+            f"'{t}' tasks needed {rec['failures']} EXECUTION_ERROR fix(es) in past builds "
+            f"(successful fix actions: {actions}). Specify these tasks completely — exact "
+            f"files, function signatures, and acceptance criteria — to avoid stub/partial output."
+        )
+        if rec["exemplar"]:
+            lesson += f' Example fix that worked: "{rec["exemplar"]}"'
+        lessons.append(lesson)
+        if len(lessons) >= max_lessons:
+            break
+
+    return lessons
