@@ -57,6 +57,22 @@ def _is_asset_task(task) -> bool:
     return bool(files) and all(Path(f).suffix.lower() in _ASSET_BINARY_EXTS for f in files)
 
 
+_VIDEO_OUTPUT_EXTS = {".mp4", ".webm", ".mov", ".avi"}
+
+
+def _is_video_task(task) -> bool:
+    """True for declared video tasks, or any task whose outputs are all video files.
+
+    The extension fallback catches orchestrator mistyping (e.g. a render task
+    labelled 'backend') — a code worker can only emit text, so a task whose
+    every output is an .mp4 must go to video_worker regardless of its type.
+    """
+    if task.type in ("video", "editing", "composition", "vfx"):
+        return True
+    files = getattr(task, "files", None) or []
+    return bool(files) and all(Path(f).suffix.lower() in _VIDEO_OUTPUT_EXTS for f in files)
+
+
 class Scheduler:
     def __init__(self, instance: ProjectInstance, orchestrator) -> None:
         self.instance = instance
@@ -163,11 +179,32 @@ class Scheduler:
             console.print(f"  [green]✓ audio done[/green]  [dim]({len(written)} file(s) written)[/dim]")
             return
 
-        # Video tasks: route to video_worker
-        if task.type in ("video", "editing", "composition", "vfx"):
-            written = generate_video(task, self.instance.spec, self.instance.output_dir)
+        # Video tasks: route to video_worker (incl. mistyped tasks whose outputs
+        # are all video files — the code worker cannot produce binary video).
+        if _is_video_task(task):
+            written, failures = generate_video(task, self.instance.spec, self.instance.output_dir)
             task.binary_outputs = {str(p.relative_to(self.instance.output_dir)): p for p in written}
+            if failures:
+                task.status = "failed"
+                task.error_log = "Video render failed:\n" + "\n".join(
+                    f"  - {rel}: {reason}" for rel, reason in failures.items()
+                )
+                sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
+                console.print(f"  [red]✗ video render failed ({len(failures)} file(s))[/red]")
+                self._handle_error(task)
+                return
             model_used = "ffmpeg" if video_can_generate() else "video-stub"
+            # Video tasks must pass their declared verification (ffprobe/
+            # frame_integrity/sync_check) like any other task — previously they
+            # were marked done without ever running it.
+            passed, log = run_verification(task, self.instance.output_dir)
+            sw.on_verification_result(task.id, task.verification, "film", passed, log)
+            if not passed:
+                task.status = "failed"
+                task.error_log = f"Verification ({task.verification}) failed:\n{log}"
+                sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
+                self._handle_error(task)
+                return
             task.status = "done"
             sw.on_task_done(task.id, model_used)
             console.print(f"  [green]✓ video done[/green]  [dim]({len(written)} file(s) written)[/dim]")

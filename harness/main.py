@@ -351,6 +351,23 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         if not comp_ok:
             ok = False
             issues.extend(f"Completeness: {i}" for i in comp_issues)
+        # Film/video-editor: the rendered video IS the deliverable. Require one
+        # to exist (rendering it on demand) even if every task was mistyped with
+        # verification "none" — otherwise a film build can go green frameless.
+        if instance.spec.get("stack", "") in ("film", "video-editor"):
+            from verification import _ensure_rendered, _run_ffprobe_check, _find_project_videos
+            rendered, render_log = _ensure_rendered(output_dir)
+            videos = _find_project_videos(output_dir, min_bytes=1024)
+            if not videos:
+                ok = False
+                sw.on_verification_result("project", "film_render", ecosystem, False, render_log)
+                issues.append(f"Film project produced no rendered video output: {render_log[:300]}")
+            else:
+                probe_ok, probe_log = _run_ffprobe_check(videos[0])
+                sw.on_verification_result("project", "film_render", ecosystem, probe_ok, probe_log)
+                if not probe_ok:
+                    ok = False
+                    issues.append(f"Rendered video failed ffprobe: {probe_log[:300]}")
         return ok, issues
 
     if not manual:
