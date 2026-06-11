@@ -5,6 +5,10 @@ harness/telegram_bot.py — Telegram bot interface for the J-Claw pipeline.
 Controls the pipeline and delivers notifications via Telegram.
 Uses python-telegram-bot >= 20.0 (async / v20 API).
 
+Builds are queued FIFO and executed strictly sequentially — one GPU, one
+worker model, one build at a time. /run and /continue both enqueue; a single
+queue-worker task drains the queue.
+
 Required env vars:
   TELEGRAM_BOT_TOKEN   — BotFather token
   TELEGRAM_CHAT_ID     — (optional) restrict to one chat ID for security
@@ -12,11 +16,13 @@ Required env vars:
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -60,14 +66,40 @@ logger = logging.getLogger(__name__)
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
+@dataclass
+class _Job:
+    """One queued pipeline invocation (/run or /continue)."""
+
+    kind: str                       # "run" | "continue"
+    spec: str                       # intent text
+    chat_id: int
+    project_dir: Path | None = None  # set for kind="continue"
+    cancelled: bool = False          # set by /cancel so the summary says so
+
+    @property
+    def label(self) -> str:
+        if self.kind == "continue":
+            return f"continue [{self.project_dir.name[:40]}]: {self.spec[:60]}"
+        return self.spec[:80]
+
+    def argv(self) -> list[str]:
+        args = [sys.executable, str(_HARNESS_DIR / "main.py"), "--yes"]
+        if self.kind == "continue":
+            args += ["--continue", str(self.project_dir)]
+        args.append(self.spec)
+        return args
+
+
 class _BotState:
-    """Mutable singleton holding the currently-running subprocess (if any)."""
+    """Mutable singleton: FIFO job queue + the currently-running subprocess."""
 
     def __init__(self) -> None:
+        self.pending: collections.deque[_Job] = collections.deque()
+        self.current: _Job | None = None
         self.proc: asyncio.subprocess.Process | None = None
-        self.spec: str = ""
         self.start_time: float = 0.0
-        self.task: asyncio.Task | None = None   # background streaming task
+        self.worker: asyncio.Task | None = None  # single queue-drainer task
+        self.new_job = asyncio.Event()
 
     @property
     def running(self) -> bool:
@@ -86,14 +118,14 @@ def _guard(update: Update) -> bool:
     return update.effective_chat is not None and update.effective_chat.id == ALLOWED_CHAT_ID
 
 
-async def _send(chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _send(bot, chat_id: int, text: str) -> None:
     """Send a message, splitting at _MAX_MSG chars if needed."""
     text = text.strip()
     if not text:
         return
     while text:
         chunk, text = text[:_MAX_MSG], text[_MAX_MSG:]
-        await context.bot.send_message(chat_id=chat_id, text=chunk)
+        await bot.send_message(chat_id=chat_id, text=chunk)
 
 
 def _escape_md(text: str) -> str:
@@ -149,6 +181,77 @@ def _recent_projects(n: int = 5) -> list[tuple[str, str]]:
     return result
 
 
+def _queue_lines() -> str:
+    """Human-readable pending-queue block ('' when empty)."""
+    if not _state.pending:
+        return ""
+    lines = [f"\nQueued ({len(_state.pending)}):"]
+    for i, job in enumerate(_state.pending, 1):
+        lines.append(f"  {i}. {job.label[:70]}")
+    return "\n".join(lines)
+
+
+# ── Queue worker ──────────────────────────────────────────────────────────────
+
+async def _enqueue(job: _Job, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Append a job and make sure the single queue-worker task is alive."""
+    _state.pending.append(job)
+    _state.new_job.set()
+    if _state.worker is None or _state.worker.done():
+        _state.worker = asyncio.create_task(
+            _queue_worker(context.bot), name="queue-worker"
+        )
+    if _state.current is None and len(_state.pending) == 1:
+        await _send(context.bot, job.chat_id, f"Starting now:\n{job.label}")
+    else:
+        ahead = len(_state.pending) - 1 + (1 if _state.current else 0)
+        await _send(
+            context.bot,
+            job.chat_id,
+            f"Queued at position {len(_state.pending)} — {ahead} job(s) ahead:\n{job.label}",
+        )
+
+
+async def _queue_worker(bot) -> None:
+    """Drain the queue strictly sequentially (single GPU → one build at a time)."""
+    while True:
+        await _state.new_job.wait()
+        _state.new_job.clear()
+        while _state.pending:
+            job = _state.pending.popleft()
+            _state.current = job
+            _state.start_time = time.time()
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *job.argv(),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    cwd=str(_HARNESS_DIR),
+                    env={**os.environ, "PYTHONUTF8": "1"},
+                )
+            except Exception as exc:
+                await _send(bot, job.chat_id, f"Failed to start pipeline: {exc}")
+                _state.current = None
+                continue
+            _state.proc = proc
+            await _send(
+                bot, job.chat_id,
+                f"Pipeline started:\n{job.label}\n\nStreaming output below...",
+            )
+            try:
+                await _stream_output(proc, job, bot)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — one bad job must not kill the worker
+                logger.error("Job stream failed: %s", exc)
+            finally:
+                _state.proc = None
+                _state.current = None
+            if _state.pending:
+                await _send(bot, job.chat_id,
+                            f"{len(_state.pending)} job(s) still queued — starting next...")
+
+
 # ── Command handlers ──────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -157,15 +260,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "J-Claw Pipeline Bot\n\n"
         "Commands:\n"
-        "  /run <spec>   — start a new pipeline run\n"
-        "  /status       — show current pipeline status\n"
-        "  /cancel       — kill the running pipeline\n"
-        "  /projects     — list 5 most recent projects\n"
-        "  /start        — show this message\n\n"
-        "Example:\n"
-        "  /run A Phaser 3 Snake game with high score tracking"
+        "  /run <spec>                — queue a new pipeline run\n"
+        "  /continue <project> <spec> — queue a feature addition to an existing project\n"
+        "  /status                    — current build + queue\n"
+        "  /cancel                    — kill the running build (queue continues)\n"
+        "  /cancel queue              — clear queued (not running) jobs\n"
+        "  /cancel all                — clear queue and kill the running build\n"
+        "  /projects                  — list 5 most recent projects\n"
+        "  /start                     — show this message\n\n"
+        "Builds run one at a time; extra requests queue FIFO.\n\n"
+        "Examples:\n"
+        "  /run A Phaser 3 Snake game with high score tracking\n"
+        "  /continue portfolio Add a dark-mode toggle"
     )
-    await _send(update.effective_chat.id, text, context)
+    await _send(context.bot, update.effective_chat.id, text)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -174,7 +282,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     chat_id = update.effective_chat.id
 
-    if _state.running:
+    if _state.current is not None:
         elapsed = int(time.time() - _state.start_time)
         mins, secs = divmod(elapsed, 60)
         mc = _read_mission_control()
@@ -182,7 +290,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         tasks = mc.get("tasks", [])
         done = sum(1 for t in tasks if t.get("status") == "done")
         total = len(tasks)
-        intent = mc.get("project", {}).get("intent", _state.spec)[:80]
+        intent = mc.get("project", {}).get("intent", _state.current.spec)[:80]
 
         text = (
             f"Pipeline RUNNING\n"
@@ -206,7 +314,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         else:
             text = f"Pipeline IDLE (state: {pipeline_state})\nNo projects found."
 
-    await _send(chat_id, text, context)
+    text += _queue_lines()
+    await _send(context.bot, chat_id, text)
 
 
 async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -215,23 +324,36 @@ async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     projects = _recent_projects(5)
     if not projects:
-        await _send(update.effective_chat.id, "No projects found.", context)
+        await _send(context.bot, update.effective_chat.id, "No projects found.")
         return
 
     lines = ["Recent projects:\n"]
     for i, (name, date) in enumerate(projects, 1):
         lines.append(f"{i}. [{date}] {name[:55]}")
-    await _send(update.effective_chat.id, "\n".join(lines), context)
+    await _send(context.bot, update.effective_chat.id, "\n".join(lines))
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _guard(update):
         return
 
+    chat_id = update.effective_chat.id
+    arg = context.args[0].lower() if context.args else ""
+
+    if arg in ("queue", "all"):
+        n = len(_state.pending)
+        _state.pending.clear()
+        await _send(context.bot, chat_id, f"Cleared {n} queued job(s).")
+        if arg == "queue":
+            return
+
     if not _state.running:
-        await _send(update.effective_chat.id, "No pipeline is currently running.", context)
+        await _send(context.bot, chat_id,
+                    "No pipeline is currently running." + _queue_lines())
         return
 
+    if _state.current is not None:
+        _state.current.cancelled = True
     try:
         _state.proc.terminate()
         await asyncio.sleep(2)
@@ -240,13 +362,8 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as exc:
         logger.warning("Error killing subprocess: %s", exc)
 
-    # Cancel the streaming background task
-    if _state.task and not _state.task.done():
-        _state.task.cancel()
-
-    _state.proc = None
-    _state.task = None
-    await _send(update.effective_chat.id, "Pipeline cancelled.", context)
+    await _send(context.bot, chat_id, "Pipeline cancelled." +
+                (" Next queued job will start." if _state.pending else ""))
 
 
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -255,61 +372,70 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     chat_id = update.effective_chat.id
 
-    if _state.running:
-        await _send(
-            chat_id,
-            "A pipeline is already running. Use /cancel to stop it first.",
-            context,
-        )
-        return
-
-    # Extract spec from command arguments
     spec = " ".join(context.args).strip() if context.args else ""
     if not spec:
         await _send(
-            chat_id,
+            context.bot, chat_id,
             "Usage: /run <spec>\nExample: /run A Phaser 3 Snake game with high score tracking",
-            context,
         )
         return
 
-    await _send(chat_id, f"Starting pipeline:\n{spec}\n\nStreaming output below...", context)
+    await _enqueue(_Job(kind="run", spec=spec, chat_id=chat_id), context)
 
-    # Launch the subprocess
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable,
-            str(_HARNESS_DIR / "main.py"),
-            "--yes",
-            spec,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=str(_HARNESS_DIR),
-        )
-    except Exception as exc:
-        await _send(chat_id, f"Failed to start pipeline: {exc}", context)
+
+async def cmd_continue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _guard(update):
         return
 
-    _state.proc = proc
-    _state.spec = spec
-    _state.start_time = time.time()
+    chat_id = update.effective_chat.id
+    if not context.args or len(context.args) < 2:
+        await _send(
+            context.bot, chat_id,
+            "Usage: /continue <project-name-fragment> <feature description>\n"
+            "Example: /continue portfolio Add a dark-mode toggle\n"
+            "Use /projects to see recent project names.",
+        )
+        return
 
-    # Launch background streaming task
-    _state.task = asyncio.create_task(
-        _stream_output(proc, spec, chat_id, context),
-        name="pipeline-stream",
+    fragment = context.args[0].lower()
+    intent = " ".join(context.args[1:]).strip()
+
+    dirs = [d for d in _PROJECTS_DIR.iterdir() if d.is_dir()] if _PROJECTS_DIR.exists() else []
+    matches = [d for d in dirs if fragment in d.name.lower()]
+
+    if not matches:
+        await _send(context.bot, chat_id,
+                    f"No project matches '{fragment}'. Use /projects to list recent ones.")
+        return
+    if len(matches) > 1:
+        names = "\n".join(f"  - {d.name[:60]}" for d in matches[:5])
+        await _send(context.bot, chat_id,
+                    f"'{fragment}' is ambiguous ({len(matches)} matches):\n{names}\n"
+                    "Use a longer fragment.")
+        return
+
+    project_dir = matches[0]
+    if not (project_dir / "spec.json").exists():
+        await _send(context.bot, chat_id,
+                    f"Project '{project_dir.name[:60]}' has no spec.json — "
+                    "it cannot be continued (was it a failed/partial build?).")
+        return
+
+    await _enqueue(
+        _Job(kind="continue", spec=intent, chat_id=chat_id, project_dir=project_dir),
+        context,
     )
 
 
 async def _stream_output(
     proc: asyncio.subprocess.Process,
-    spec: str,
-    chat_id: int,
-    context: ContextTypes.DEFAULT_TYPE,
+    job: _Job,
+    bot,
 ) -> None:
     """Read subprocess stdout and send batched updates to Telegram."""
     buffer: list[str] = []
     last_flush = time.monotonic()
+    chat_id = job.chat_id
 
     async def flush() -> None:
         nonlocal last_flush
@@ -321,7 +447,7 @@ async def _stream_output(
         text = re.sub(r"\x1b\[[0-9;]*[mGKHF]", "", text)
         text = text.strip()
         if text:
-            await _send(chat_id, text, context)
+            await _send(bot, chat_id, text)
         buffer.clear()
         last_flush = time.monotonic()
 
@@ -360,10 +486,12 @@ async def _stream_output(
         tasks = mc.get("tasks", [])
         done = sum(1 for t in tasks if t.get("status") == "done")
         total = len(tasks)
-        intent = mc.get("project", {}).get("intent", spec)[:80]
+        intent = mc.get("project", {}).get("intent", job.spec)[:80]
         output_dir = mc.get("project", {}).get("output_dir", "unknown")
 
-        if rc == 0:
+        if job.cancelled:
+            verdict = "CANCELLED"
+        elif rc == 0:
             verdict = "PASSED"
         elif rc is None:
             verdict = "CANCELLED"
@@ -379,11 +507,7 @@ async def _stream_output(
             f"Output: {output_dir}\n"
             f"Elapsed: {mins}m {secs:02d}s"
         )
-        await _send(chat_id, summary, context)
-
-        # Clear running state
-        _state.proc = None
-        _state.task = None
+        await _send(bot, chat_id, summary)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -405,6 +529,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("run", cmd_run))
+    app.add_handler(CommandHandler("continue", cmd_continue))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("projects", cmd_projects))
