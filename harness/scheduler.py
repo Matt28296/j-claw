@@ -241,6 +241,21 @@ class Scheduler:
             if patch_json:
                 _apply_memory_patch(patch_json, self.instance.output_dir, task.id)
 
+            # A task is only done when every file it DECLARED exists on disk
+            # (non-empty, except intentional dotfiles like .gitkeep). Workers
+            # reliably return plausible JSON that omits the hard file — observed
+            # live: render.sh "done" but never materialized across 3 heal cycles.
+            missing_decl = []
+            for rel in (task.files or []):
+                p = self.instance.output_dir / rel
+                if not p.exists() or (p.stat().st_size == 0 and not p.name.startswith(".")):
+                    missing_decl.append(rel)
+            if missing_decl:
+                raise ValueError(
+                    "Declared output file(s) never written: " + ", ".join(missing_decl)
+                    + " — the task must emit the COMPLETE content of every file in its files list"
+                )
+
             stub_hit = _scan_for_stubs(task.output_files)
             if stub_hit:
                 raise ValueError(f"Stub detected in output: {stub_hit}")
