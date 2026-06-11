@@ -61,15 +61,20 @@ _VIDEO_OUTPUT_EXTS = {".mp4", ".webm", ".mov", ".avi"}
 
 
 def _is_video_task(task) -> bool:
-    """True for declared video tasks, or any task whose outputs are all video files.
+    """True only when the task's declared files include an actual video output.
 
-    The extension fallback catches orchestrator mistyping (e.g. a render task
-    labelled 'backend') — a code worker can only emit text, so a task whose
-    every output is an .mp4 must go to video_worker regardless of its type.
+    Routing is by OUTPUT, not label, in both directions:
+    - a task labelled 'backend' whose every output is an .mp4 must go to
+      video_worker (a code model can only emit text);
+    - a task labelled 'video' that declares only text files (render.sh,
+      shotlist.json) is the DIRECTOR writing scripts — that's code-worker work.
+      Observed live: render.sh typed 'video' was silently skipped by
+      video_worker and marked done with nothing written.
     """
-    if task.type in ("video", "editing", "composition", "vfx"):
-        return True
     files = getattr(task, "files", None) or []
+    has_video_output = any(Path(f).suffix.lower() in _VIDEO_OUTPUT_EXTS for f in files)
+    if task.type in ("video", "editing", "composition", "vfx"):
+        return has_video_output
     return bool(files) and all(Path(f).suffix.lower() in _VIDEO_OUTPUT_EXTS for f in files)
 
 
@@ -184,6 +189,13 @@ class Scheduler:
         if _is_video_task(task):
             written, failures = generate_video(task, self.instance.spec, self.instance.output_dir)
             task.binary_outputs = {str(p.relative_to(self.instance.output_dir)): p for p in written}
+            # Same declared-files guarantee as the code-worker path: a video
+            # task mixing text outputs (render.sh) with its video output cannot
+            # have the text half silently skipped.
+            for rel in (getattr(task, "files", None) or []):
+                if rel not in failures and not (self.instance.output_dir / rel).exists():
+                    failures[rel] = ("declared file was never produced — video_worker has no "
+                                     "content for it; declare script files in a code task instead")
             if failures:
                 task.status = "failed"
                 task.error_log = "Video render failed:\n" + "\n".join(
