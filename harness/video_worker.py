@@ -26,7 +26,7 @@ def can_generate() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-def generate_video(task, spec: dict, output_dir: Path) -> list[Path]:
+def generate_video(task, spec: dict, output_dir: Path) -> tuple[list[Path], dict[str, str]]:
     """Render the video outputs declared in task.files.
 
     For each declared video file we look for an ffmpeg command to drive the
@@ -36,14 +36,21 @@ def generate_video(task, spec: dict, output_dir: Path) -> list[Path]:
       2. Any ffmpeg edit-script / shot-list / manifest already on disk in
          output_dir (written by an upstream "film"/"video-editor" director
          task — see _STACK_PROMPTS in worker.py).
-    When no command is found, or ffmpeg is unavailable, a graceful placeholder
-    is written so downstream tasks and verification still have a real file.
+
+    Returns (written, failures). For film/video-editor stacks a video that
+    cannot actually be rendered is a FAILURE (rel_path → reason) — the video
+    IS the deliverable, and a silent placeholder would pass ffprobe and report
+    a hollow green build. For other stacks (e.g. a game wanting a cutscene
+    file) a graceful placeholder is still written so downstream tasks and
+    verification have a real file.
 
     Mirrors music_worker/audio_worker by iterating task.files (NOT
     task.output_files, which is never populated for video tasks routed
     straight to this worker by the scheduler).
     """
     written: list[Path] = []
+    failures: dict[str, str] = {}
+    video_is_deliverable = spec.get("stack", "") in ("film", "video-editor")
 
     # Inline content the worker may have attached (keyed by relative path).
     inline = getattr(task, "output_files", {}) or {}
@@ -74,7 +81,15 @@ def generate_video(task, spec: dict, output_dir: Path) -> list[Path]:
         cmd_line = _find_ffmpeg_command(inline.get(rel_path), disk_scripts)
 
         success = False
-        if cmd_line and can_generate():
+        reason = ""
+        if not can_generate():
+            reason = "ffmpeg is not installed"
+        elif not cmd_line:
+            reason = (
+                "no executable 'ffmpeg …' line found in task output or any edit "
+                "script on disk — the director task must emit one (e.g. in render.sh)"
+            )
+        else:
             # Replace the last token (output path) with the real destination.
             try:
                 parts = shlex.split(cmd_line)
@@ -93,19 +108,71 @@ def generate_video(task, spec: dict, output_dir: Path) -> list[Path]:
                     if result.returncode == 0:
                         success = True
                     else:
-                        console.print(
-                            f"  [yellow]ffmpeg exited {result.returncode} for {rel_path}; "
-                            f"writing placeholder[/yellow]"
+                        reason = (
+                            f"ffmpeg exited {result.returncode}: "
+                            f"{(result.stderr or '').strip()[-500:] or 'no stderr'}"
                         )
                 except Exception as exc:  # noqa: BLE001
-                    console.print(f"  [yellow]ffmpeg error ({exc}); writing placeholder[/yellow]")
+                    reason = f"ffmpeg error: {exc}"
 
-        if not success:
+        if success:
+            written.append(out)
+        elif video_is_deliverable:
+            # Film/video-editor: never fake the deliverable — fail the task so the
+            # EXECUTION_ERROR refinement loop gets a precise, actionable signal.
+            console.print(f"  [red]video: render failed for {rel_path} — {reason[:200]}[/red]")
+            failures[rel_path] = reason
+        else:
+            console.print(f"  [yellow]video: {reason[:120]}; writing placeholder[/yellow]")
             _write_placeholder(out)
+            written.append(out)
 
-        written.append(out)
+    return written, failures
 
-    return written
+
+def assemble_film(scene_clips: list[Path], output_path: Path) -> tuple[bool, str]:
+    """Concatenate scene clips (topological order) into one film.
+
+    Tries the concat demuxer with stream copy first (fast, lossless); if the
+    scenes' codec parameters don't match, falls back to a re-encode. Scenes
+    from one pipeline run share the architect's resolution/codec settings, so
+    the copy path is the common case.
+    """
+    if not scene_clips:
+        return False, "assemble_film: no scene clips to assemble"
+    if not can_generate():
+        return False, "assemble_film: ffmpeg is not installed"
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    list_file = output_path.parent / (output_path.stem + ".concat.txt")
+    list_file.write_text(
+        "\n".join(f"file '{p.resolve().as_posix()}'" for p in scene_clips),
+        encoding="utf-8",
+    )
+    base = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file)]
+    attempts = [
+        (base + ["-c", "copy", str(output_path)], "stream copy"),
+        (base + ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                 "-movflags", "+faststart", str(output_path)], "re-encode"),
+    ]
+    try:
+        last_err = ""
+        for cmd, label in attempts:
+            console.print(f"  [dim]video: assembling {len(scene_clips)} scene(s) ({label}) → {output_path.name}[/dim]")
+            try:
+                result = subprocess.run(cmd, timeout=600, capture_output=True, text=True)
+            except Exception as exc:  # noqa: BLE001
+                last_err = str(exc)
+                continue
+            if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 1024:
+                return True, f"assembled {len(scene_clips)} clip(s) via concat ({label})"
+            last_err = (result.stderr or "").strip()[-500:] or f"exit {result.returncode}"
+        return False, f"assemble_film failed: {last_err}"
+    finally:
+        try:
+            list_file.unlink()
+        except OSError:
+            pass
 
 
 def _collect_disk_scripts(output_dir: Path) -> list[str]:

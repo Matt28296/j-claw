@@ -197,23 +197,8 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
             return _run_playwright_check(project_dir)
         return _run_manual(task)
 
-    if method == "ffprobe":
-        video_files = list(project_dir.glob("*.mp4")) + list(project_dir.glob("*.webm"))
-        if not video_files:
-            return True, "auto-passed: no video files"
-        return _run_ffprobe_check(video_files[0])
-
-    if method == "frame_integrity":
-        video_files = list(project_dir.glob("*.mp4")) + list(project_dir.glob("*.webm"))
-        if not video_files:
-            return True, "auto-passed: no video files"
-        return _run_frame_integrity_check(video_files[0])
-
-    if method == "sync_check":
-        video_files = list(project_dir.glob("*.mp4")) + list(project_dir.glob("*.webm"))
-        if not video_files:
-            return True, "auto-passed: no video files"
-        return _run_sync_check(video_files[0])
+    if method in ("ffprobe", "frame_integrity", "sync_check"):
+        return _run_video_evidence_check(method, task, project_dir)
 
     if method == "security":
         return _run_security_check(project_dir)
@@ -788,6 +773,178 @@ def _run_html_auto(project_dir: Path) -> tuple[bool, str]:
         log += f"\nwarnings: {warn_str}"
     console.print("  [green]HTML structure check passed (headless).[/green]")
     return True, log
+
+
+_VIDEO_EVIDENCE_EXTS = (".mp4", ".webm", ".mov")
+_VIDEO_SEARCH_EXCLUDE = {"node_modules", ".git", "dist", ".venv", "__pycache__"}
+# A real render is never this small — the legacy stub is ~40 bytes.
+_MIN_REAL_VIDEO_BYTES = 1024
+
+# Failed render attempts, keyed by (project_dir, source-files signature).
+# When the heal loop rewrites the render sources the signature changes and the
+# render is retried; identical sources fail fast instead of re-running a
+# multi-minute render once per check method.
+_RENDER_FAILED: dict[tuple[str, tuple], str] = {}
+
+
+def _find_project_videos(project_dir: Path, task=None, min_bytes: int = 0) -> list[Path]:
+    """Videos a check should probe: the task's declared video files when they
+    exist, else any video anywhere in the project tree (build dirs excluded)."""
+    declared = []
+    for rel in (getattr(task, "files", None) or []):
+        if Path(rel).suffix.lower() in _VIDEO_EVIDENCE_EXTS:
+            p = project_dir / rel
+            if p.exists() and p.stat().st_size >= min_bytes:
+                declared.append(p)
+    if declared:
+        return declared
+    found = [
+        p for p in project_dir.rglob("*")
+        if p.suffix.lower() in _VIDEO_EVIDENCE_EXTS and p.is_file()
+        and p.stat().st_size >= min_bytes
+        and not (_VIDEO_SEARCH_EXCLUDE & set(p.relative_to(project_dir).parts[:-1]))
+    ]
+    return sorted(found)
+
+
+def _render_source_signature(project_dir: Path) -> tuple:
+    """Fingerprint of everything that could drive a render — root-level scripts.
+    Changes whenever the heal loop rewrites them."""
+    sig = []
+    for p in sorted(project_dir.glob("*.py")) + sorted(project_dir.glob("*.sh")):
+        try:
+            st = p.stat()
+            sig.append((p.name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            continue
+    return tuple(sig)
+
+
+def _ensure_rendered(project_dir: Path) -> tuple[bool, str]:
+    """Execute the project's render pipeline so video evidence exists.
+
+    Film projects generate code that PRODUCES the video — an 'ffmpeg …' line in
+    an edit script, or a Python entry script — but nothing else in the pipeline
+    executes it. Running the render is part of gathering the evidence the
+    ffprobe-family checks need; without it a film build can complete without a
+    single frame ever being rendered.
+    """
+    if _find_project_videos(project_dir, min_bytes=_MIN_REAL_VIDEO_BYTES):
+        return True, "video already present"
+
+    key = (str(project_dir), _render_source_signature(project_dir))
+    if key in _RENDER_FAILED:
+        return False, f"render already attempted with these sources: {_RENDER_FAILED[key]}"
+
+    logs: list[str] = []
+
+    # 1. Shell path: any 'ffmpeg …' line in an edit script on disk.
+    from video_worker import _collect_disk_scripts, can_generate as _ffmpeg_available
+    if _ffmpeg_available():
+        ffmpeg_lines = [
+            line.strip()
+            for content in _collect_disk_scripts(project_dir)
+            for line in content.splitlines()
+            if line.strip().startswith("ffmpeg ")
+        ]
+        for cmd_line in ffmpeg_lines[:10]:
+            import shlex as _shlex
+            try:
+                parts = _shlex.split(cmd_line)
+            except ValueError:
+                parts = cmd_line.split()
+            console.print(f"  [dim]render: {cmd_line[:100]}[/dim]")
+            try:
+                result = subprocess.run(parts, cwd=project_dir, capture_output=True,
+                                        text=True, timeout=600)
+                if result.returncode != 0:
+                    logs.append(f"ffmpeg exited {result.returncode}: {(result.stderr or '')[-300:]}")
+            except Exception as exc:  # noqa: BLE001
+                logs.append(f"ffmpeg error: {exc}")
+        if ffmpeg_lines and _find_project_videos(project_dir, min_bytes=_MIN_REAL_VIDEO_BYTES):
+            return True, f"rendered via {len(ffmpeg_lines)} ffmpeg edit-script line(s)"
+
+    # 2. Python path: run the project's render entry script.
+    entry = _find_render_entry(project_dir)
+    if entry is None:
+        msg = "no render entry found (no ffmpeg edit script, no render*.py / generate_*.py / build_film.py / main.py)"
+        _RENDER_FAILED[key] = msg
+        return False, "; ".join(logs + [msg])
+
+    req = project_dir / "requirements.txt"
+    if req.exists():
+        console.print("  [dim]render: pip install -r requirements.txt[/dim]")
+        ok, pip_log = _run_cmd(["pip", "install", "-r", "requirements.txt"], project_dir, _TIMEOUT_BUILD)
+        if not ok:
+            msg = f"pip install failed before render:\n{pip_log[-500:]}"
+            _RENDER_FAILED[key] = msg[:300]
+            return False, msg
+
+    console.print(f"  [dim]render: python {entry.name}[/dim]")
+    try:
+        result = subprocess.run([sys.executable, entry.name], cwd=project_dir,
+                                capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        msg = f"render script {entry.name} timed out after 600s"
+        _RENDER_FAILED[key] = msg
+        return False, msg
+    if result.returncode != 0:
+        msg = (f"render script {entry.name} exited {result.returncode}:\n"
+               f"{(result.stderr or result.stdout or '')[-800:]}")
+        _RENDER_FAILED[key] = msg[:300]
+        return False, msg
+
+    if _find_project_videos(project_dir, min_bytes=_MIN_REAL_VIDEO_BYTES):
+        return True, f"rendered via {entry.name}"
+    msg = f"render script {entry.name} exited 0 but produced no video file"
+    _RENDER_FAILED[key] = msg
+    return False, msg
+
+
+def _find_render_entry(project_dir: Path) -> Path | None:
+    """Locate the Python render entry script: spec.json 'entry_point' first
+    (the orchestrator is prompted to declare it), then conventional names."""
+    spec_path = project_dir / "spec.json"
+    if spec_path.exists():
+        try:
+            import json as _json
+            entry = _json.loads(spec_path.read_text(encoding="utf-8")).get("entry_point")
+            if entry and (project_dir / entry).exists() and entry.endswith(".py"):
+                return project_dir / entry
+        except Exception:  # noqa: BLE001
+            pass
+    for pattern in ("render*.py", "generate_*.py", "build_film.py", "main.py"):
+        matches = sorted(project_dir.glob(pattern))
+        if matches:
+            return matches[0]
+    return None
+
+
+def _run_video_evidence_check(method: str, task, project_dir: Path) -> tuple[bool, str]:
+    """Honest ffprobe/frame_integrity/sync_check: a missing video is a FAIL,
+    not an auto-pass — rendering it (via _ensure_rendered) is part of the check.
+    Only tool-unavailability (ffmpeg/ffprobe missing) remains a SKIP, inside
+    the individual probe helpers."""
+    real = _find_project_videos(project_dir, task, min_bytes=_MIN_REAL_VIDEO_BYTES)
+    if not real:
+        rendered, render_log = _ensure_rendered(project_dir)
+        real = _find_project_videos(project_dir, task, min_bytes=_MIN_REAL_VIDEO_BYTES)
+        if not real:
+            # Probe a stub if that's all there is — it fails ffprobe with a
+            # precise message; otherwise report the render failure itself.
+            stubs = _find_project_videos(project_dir, task)
+            if not stubs:
+                return False, (
+                    f"{method}: no video file exists — render produced no output "
+                    f"({render_log[:800]})"
+                )
+            real = stubs
+    target = real[0]
+    if method == "ffprobe":
+        return _run_ffprobe_check(target)
+    if method == "frame_integrity":
+        return _run_frame_integrity_check(target)
+    return _run_sync_check(target)
 
 
 def _run_ffprobe_check(video_path: Path) -> tuple[bool, str]:

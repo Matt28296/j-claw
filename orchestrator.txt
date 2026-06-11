@@ -773,6 +773,15 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
      `verification: "frame_integrity"`.
    - Worker tooling: ffmpeg (CLI), Stable Diffusion WebUI (local REST), Coqui TTS (local REST).
      All tools must be assumed available; no npm or pip install tasks for these tools.
+   - **Task typing is load-bearing.** Any task whose output is a video file (`.mp4`, `.webm`,
+     `.mov`) MUST be `type: "video"` or `type: "editing"` — NEVER `backend`/`frontend`. The
+     harness routes video types to its ffmpeg worker; a mistyped render task goes to a code
+     model that can only write text and the video is never produced.
+   - If a scene is rendered by Python code instead of a direct ffmpeg edit script, the
+     FORMAT 1 spec MUST include a top-level `"entry_point": "<script>.py"` naming the script
+     that produces the video when executed, and the entry script PLUS every local module it
+     imports must each appear in some task's `files` list — an import with no task writing
+     that file guarantees a ModuleNotFoundError at render time.
 
 ---
 

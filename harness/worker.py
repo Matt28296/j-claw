@@ -438,6 +438,10 @@ that the harness feeds to ffmpeg to render the final film. Write every file comp
   director's intent so the render is reviewable and reproducible.
 - README.md: explain how to render locally (bash render.sh) and that the harness runs the
   ffmpeg line automatically; note that ffmpeg must be installed.
+- If (and only if) the task explicitly requires a Python render pipeline instead of a
+  render.sh, name the entry script render.py and write EVERY local module it imports,
+  completely, in the same task — the harness executes `python render.py` and a missing
+  module is an immediate ModuleNotFoundError failure.
 - NEVER emit placeholder ffmpeg flags, NEVER leave the output path unresolved, and NEVER
   produce an index.html — this is a film, not a web page.
 """,

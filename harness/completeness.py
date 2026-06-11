@@ -16,7 +16,9 @@ not understand return a clean pass.
 """
 from __future__ import annotations
 
+import ast
 import re
+import sys
 from pathlib import Path
 
 # Ecosystems whose primary output is plain HTML+JS that these checks understand.
@@ -90,14 +92,22 @@ def check_completeness(
     output) or a project directory (whole-project). Only HTML/JS for web/game
     ecosystems is analysed; everything else passes clean.
     """
+    # Python entry-script import resolution runs for EVERY ecosystem with a
+    # project dir (film/python projects detect as non-web) — it caught nothing
+    # in the film_validation_v1 build where 19 tasks were "done" but the entry
+    # script's imports (video_generator, audio_generator) were never written.
+    py_issues: list[str] = []
+    if project_dir is not None:
+        py_issues = _missing_python_imports(project_dir)
+
     if ecosystem is not None and ecosystem not in _WEB_ECOSYSTEMS:
-        return True, []
+        return (not py_issues), py_issues
 
     sources = _collect_sources(files, project_dir)
     if not sources:
-        return True, []
+        return (not py_issues), py_issues
 
-    issues: list[str] = []
+    issues: list[str] = list(py_issues)
 
     # Build the set of files that physically exist (for asset-reference checks).
     # Stored as lowercased project-relative posix paths so the asset check is
@@ -342,6 +352,82 @@ def _missing_js_assets(
     return issues
 
 
+# PyPI distribution name → import name(s) where they differ. Only common ones —
+# unknown packages are skipped via importlib resolution (false-negative bias).
+_PYPI_IMPORT_ALIASES = {
+    "pillow": {"pil"},
+    "opencv-python": {"cv2"},
+    "pyyaml": {"yaml"},
+    "beautifulsoup4": {"bs4"},
+    "scikit-image": {"skimage"},
+    "ffmpeg-python": {"ffmpeg"},
+    "python-dotenv": {"dotenv"},
+}
+
+
+def _missing_python_imports(project_dir: Path) -> list[str]:
+    """Flag root-level Python scripts whose imports resolve to nothing: not a
+    local file, not stdlib, not in requirements.txt, not installed.
+
+    This is the static signal for the worker's signature failure on film
+    stacks — an entry script importing modules (video_generator, …) that no
+    task ever wrote, discovered only at run time as ModuleNotFoundError.
+    False-negative bias: anything resolvable by ANY of the sources passes.
+    """
+    py_files = sorted(p for p in project_dir.glob("*.py") if p.is_file())
+    if not py_files:
+        return []
+
+    allowed: set[str] = set()
+    req_file = project_dir / "requirements.txt"
+    if req_file.exists():
+        for line in req_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            name = re.split(r"[<>=!~\[;#\s]", line.strip(), maxsplit=1)[0].lower()
+            if name:
+                allowed.add(name.replace("-", "_"))
+                allowed |= _PYPI_IMPORT_ALIASES.get(name.replace("_", "-"), set())
+
+    local_modules = {p.stem.lower() for p in py_files}
+    for d in project_dir.iterdir():
+        if d.is_dir():
+            local_modules.add(d.name.lower())
+
+    issues: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for p in py_files:
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            continue  # syntax errors surface through execution/verification
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                top_names = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                top_names = [node.module.split(".")[0]]
+            else:
+                continue
+            for name in top_names:
+                low = name.lower()
+                if (
+                    low in local_modules
+                    or name in sys.stdlib_module_names
+                    or low.replace("-", "_") in allowed
+                    or (p.name, name) in seen
+                ):
+                    continue
+                try:
+                    import importlib.util
+                    if importlib.util.find_spec(name) is not None:
+                        continue  # installed in the build environment
+                except Exception:
+                    continue  # unresolvable lookup — don't risk a false positive
+                seen.add((p.name, name))
+                issues.append(
+                    f"{p.name} imports '{name}' but {name}.py does not exist in the project"
+                )
+    return issues
+
+
 # ── self-test ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -419,5 +505,33 @@ if __name__ == "__main__":
         ecosystem="vanilla",
     )
     assert ok, f"comment prose must not be flagged as calls, got: {issues}"
+
+    # 9. Python entry script importing a never-written local module → FAIL;
+    #    resolvable local/stdlib/requirements imports → PASS. (The exact
+    #    film_validation_v1 failure: 19 tasks "done", video_generator.py absent.)
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        (proj / "requirements.txt").write_text("numpy\nPillow>=10\n", encoding="utf-8")
+        (proj / "color_utils.py").write_text("PALETTE = {}\n", encoding="utf-8")
+        (proj / "generate_scene.py").write_text(
+            "import json\nimport numpy\nfrom PIL import Image\n"
+            "import color_utils\nfrom video_generator import encode_scene\n"
+            "import audio_generator\n",
+            encoding="utf-8",
+        )
+        ok, issues = check_completeness(project_dir=proj, ecosystem="python")
+        assert not ok, "missing local imports should fail"
+        assert any("video_generator" in i for i in issues), issues
+        assert any("audio_generator" in i for i in issues), issues
+        assert not any("numpy" in i or "PIL" in i or "json" in i or "color_utils" in i
+                       for i in issues), f"resolvable imports must not be flagged: {issues}"
+
+        # Heal writes the missing modules → the same project now passes.
+        (proj / "video_generator.py").write_text("def encode_scene():\n    pass\n", encoding="utf-8")
+        (proj / "audio_generator.py").write_text("x = 1\n", encoding="utf-8")
+        ok, issues = check_completeness(project_dir=proj, ecosystem="python")
+        assert ok, f"resolved project should pass, got: {issues}"
 
     print("completeness self-test passed ✓")
