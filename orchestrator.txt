@@ -780,10 +780,14 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
      emitted anyway the harness skips it.
    - Worker tooling: ffmpeg (CLI), Stable Diffusion WebUI (local REST), Coqui TTS (local REST).
      All tools must be assumed available; no npm or pip install tasks for these tools.
-   - **Task typing is load-bearing.** Any task whose output is a video file (`.mp4`, `.webm`,
-     `.mov`) MUST be `type: "video"` or `type: "editing"` — NEVER `backend`/`frontend`. The
-     harness routes video types to its ffmpeg worker; a mistyped render task goes to a code
-     model that can only write text and the video is never produced.
+   - **Task typing is load-bearing.** Any task whose `files` include a video file (`.mp4`,
+     `.webm`, `.mov`) MUST be `type: "video"` or `type: "editing"` — NEVER `backend`/
+     `frontend`. The harness routes video types to its ffmpeg worker; a mistyped render
+     task goes to a code model that can only write text and the video is never produced.
+     The INVERSE also holds: the task that WRITES the render/edit script or manifest
+     (`render.sh`, `shotlist.json` — text files) must be a code task (`type: "devops"`),
+     because the ffmpeg worker renders, it does not author scripts. A `type: "video"`
+     task whose `files` list contains only text files produces nothing.
    - If a scene is rendered by Python code instead of a direct ffmpeg edit script, the
      FORMAT 1 spec MUST include a top-level `"entry_point": "<script>.py"` naming the script
      that produces the video when executed, and the entry script PLUS every local module it
