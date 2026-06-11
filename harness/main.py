@@ -35,6 +35,7 @@ from creative_director import CreativeDirector
 from technical_architect import TechnicalArchitect
 from cost import reset_costs, cost_summary, format_cost_line
 from notify import notify_build_outcome, notify_crash
+from experience_log import get_stack_lessons
 
 console = Console()
 
@@ -246,6 +247,11 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         "user_intent": intent,
         "creative_brief": creative_brief,
     }
+    # Cross-project learning: recurring failure patterns from past builds on
+    # this stack, so the orchestrator designs tasks that avoid them up front.
+    _lessons = get_stack_lessons((tech_spec or {}).get("confirmed_stack", ""))
+    if _lessons:
+        init_payload["past_failure_lessons"] = _lessons
     if tech_spec:
         init_payload["tech_spec"] = tech_spec
     if wiring:
@@ -282,7 +288,11 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
     (output_dir / "spec.json").write_text(_json.dumps(spec, indent=2), encoding="utf-8")
     console.print("\n[bold]Generating task DAG…[/bold]")
     sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "SPEC_ACCEPTED")
-    dag_response = orch.call({"system_state": "SPEC_ACCEPTED", "accepted_spec": spec})
+    _dag_payload: dict = {"system_state": "SPEC_ACCEPTED", "accepted_spec": spec}
+    _lessons = get_stack_lessons(spec.get("stack", "") or (tech_spec or {}).get("confirmed_stack", ""))
+    if _lessons:
+        _dag_payload["past_failure_lessons"] = _lessons
+    dag_response = orch.call(_dag_payload)
     sw.on_agent_done()
 
     if dag_response.get("oversize"):

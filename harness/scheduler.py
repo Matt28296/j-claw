@@ -233,7 +233,8 @@ class Scheduler:
             console.print(f"  [red]✗ error: {exc}[/red]")
             sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
             if task.retry_count >= MAX_RETRIES_PER_TASK:
-                log_outcome(task.id, task.type, str(exc)[:200], "none", "", succeeded=False)
+                log_outcome(task.id, task.type, str(exc)[:200], "none", "", succeeded=False,
+                            stack=self.instance.spec.get("stack", ""))
             self._handle_error(task)
 
     # ── error handling ────────────────────────────────────────────────────────
@@ -296,6 +297,7 @@ class Scheduler:
             refinement["action"],
             refinement["updated_tasks"][0]["objective"] if refinement.get("updated_tasks") else "",
             succeeded=True,
+            stack=self.instance.spec.get("stack", ""),
         )
 
     # ── project review ────────────────────────────────────────────────────────
