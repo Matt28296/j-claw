@@ -768,9 +768,10 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
        clip using ffmpeg. Use `verification: "ffprobe"`.
      - At least one `type: "editing"` task — cut, trim, and layer audio onto the video clip
        using ffmpeg. Use `verification: "sync_check"`.
-   - Add a final `assembly` sub-project (depends on all scene sub-projects) that concatenates
-     scene clips into the full film via ffmpeg and runs a `type: "composition"` task with
-     `verification: "frame_integrity"`.
+   - Do NOT add an assembly sub-project. The harness itself concatenates the scene clips
+     into `final.mp4` (and frame-checks it) after all scene sub-projects pass — a sub-project
+     cannot reach its siblings' clips, so an assembly sub-project always fails. If one is
+     emitted anyway the harness skips it.
    - Worker tooling: ffmpeg (CLI), Stable Diffusion WebUI (local REST), Coqui TTS (local REST).
      All tools must be assumed available; no npm or pip install tasks for these tools.
    - **Task typing is load-bearing.** Any task whose output is a video file (`.mp4`, `.webm`,
