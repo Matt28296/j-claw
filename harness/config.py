@@ -106,5 +106,6 @@ IPFS_AUTO_PIN: bool = os.getenv("IPFS_AUTO_PIN", "false").lower() == "true"
 
 # Pipeline resilience
 PIPELINE_MAX_RETRIES: int = int(os.getenv("PIPELINE_MAX_RETRIES", "2"))
+HEAL_MAX_CYCLES: int = int(os.getenv("HEAL_MAX_CYCLES", "3"))
 ORCHESTRATOR_TIMEOUT: int = int(os.getenv("ORCHESTRATOR_TIMEOUT", "300"))   # seconds per API call
 WORKER_TASK_TIMEOUT: int = int(os.getenv("WORKER_TASK_TIMEOUT", "600"))     # seconds per task batch

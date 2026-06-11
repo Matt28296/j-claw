@@ -170,6 +170,10 @@ class StateWriter:
                        summary[:120], status=result)
         self._write()
 
+    def on_cost(self, summary: dict) -> None:
+        self._state["cost"] = summary
+        self._write()
+
     # ── Internals ─────────────────────────────────────────────────────────────
 
     def _update_task(self, task_id: str, **kwargs) -> None:

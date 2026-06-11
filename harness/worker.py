@@ -810,6 +810,7 @@ def _call_anthropic(model: str, system: str, user: str) -> str:
         raise RuntimeError("ANTHROPIC_API_KEY not set — cannot use anthropic worker provider")
     import anthropic
     from cache_telemetry import log_cache_usage
+    from cost import record_usage
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     response = client.messages.create(
         model=model,
@@ -818,6 +819,7 @@ def _call_anthropic(model: str, system: str, user: str) -> str:
         messages=[{"role": "user", "content": user}],
     )
     log_cache_usage(response.usage, "worker-esc")
+    record_usage(response.usage, model, "worker-esc")
     return response.content[0].text.strip()
 
 

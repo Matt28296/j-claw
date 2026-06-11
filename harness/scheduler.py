@@ -9,6 +9,7 @@ from experience_log import log_outcome, get_relevant_hints
 from project import ProjectInstance, Task
 from worker import execute_task, routed_rung
 from verification import run_verification, detect_ecosystem
+from completeness import check_completeness
 from validator import validate_dag, OrchestratorOutputError
 from state_writer import writer as sw
 from asset_worker import generate_assets, can_generate
@@ -209,6 +210,11 @@ class Scheduler:
 
             ecosystem = detect_ecosystem(self.instance.output_dir)
             passed, log = run_verification(task, self.instance.output_dir)
+            comp_ok, comp_issues = check_completeness(files=task.output_files, ecosystem=ecosystem)
+            if not comp_ok:
+                passed = False
+                _comp = "\n".join(f"  - {i}" for i in comp_issues)
+                log = (log + "\n" if log else "") + "Completeness gate failed:\n" + _comp
             sw.on_verification_result(task.id, task.verification, ecosystem, passed, log)
             if passed:
                 model_used = result.get("model_used", WORKER_MODEL)
