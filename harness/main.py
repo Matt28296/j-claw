@@ -34,6 +34,7 @@ from e2e_generator import generate_e2e_tests, run_e2e_tests
 from creative_director import CreativeDirector
 from technical_architect import TechnicalArchitect
 from cost import reset_costs, cost_summary, format_cost_line
+from notify import notify_build_outcome, notify_crash
 
 console = Console()
 
@@ -55,6 +56,15 @@ def _write_failure_handoff(output_dir: Path, intent: str, phase: str, exc: Excep
         console.print(f"  [yellow]Failure report written to: {output_dir / 'HANDOFF.md'}[/yellow]")
     except Exception:
         pass
+
+
+def _handoff_has_stamp_issues(handoff_path: Path) -> bool:
+    """True when the independent OpenClaw stamp appended an ISSUES FOUND verdict —
+    a PASS build can still carry caveats the heal loop never resolved."""
+    try:
+        return "OPENCLAW: ISSUES FOUND" in handoff_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
 
 
 def _start_dashboard() -> None:
@@ -141,7 +151,17 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
     handoff_path = write_handoff(project_dir, spec, passed, heal_cycle)
     try_claude_stamp(handoff_path, project_dir)
     git_commit_project(project_dir, {"goal": f"continuation: {new_intent}"})
-    deploy_project(project_dir, spec)
+    deploy_url = deploy_project(project_dir, spec)
+    notify_build_outcome(
+        project=f"continuation: {new_intent}"[:120],
+        passed=passed,
+        heal_cycles=heal_cycle,
+        max_heal=HEAL_MAX_CYCLES,
+        handoff_path=handoff_path,
+        cost_line=format_cost_line(),
+        stamp_issues=_handoff_has_stamp_issues(handoff_path),
+        deploy_url=deploy_url,
+    )
 
 
 def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = False, auto_accept: bool = False, wiring: dict | None = None) -> None:
@@ -413,10 +433,20 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         handoff_path = write_handoff(output_dir, instance.spec, passed, heal_cycle)
         try_claude_stamp(handoff_path, output_dir)
         git_commit_project(output_dir, instance.spec)
-        deploy_project(output_dir, instance.spec)
+        deploy_url = deploy_project(output_dir, instance.spec)
         _cost = cost_summary()
         sw.on_cost(_cost)
         console.print(f"  [cyan]{format_cost_line()}[/cyan]")
+        notify_build_outcome(
+            project=instance.spec.get("goal", intent)[:120],
+            passed=passed,
+            heal_cycles=heal_cycle,
+            max_heal=_MAX_HEAL,
+            handoff_path=handoff_path,
+            cost_line=format_cost_line(),
+            stamp_issues=_handoff_has_stamp_issues(handoff_path),
+            deploy_url=deploy_url,
+        )
 
         if not passed:
             sys.exit(1)
@@ -483,6 +513,10 @@ def main() -> None:
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
             sys.exit(1)
+        except Exception as exc:  # noqa: BLE001
+            notify_crash(project=intent[:120], error=f"{type(exc).__name__}: {exc}",
+                         output_dir=cont_dir)
+            raise
         return
 
     if args.output:
@@ -511,6 +545,8 @@ def main() -> None:
                 console.print(
                     f"\n[bold red]Pipeline failed after {PIPELINE_MAX_RETRIES + 1} attempt(s): {exc}[/bold red]"
                 )
+                notify_crash(project=intent[:120], error=f"{type(exc).__name__}: {exc}",
+                             output_dir=output_dir)
                 raise
 
 
