@@ -752,8 +752,14 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
    - If Coqui TTS is not running, silent WAV placeholders are written (pipeline continues).
    - Phaser and socket-io game projects that mention sound/music should include one audio task.
 
-21. **Film projects (`stack: "film"`) MUST use FORMAT 5 decomposition.** A film cannot fit
-   within a single 50-task project instance — always emit FORMAT 5 from INIT, never FORMAT 1.
+21. **Top-level film projects (`stack: "film"`) MUST use FORMAT 5 decomposition.** A film
+   cannot fit within a single 50-task project instance — emit FORMAT 5 from INIT.
+
+   **EXCEPTION — you may already BE a sub-project.** When the INIT payload contains
+   `sub_project_depth` (any value ≥ 1) or `decomposition_allowed: false`, you are planning
+   ONE scene/segment of an existing decomposition: emit a flat FORMAT 1 spec (≤50 tasks)
+   that builds that scene directly, and NEVER emit FORMAT 5. A scene does not decompose
+   into further sub-projects — recursive decomposition produces nothing but cost.
 
    - Decompose the film into one sub-project per scene (or logical segment). Name sub-projects
      `scene_001`, `scene_002`, etc. Each scene sub-project depends on the previous scene so
