@@ -29,7 +29,8 @@ from state_writer import writer as sw
 from project import ProjectInstance
 from scheduler import Scheduler
 from final_review import run_final_review, parse_review_issues
-from handoff import write_handoff, write_parent_handoff, try_claude_stamp, git_commit_project, deploy_project
+from handoff import (write_handoff, write_parent_handoff, try_claude_stamp,
+                     git_commit_project, deploy_project, append_deploy_section)
 from verification import detect_ecosystem, run_playwright_project_check
 from e2e_generator import generate_e2e_tests, run_e2e_tests
 from creative_director import CreativeDirector
@@ -153,7 +154,8 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
     handoff_path = write_handoff(project_dir, spec, passed, heal_cycle)
     try_claude_stamp(handoff_path, project_dir)
     git_commit_project(project_dir, {"goal": f"continuation: {new_intent}"})
-    deploy_url = deploy_project(project_dir, spec)
+    deploy_url, deploy_note = deploy_project(project_dir, spec)
+    append_deploy_section(handoff_path, deploy_url, deploy_note)
     notify_build_outcome(
         project=f"continuation: {new_intent}"[:120],
         passed=passed,
@@ -465,7 +467,8 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         handoff_path = write_handoff(output_dir, instance.spec, passed, heal_cycle)
         try_claude_stamp(handoff_path, output_dir)
         git_commit_project(output_dir, instance.spec)
-        deploy_url = deploy_project(output_dir, instance.spec)
+        deploy_url, deploy_note = deploy_project(output_dir, instance.spec)
+        append_deploy_section(handoff_path, deploy_url, deploy_note)
         _cost = cost_summary()
         sw.on_cost(_cost)
         console.print(f"  [cyan]{format_cost_line()}[/cyan]")
