@@ -311,15 +311,25 @@ def git_commit_project(output_dir: Path, spec: dict) -> None:
         console.print(f"  [yellow]Git auto-commit failed: {exc}[/yellow]")
 
 
-def deploy_project(output_dir: Path, spec: dict) -> str | None:
+# Stacks whose output is static web content a generic host can serve. Everything
+# else (APIs, desktop apps, films) is skipped honestly rather than half-deployed.
+_DEPLOYABLE_STACKS = {"vanilla", "react-vite", "phaser", "three-js"}
+
+
+def deploy_project(output_dir: Path, spec: dict) -> tuple[str | None, str]:
     """Run the configured DEPLOY_HOOK command in output_dir (e.g. 'vercel --prod --yes').
 
-    Returns the deployed URL when one can be extracted from the CLI output,
-    else None (hook unset, failed, or no URL found)."""
+    Returns (url, note): the deployed URL when one can be extracted from the
+    CLI output (else None), and a human-readable outcome note for HANDOFF.md
+    (skip reason / failure summary / success)."""
     from config import DEPLOY_HOOK, DEPLOY_TIMEOUT
     if not DEPLOY_HOOK:
-        return None
-    goal = spec.get("goal", "")[:50]
+        return None, "deploy skipped: DEPLOY_HOOK not configured"
+    stack = spec.get("stack", "") or spec.get("architecture", {}).get("stack", "")
+    if stack not in _DEPLOYABLE_STACKS:
+        note = f"deploy skipped: stack '{stack or 'unknown'}' is not a deployable web stack"
+        console.print(f"  [dim]⊘ {note}[/dim]")
+        return None, note
     console.print(f"\n[bold]Running deployment hook: {DEPLOY_HOOK}[/bold]")
     use_shell = sys.platform == "win32"
     cmd = DEPLOY_HOOK if use_shell else DEPLOY_HOOK.split()
@@ -341,15 +351,31 @@ def deploy_project(output_dir: Path, spec: dict) -> str | None:
                 if line.startswith("https://") or "https://" in line.lower() and ("url" in line.lower() or "deployed" in line.lower()):
                     url = line[line.index("https://"):].split()[0].strip()
                     console.print(f"  [bold cyan]URL: {url}[/bold cyan]")
-                    return url
+                    return url, "deployed"
+            return None, "deploy hook exited 0 but printed no URL"
         else:
             console.print(f"  [yellow]Deployment failed (exit {result.returncode}):[/yellow]")
             console.print(f"  [dim]{output[-1000:]}[/dim]")
+            return None, f"deploy failed (exit {result.returncode}): {output[-300:]}"
     except subprocess.TimeoutExpired:
         console.print(f"  [yellow]Deployment timed out after {DEPLOY_TIMEOUT}s.[/yellow]")
+        return None, f"deploy timed out after {DEPLOY_TIMEOUT}s"
     except Exception as exc:
         console.print(f"  [yellow]Deployment hook error: {exc}[/yellow]")
-    return None
+        return None, f"deploy hook error: {exc}"
+
+
+def append_deploy_section(handoff_path: Path, url: str | None, note: str) -> None:
+    """Record the deployment outcome in HANDOFF.md (## Deployment section)."""
+    if url:
+        body = f"- ✓ URL: {url}"
+    else:
+        body = f"- ⊘ {note}"
+    try:
+        existing = handoff_path.read_text(encoding="utf-8")
+        handoff_path.write_text(existing + f"\n## Deployment\n\n{body}\n", encoding="utf-8")
+    except OSError as exc:
+        console.print(f"  [yellow]Could not append deploy section to HANDOFF: {exc}[/yellow]")
 
 
 def write_parent_handoff(
