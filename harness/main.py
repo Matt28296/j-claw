@@ -572,7 +572,14 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
         # Film decompositions: the parent assembles the final film itself (below),
         # so an orchestrator-emitted assembly sub-project is skipped — isolated in
         # its own directory it cannot reach the sibling scene clips and would fail.
-        if film_decomposition and re.search(r"assembl|full_film|final_film", name, re.IGNORECASE):
+        # Detect by name OR by shape (depends on every other sub-project — a scene
+        # chain only ever depends on the previous scene).
+        other_names = {s["name"] for s in sub_projects if s["name"] != name}
+        looks_like_assembly = bool(
+            re.search(r"assembl|concat|full_film|final_film|final_cut|final_movie", name, re.IGNORECASE)
+            or (len(other_names) >= 2 and set(sp.get("depends_on", [])) >= other_names)
+        )
+        if film_decomposition and looks_like_assembly:
             console.print(f"  [dim]⊘ {name} skipped — parent performs final assembly[/dim]")
             results[name] = "skipped"
             continue
