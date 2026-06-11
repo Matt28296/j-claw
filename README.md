@@ -64,23 +64,42 @@ Four layers of intelligence:
 
 ## Supported Stacks (15)
 
-| Stack | Use case | Verification |
+Stacks are tiered by how deeply the pipeline can *prove* the output works on a
+Windows build box. A check that can't run (missing tool) is reported as an honest
+`⊘ SKIPPED` in HANDOFF.md — never a silent pass.
+
+### Verified stacks
+
+| Stack | Use case | Verification | Depth |
+|---|---|---|---|
+| `vanilla` | Static HTML/JS/CSS + Tailwind CDN apps | Headless HTML structure check + completeness gate | behavior |
+| `phaser` | Phaser 3 browser games (CDN) | Playwright canvas + runtime-error check | behavior |
+| `three-js` | Three.js 3D browser scenes (CDN, WebGL) | Playwright canvas check | behavior |
+| `react-vite` | React 18 + Vite + Tailwind SPAs | `npm run build` | build |
+| `fastapi` | Python REST API + SQLite + Alembic migrations | `pip install` + `alembic upgrade head` | build |
+| `full-stack` | React frontend + FastAPI backend in one pipeline run | Both above | build+behavior |
+| `web3` | Solidity + Hardhat + ethers.js DApps | `npx hardhat compile && test` | test |
+| `video-editor` | Browser-based clip editor — ffmpeg WASM + Canvas API | build | build |
+| `tauri` | Rust + WebView desktop apps — lighter than Electron | build | build |
+| `godot` | GDScript games | Godot headless syntax check | static |
+| `film` | Narrative film / animated explainer — ffmpeg + SD frames + Coqui narration | ffprobe + frame integrity + A/V sync | artifact |
+| `socket-io` | Node.js + Socket.io real-time multiplayer | `npm install` | install |
+| `electron` | Electron desktop apps (contextIsolation + contextBridge) | `npm install` | install |
+| `websocket-sse` | Real-time dashboards and data streams | `npm install` | install |
+
+Depth legend: **behavior** = the app is launched and observed; **build/test** = it
+compiles and its tests pass; **artifact** = the output file is probed for integrity;
+**static** = syntax-level check; **install** = dependencies resolve only.
+
+### Generate-only stacks (no verification on a Windows box)
+
+| Stack | Use case | Why unverified |
 |---|---|---|
-| `vanilla` | Static HTML/JS/CSS + Tailwind CDN apps | Headless HTML structure check |
-| `react-vite` | React 18 + Vite + Tailwind SPAs | `npm run build` |
-| `fastapi` | Python REST API + SQLite + Alembic migrations | `pip install` + `alembic upgrade head` |
-| `phaser` | Phaser 3 browser games (CDN) | Playwright canvas check |
-| `full-stack` | React frontend + FastAPI backend in one pipeline run | Both above |
-| `web3` | Solidity + Hardhat + ethers.js DApps | `npx hardhat compile && test` |
-| `react-native` | Expo managed mobile apps (iOS/Android) | `npm install` |
-| `socket-io` | Node.js + Socket.io real-time multiplayer | `npm install` |
-| `three-js` | Three.js 3D browser scenes (CDN, WebGL) | Playwright canvas check |
-| `electron` | Electron desktop apps (contextIsolation + contextBridge) | `npm install` |
-| `film` | Narrative film / animated explainer — ffmpeg + SD frames + Coqui narration | ffprobe |
-| `video-editor` | Browser-based clip editor — ffmpeg WASM + Canvas API | build |
-| `tauri` | Rust + WebView desktop apps — lighter than Electron | build |
-| `godot` | GDScript games — Godot headless export | none |
-| `websocket-sse` | Real-time dashboards and data streams | `npm install` |
+| `react-native` | Expo managed mobile apps (iOS/Android) | `npm install` only — no iOS/Android simulator on Windows |
+
+Swift and Kotlin generation prompts also exist in the worker, but without a
+macOS/Android toolchain the output is code-only — treat it as a starting point,
+not a verified artifact.
 
 All stacks also support:
 - **PWA output** (vanilla + react-vite): `manifest.json` + `sw.js` — every generated app is installable on mobile/desktop
