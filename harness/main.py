@@ -296,7 +296,8 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
                 return False
         else:
             return _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual,
-                                    intent=intent)
+                                    intent=intent,
+                                    parent_stack=(tech_spec or {}).get("confirmed_stack", ""))
 
     # Spec review loop
     while True:
@@ -317,7 +318,8 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
                 console.print("  [red]Sub-project revision demands decomposition — failing honestly.[/red]")
                 return False
             return _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual,
-                                    intent=intent)
+                                    intent=intent,
+                                    parent_stack=(tech_spec or {}).get("confirmed_stack", ""))
 
     # ── SPEC_ACCEPTED ─────────────────────────────────────────────────────────
     phase["current"] = "dag-generation"
@@ -549,7 +551,7 @@ def _best_scene_clip(sp_dir: Path) -> Path | None:
 
 
 def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bool = False,
-                     manual: bool = False, intent: str = "") -> bool:
+                     manual: bool = False, intent: str = "", parent_stack: str = "") -> bool:
     console.print(
         f"\n[bold yellow]Oversize project — decomposing into sub-projects.[/bold yellow]\n"
         f"  Reason: {response['reason']}"
@@ -559,7 +561,9 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
     graph = {sp["name"]: set(sp.get("depends_on", [])) for sp in sub_projects}
     wiring: dict = {}  # accumulated from completed sub-projects, forwarded to dependents
     results: dict[str, str] = {}  # name → "passed" | "failed" | "skipped"
-    film_decomposition = False
+    # Known from the parent's tech spec before any sub-project runs; confirmed
+    # per sub-project below (their specs may refine the stack).
+    film_decomposition = parent_stack in ("film", "video-editor")
     # Each sub-project's run_project() resets the global cost accumulator, so
     # the aggregate cost must be summed here as each one finishes.
     total_usd = 0.0
@@ -572,11 +576,15 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
         # Film decompositions: the parent assembles the final film itself (below),
         # so an orchestrator-emitted assembly sub-project is skipped — isolated in
         # its own directory it cannot reach the sibling scene clips and would fail.
-        # Detect by name OR by shape (depends on every other sub-project — a scene
-        # chain only ever depends on the previous scene).
+        # Detect by name, by goal text (conservative stems only — a scene goal may
+        # legitimately mention 'concat' for its internal xfade), or by shape
+        # (depends on every other sub-project — a scene chain only ever depends
+        # on the previous scene). Observed live: one named 'orchestration'.
         other_names = {s["name"] for s in sub_projects if s["name"] != name}
         looks_like_assembly = bool(
-            re.search(r"assembl|concat|full_film|final_film|final_cut|final_movie", name, re.IGNORECASE)
+            re.search(r"assembl|concat|orchestrat|full_film|final_film|final_cut|final_movie",
+                      name, re.IGNORECASE)
+            or re.search(r"assembl|orchestrat", sp.get("goal", ""), re.IGNORECASE)
             or (len(other_names) >= 2 and set(sp.get("depends_on", [])) >= other_names)
         )
         if film_decomposition and looks_like_assembly:

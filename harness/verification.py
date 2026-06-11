@@ -808,16 +808,52 @@ def _find_project_videos(project_dir: Path, task=None, min_bytes: int = 0) -> li
 
 
 def _render_source_signature(project_dir: Path) -> tuple:
-    """Fingerprint of everything that could drive a render — root-level scripts.
-    Changes whenever the heal loop rewrites them."""
+    """Fingerprint of everything that could drive a render. Changes whenever
+    the heal loop rewrites a render source, so failed attempts are retried."""
     sig = []
-    for p in sorted(project_dir.glob("*.py")) + sorted(project_dir.glob("*.sh")):
-        try:
-            st = p.stat()
-            sig.append((p.name, st.st_mtime_ns, st.st_size))
-        except OSError:
-            continue
+    for pat in ("*.py", "*.sh", "scenes/*.sh", "scenes/*.py", "scripts/*.sh", "scripts/*.py"):
+        for p in sorted(project_dir.glob(pat)):
+            try:
+                st = p.stat()
+                sig.append((str(p.relative_to(project_dir)), st.st_mtime_ns, st.st_size))
+            except OSError:
+                continue
     return tuple(sig)
+
+
+def _find_bash() -> str | None:
+    """A real bash for render scripts. On Windows, PATH usually resolves to the
+    WindowsApps WSL stub (which just prints install instructions when no distro
+    is installed) — prefer Git Bash explicitly and reject the stub."""
+    import os
+    for candidate in (
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Git\bin\bash.exe"),
+    ):
+        if Path(candidate).exists():
+            return candidate
+    found = shutil.which("bash")
+    if found and "windowsapps" not in found.lower():
+        return found
+    return None
+
+
+def _find_render_shell_scripts(project_dir: Path) -> list[Path]:
+    """Shell scripts that plausibly perform the render, best candidates first.
+    Workers often wrap the ffmpeg invocation in preflight checks and variables,
+    so no bare 'ffmpeg …' line is extractable — the script must be executed."""
+    import re as _re
+    skip = _re.compile(r"qa|test|check|validate|verify", _re.IGNORECASE)
+    patterns = ("render.sh", "run_build.sh", "build*.sh", "scenes/*.sh", "scripts/*.sh", "*.sh")
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for pat in patterns:
+        for p in sorted(project_dir.glob(pat)):
+            if p.is_file() and p not in seen and not skip.search(p.stem):
+                seen.add(p)
+                out.append(p)
+    return out
 
 
 def _ensure_rendered(project_dir: Path) -> tuple[bool, str]:
@@ -864,10 +900,36 @@ def _ensure_rendered(project_dir: Path) -> tuple[bool, str]:
         if ffmpeg_lines and _find_project_videos(project_dir, min_bytes=_MIN_REAL_VIDEO_BYTES):
             return True, f"rendered via {len(ffmpeg_lines)} ffmpeg edit-script line(s)"
 
-    # 2. Python path: run the project's render entry script.
+    # 2. Shell-script path: execute render scripts directly via bash. Workers
+    # wrap the ffmpeg call in preflight checks/variables (observed live:
+    # run_build.sh → python3 build_film.py → ffprobe assert), so step 1 finds
+    # no bare 'ffmpeg ' line — and executing the script yields a far more
+    # precise failure for the heal loop than "no render entry found".
+    bash = _find_bash()
+    if bash:
+        for script in _find_render_shell_scripts(project_dir)[:3]:
+            rel = script.relative_to(project_dir)
+            console.print(f"  [dim]render: bash {rel}[/dim]")
+            try:
+                result = subprocess.run([bash, str(script)], cwd=project_dir,
+                                        capture_output=True, text=True, timeout=600)
+                if result.returncode != 0:
+                    logs.append(
+                        f"bash {rel} exited {result.returncode}: "
+                        f"{(result.stderr or result.stdout or '')[-300:]}"
+                    )
+            except subprocess.TimeoutExpired:
+                logs.append(f"bash {rel} timed out after 600s")
+            except Exception as exc:  # noqa: BLE001
+                logs.append(f"bash {rel}: {exc}")
+            if _find_project_videos(project_dir, min_bytes=_MIN_REAL_VIDEO_BYTES):
+                return True, f"rendered via bash {rel}"
+
+    # 3. Python path: run the project's render entry script.
     entry = _find_render_entry(project_dir)
     if entry is None:
-        msg = "no render entry found (no ffmpeg edit script, no render*.py / generate_*.py / build_film.py / main.py)"
+        msg = ("no render entry found (no ffmpeg edit-script line, no executable "
+               "*.sh render script, no render*.py / generate_*.py / build_film.py / main.py)")
         _RENDER_FAILED[key] = msg
         return False, "; ".join(logs + [msg])
 
