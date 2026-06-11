@@ -263,12 +263,40 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         init_payload["tech_spec"] = tech_spec
     if wiring:
         init_payload["wiring"] = wiring
+    if depth:
+        # Already a sub-project: one scene/segment of a FORMAT 5 decomposition.
+        # Recursive decomposition multiplies cost without producing anything
+        # (observed live: scene → scripts → … until the depth cap).
+        init_payload["sub_project_depth"] = depth
+        init_payload["decomposition_allowed"] = False
     spec = orch.call(init_payload)
     sw.on_agent_done()
 
     if spec.get("oversize"):
-        return _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual,
-                                intent=intent)
+        if depth:
+            # Runtime enforcement — never trust the prompt alone. One corrective
+            # retry, then an honest failure instead of a recursion spiral.
+            console.print(
+                "  [yellow]Sub-project tried to decompose again (FORMAT 5 inside FORMAT 5) "
+                "— rejecting and requesting a flat FORMAT 1 spec.[/yellow]"
+            )
+            sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "INIT")
+            spec = orch.call({
+                **init_payload,
+                "decomposition_rejected": (
+                    f"You are already a sub-project at depth {depth} of a FORMAT 5 "
+                    "decomposition. Further decomposition is FORBIDDEN. Emit a flat "
+                    "FORMAT 1 spec (≤50 tasks) that builds this one scene/segment "
+                    "directly. Trim scope to fit if needed."
+                ),
+            })
+            sw.on_agent_done()
+            if spec.get("oversize"):
+                console.print("  [red]Sub-project still demands decomposition — failing honestly.[/red]")
+                return False
+        else:
+            return _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual,
+                                    intent=intent)
 
     # Spec review loop
     while True:
@@ -285,6 +313,9 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
             "revision_feedback": feedback,
         })
         if spec.get("oversize"):
+            if depth:
+                console.print("  [red]Sub-project revision demands decomposition — failing honestly.[/red]")
+                return False
             return _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual,
                                     intent=intent)
 
