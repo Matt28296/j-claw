@@ -1,16 +1,60 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-12** (previous: 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-12, second session** (previous: 2026-06-12 morning, 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**All session work is MERGED to `main`** (PRs #10–#26). Working tree clean.
+**PRs #10–#29 are MERGED to `main`. PR #30 (Gemini orchestrator) is OPEN — operator review + merge.**
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
 
-## ✅ DONE 2026-06-12 — duration honesty + Netlify LIVE (PRs #25–#26)
+## ✅ DONE 2026-06-12 (second session) — cost optimization + Gemini free-tier orchestrator (PRs #28–#30)
+
+Theme: same pipeline, fraction of the API bill. Per-build cost drops from ~$0.50 to an
+estimated **$0.05–0.15** once #30 is merged (orchestrator free, overpowered roles on Haiku,
+40–70% fewer orchestrator input tokens).
+
+1. **PR #28 (MERGED) — role-model right-sizing + cache fix:**
+   - Creative Director: Opus → **Haiku** (`.env`); Technical Architect: Sonnet → **Haiku** (`.env`).
+   - Final Review: was hardcoded to `ORCHESTRATOR_MODEL` (Sonnet) — new `FINAL_REVIEW_MODEL`
+     config var, defaults Haiku. Runs 1–4×/build (per heal cycle) doing stub/dep/syntax checks.
+   - `e2e_generator.py`: was the ONLY Anthropic call without `cache_control` — fixed.
+   - Orchestrator + worker-escalation rungs stay Sonnet. ~30–50% cheaper per build.
+2. **PR #29 (MERGED) — orchestrator context-bloat elimination:**
+   - `REVIEW_FAILED` payload: full 50-task list → `tasks_slim_list()` (deprecated omitted; done
+     tasks reduced to `{id, files, status}`; failed keep type+objective). Was ~30–60 KB/heal cycle.
+   - `EXECUTION_ERROR` payload: full `active_dag` → `dag_summary` `{total_tasks,
+     highest_task_seq, dependents_of_failed}` — the three things FORMAT 3 actually uses.
+   - `orchestrator.txt` FORMAT 3 + REVIEW_FAILED sections document the new shapes.
+3. **PR #30 (OPEN) — Gemini 2.5 Flash orchestrator via Google free tier:**
+   - `ORCHESTRATOR_PROVIDER=gemini` calls Google's OpenAI-compatible endpoint DIRECTLY with
+     `GOOGLE_API_KEY` → AI Studio free tier applies (1M tokens/day). The same model via
+     OpenRouter would bill — that's why it's a native path.
+   - `OpenRouterOrchestrator` refactored into `_OpenAICompatOrchestrator` base;
+     `GeminiOrchestrator` is a thin subclass (chain: gemini-2.5-flash → flash-lite).
+   - `orchestrator.txt` opener made provider-neutral ("You are Claude" removed).
+   - **Live-validated:** real INIT call returned a schema-valid FORMAT 1 vanilla spec.
+   - Found in passing: `openai>=1.0.0` was in requirements.txt but NOT installed in the venv —
+     the existing OpenRouter path would have crashed identically. Installed.
+   - Local `.env` already set: `GOOGLE_API_KEY` + `ORCHESTRATOR_PROVIDER=gemini`.
+   - ⚠️ **Operator: the Google key was pasted into a chat session — regenerate it at
+     aistudio.google.com and update `harness/.env`.**
+4. **Worker-ladder rung-1 upgrade:** `deepseek-coder-v2:16b` (MoE, 8.9 GB Q4_0,
+   ~90% HumanEval vs ~75% for qwen2.5-coder:14b at the same VRAM). Pull completed + ROCm
+   smoke test **PASSED** (clean output, no crash). `harness/.env` updated:
+   `WORKER_LADDER=ollama::qwen3:8b,ollama::deepseek-coder-v2:16b,anthropic::claude-sonnet-4-6`
+
+### Blocker status after this session
+- **Anthropic credits still exhausted** — but the bill they gate is now much smaller:
+  with #30 merged, Anthropic is only the worker-escalation rung (≤15 calls, budget-capped)
+  + 4 Haiku roles. Orchestrator (the former dominant cost) is free-tier Gemini.
+- Everything else from the morning session unchanged: Netlify live ✓, duration gate ✓.
+
+---
+
+## ✅ DONE 2026-06-12 (morning) — duration honesty + Netlify LIVE (PRs #25–#26)
 
 1. **PR #25 — film duration honesty:** ffprobe passes any clip >0.05s, so a 1-second render
    of a 20-second scene passed the probe (observed live). The film project-level gate now
@@ -28,10 +72,10 @@ Direct push to `main` is intentionally blocked — land changes via PR.
    **Proof:** two consecutive deploys both landed on https://jclaw-jclaw-deploy-test.netlify.app
    (HTTP 200, correct content); stray misnamed site deleted from the account.
 
-### ⛔ ONE remaining blocker: Anthropic API credits
-Exhausted (probed repeatedly through 2026-06-12). Every build needs Claude for the
-director/architect/orchestrator/review layers. Top up at console.anthropic.com → Plans &
-Billing for the key in `harness/.env`. Validation builds cost ~$0.50 each (mostly cache hits).
+### ⛔ ONE remaining blocker: Anthropic API credits *(cost picture superseded by the
+second-session section above — orchestrator now free-tier Gemini, builds ~$0.05–0.15)*
+Exhausted (probed repeatedly through 2026-06-12). Top up at console.anthropic.com → Plans &
+Billing for the key in `harness/.env`.
 
 ### Then remaining (execution only, no new code expected):
 1. Film validation rerun — recovery command in `harness/projects/film_validation_v2/HANDOFF.md`.
@@ -188,20 +232,27 @@ self-description (it says it routes to `qwen2.5-coder:14b` — actually the 3-ru
 
 ---
 
-## 📋 WHAT'S LEFT TO FINALIZE (priority order)
+## 📋 WHAT'S LEFT TO FINALIZE (priority order, updated 2026-06-12 second session)
 
-1. **Re-run a supervised build against merged `main`** — confirm the escalation-tax + convergence
-   fixes drop the Sonnet-escalation count vs the 2026-06-04 baseline. **VRAM is already freed; ready
-   to go.** Recommend the vanilla web stack (matches the baseline; e2e gating runs for real).
-2. **Movies: live-validate** — install `ffmpeg`/`ffprobe`, run a "10-second video" build, confirm it
-   actually renders + verifies (honest SKIP otherwise).
-3. **Native mobile verification** (Phase 3): stand up a macOS/Android CI runner, or explicitly mark
-   Swift/Kotlin "generate-only" — cannot build/verify on this Windows box.
-4. **Carry-overs:** Playwright runner task type in the orchestrator DAG; IPFS/on-chain CI deploy
-   hook; LemonSqueezy / Stripe Connect multi-vendor prompts.
-5. **Optional hardening / polish:**
-   - Prompt caching: close the 2 gaps (final_review, worker escalation), add cache-hit telemetry,
-     optionally 1-hour TTL on the orchestrator cache.
+1. **Operator: merge PR #30** (Gemini orchestrator — live-validated, review + merge).
+2. **Operator: regenerate the Google API key** (was pasted into a chat session) at
+   aistudio.google.com → update `GOOGLE_API_KEY` in `harness/.env`.
+3. **Operator: top up Anthropic credits** — still needed for worker escalation + the four
+   Haiku roles, but the per-build bill is now ~$0.05–0.15 (orchestrator is free-tier Gemini).
+4. **Worker ladder rung-1 switch:** if the `deepseek-coder-v2:16b` ROCm smoke test passed
+   (see section above), set in `harness/.env`:
+   `WORKER_LADDER=ollama::qwen3:8b,ollama::deepseek-coder-v2:16b,anthropic::claude-sonnet-4-6`
+   If it crashed under ROCm, stay on qwen2.5-coder:14b — no change needed.
+5. **Film validation rerun** — recovery command in `harness/projects/film_validation_v2/HANDOFF.md`.
+   Also the first real exercise of Gemini on SPEC_ACCEPTED / EXECUTION_ERROR / REVIEW_FAILED
+   and of the slim payloads (PR #29) under fire.
+6. **Factory rehearsal** (binding acceptance test) — from Telegram only; see README roadmap.
+7. **Carry-overs:** native mobile CI runner; Playwright runner task type in the DAG;
+   IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect prompts.
+8. **Optional hardening / polish:**
+   - ~~Prompt caching gaps (final_review, e2e)~~ — closed (PR #28). Worker-escalation rung
+     already had cache_control. Optional remainder: 1-hour TTL on the orchestrator cache
+     (only relevant when ORCHESTRATOR_PROVIDER=anthropic).
    - Worker-timeout hard bound: `shutdown(wait=False, cancel_futures=True)` (3.9+) + audit inner
      timeouts.
    - OpenClaw: bot self-description, `OLLAMA_MAX_LOADED_MODELS=1`, prune dangling manifests.

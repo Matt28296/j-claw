@@ -216,11 +216,11 @@ pip install -r requirements.txt
 ### Pull a worker model
 
 ```powershell
-ollama pull qwen2.5-coder:14b   # primary code worker — ~8.4 GB at Q4 (fits 16 GB VRAM)
-ollama pull qwen3:8b            # lighter rung-0 worker — ~4.9 GB
+ollama pull qwen3:8b                  # rung-0: trivial single-file tasks — ~4.9 GB
+ollama pull deepseek-coder-v2:16b     # rung-1: primary code worker (MoE, ~8.9 GB Q4_0, ~90% HumanEval)
 ```
 
-The default `WORKER_LADDER` uses both: `qwen3:8b` for trivial single-file tasks, `qwen2.5-coder:14b` for the rest, escalating to `claude-sonnet-4-6` only on retry (capped by `MAX_PAID_WORKER_CALLS`). On 16 GB VRAM, set `OLLAMA_MAX_LOADED_MODELS=1` if you also run the OpenClaw bot, to avoid VRAM contention.
+The default `WORKER_LADDER` uses both: `qwen3:8b` for trivial single-file tasks, `deepseek-coder-v2:16b` for the rest (ROCm-validated; ~90% HumanEval vs ~75% for qwen2.5-coder:14b at the same VRAM), escalating to `claude-sonnet-4-6` only on retry (capped by `MAX_PAID_WORKER_CALLS`). On 16 GB VRAM, set `OLLAMA_MAX_LOADED_MODELS=1` if you also run the OpenClaw bot, to avoid VRAM contention.
 
 ### Configure
 
@@ -234,7 +234,7 @@ copy harness\.env.example harness\.env
 | `ANTHROPIC_API_KEY` | — | Required for Creative Director, Technical Architect, Orchestrator, Final Review |
 | `OPENROUTER_API_KEY` | — | Alternative orchestrator — set `ORCHESTRATOR_PROVIDER=openrouter` |
 | `WORKER_MODEL` | `qwen2.5-coder:14b` | Legacy single Ollama worker model (never Claude); superseded by `WORKER_LADDER` |
-| `WORKER_LADDER` | `ollama::qwen3:8b,ollama::qwen2.5-coder:14b,anthropic::claude-sonnet-4-6` | Weakest→strongest worker ladder. Base routing is always local; a task escalates one rung per retry. |
+| `WORKER_LADDER` | `ollama::qwen3:8b,ollama::deepseek-coder-v2:16b,anthropic::claude-sonnet-4-6` | Weakest→strongest worker ladder. Base routing is always local; a task escalates one rung per retry. |
 | `MAX_PAID_WORKER_CALLS` | `15` | Hard cap on paid (non-Ollama) worker escalations per project run; once spent, tasks clamp to the strongest local rung |
 | `ORCHESTRATOR_MODEL` | `claude-sonnet-4-6` | Claude model for architect, planning, and review |
 | `TECHNICAL_ARCHITECT_ENABLED` | `true` | Set `false` to skip architect pass (legacy mode) |
@@ -493,7 +493,7 @@ Every project writes to `harness/projects/<slug>/`:
 | **Phase 1 — verification honesty (2026-06-04, live-validated):** E2E + project-Playwright checks now **gate** the project and feed the self-heal loop (previously computed then ignored); generated Playwright tests use relative `goto('/')` against the configured `:18090` baseURL (was a dead `:3000`) | ✅ |
 | **Phase 1 — SKIP ≠ PASS:** checks that auto-pass only because a tool/runner is missing are marked `⊘ SKIPPED` (not a verified pass) in `HANDOFF.md`, so a green report is no longer silently hollow | ✅ |
 | **Phase 1 — real game check:** Playwright game check now fails on a zero-size canvas and observes a 1.5s window so game-loop runtime errors surface, not just init-time errors | ✅ |
-| **Sprint A — worker ladder + budget:** weakest→strongest ladder (`qwen3:8b → qwen2.5-coder:14b → claude-sonnet-4-6`), `MAX_PAID_WORKER_CALLS` paid-escalation cap, unified dispatch timeouts, bounded heal loop, mypy/ruff wired (`ac3bdce`) | ✅ |
+| **Sprint A — worker ladder + budget:** weakest→strongest ladder (`qwen3:8b → qwen2.5-coder:14b → claude-sonnet-4-6`; rung-1 later upgraded to `deepseek-coder-v2:16b`), `MAX_PAID_WORKER_CALLS` paid-escalation cap, unified dispatch timeouts, bounded heal loop, mypy/ruff wired (`ac3bdce`) | ✅ |
 | **Escalation-tax fix:** binary/image tasks → `asset_worker` (valid PNG placeholder when SD offline), single-file script salvage before paying for Sonnet (`b479e57`) | ✅ |
 | **Heal-loop convergence:** `heal_metrics.py` issue-set similarity + escalate-then-stop on non-convergence (`056ad67`) | ✅ |
 | **Phase 2 — movies pipeline:** `generate_video` reads `task.files` + ffmpeg render, real film/video-editor director→renderer prompts, `music_worker` real-backend gate, honest `frame_integrity`/`sync_check` (`056ad67`) | ✅ |
@@ -509,18 +509,25 @@ Every project writes to `harness/projects/<slug>/`:
 | **Validation-driven hardening (PRs #18–#23, 2026-06-11):** six defects caught by live film validation runs — FORMAT 5 recursion spiral stopped (runtime `decomposition_allowed: false`); assembly sub-projects detected by name/goal/dependency-shape and skipped; render shell scripts executed via Git Bash (WSL-stub rejected); task completion gated on declared files actually existing; video tasks routed by output not label; final review fails **closed** on API errors, can finally see `.sh`/`.sol`/`.gd` files, and all stack reads go through `config.spec_stack()` (was silently reading an empty top-level key) | ✅ |
 | **Film duration honesty (PR #25):** rendered video under half the expected duration (shotlist sum or "N-second" goal phrase) fails the build — ffprobe alone passed a 1-second render of a 20-second scene | ✅ |
 | **Netlify deployment LIVE-VALIDATED (PR #26, 2026-06-12):** token configured; wrapper hardened from live testing — site management via Netlify REST API (the CLI's Windows cmd shim mangled JSON and minted randomly-named sites), CLI candidates probed with `--version` (both pre-existing installs were broken), `.env` self-load. Proof: two consecutive deploys → same named site, HTTP 200 | ✅ |
+| **Role-model right-sizing + cache fix (PR #28, 2026-06-12):** Creative Director Opus→Haiku, Technical Architect Sonnet→Haiku, Final Review Sonnet→Haiku (new `FINAL_REVIEW_MODEL`); `e2e_generator` was the only uncached Anthropic call — fixed. ~30–50% cheaper per build | ✅ |
+| **Orchestrator context-bloat elimination (PR #29):** `REVIEW_FAILED` sends a slim task list (`{id, files, status}`; failed tasks keep type+objective) instead of all 50 full task objects; `EXECUTION_ERROR` sends a 3-field `dag_summary` instead of the full `active_dag` — ~40–70% fewer orchestrator input tokens on large builds | ✅ |
+| **Gemini free-tier orchestrator (PR #30):** `ORCHESTRATOR_PROVIDER=gemini` runs the orchestrator on Gemini 2.5 Flash via Google's OpenAI-compatible endpoint, called directly so the AI Studio free tier (1M tokens/day) applies — validation builds drop to ~$0 orchestrator spend. Live-validated INIT call; Anthropic stays the default + instant fallback | 🔄 PR open |
+| **Worker rung-1 upgrade (2026-06-12):** `deepseek-coder-v2:16b` (MoE, 8.9 GB Q4_0, ~90% HumanEval) replaces `qwen2.5-coder:14b` as rung-1 in the worker ladder; ROCm smoke-tested on the RX 9070 XT — clean output, no crash. `WORKER_LADDER` updated in `harness/.env` | ✅ |
 
 ---
 
 ## Current Status & What's Left to Finalize
 
-**2026-06-12 — the "hands-off product factory" roadmap is code-complete (PRs #10–#26), and
-deployment is live-validated.** The target: Telegram is the only human interface; builds
-queue and run unattended; finished web builds auto-deploy to a reachable URL; the operator
-is contacted only on terminal outcome. All machinery for that is merged: completeness gate,
-cost telemetry, terminal Telegram push, FIFO queue + `/continue`, experience-lessons
-feedback, film render execution with honest gates (including duration honesty), FORMAT 5
-aggregation + parent assembly, and unattended Netlify deployment.
+**2026-06-12 — the "hands-off product factory" roadmap is code-complete (PRs #10–#29 merged;
+#30 open), deployment is live-validated, and the API bill has been cut to a fraction.** The
+target: Telegram is the only human interface; builds queue and run unattended; finished web
+builds auto-deploy to a reachable URL; the operator is contacted only on terminal outcome.
+All machinery for that is merged: completeness gate, cost telemetry, terminal Telegram push,
+FIFO queue + `/continue`, experience-lessons feedback, film render execution with honest
+gates (including duration honesty), FORMAT 5 aggregation + parent assembly, and unattended
+Netlify deployment. The cost-optimization pass (PRs #28–#30) moved the overpowered Claude
+roles to Haiku, cut orchestrator payloads 40–70%, and put the orchestrator itself on
+free-tier Gemini 2.5 Flash — estimated **$0.05–0.15 per build** (was ~$0.50).
 
 Validated so far: a vanilla build **PASSED end-to-end** against merged main; the Telegram
 push and crash paths are live-confirmed; **Netlify deployment is live-validated** (named
@@ -528,11 +535,12 @@ site, idempotent re-deploys, HTTP 200 — see the roadmap table for the three re
 defects the live test exposed and fixed). The film-stack validation drove seven live runs,
 each catching and fixing a real defect (PRs #18–#23).
 
-**The single remaining blocker is Anthropic API credits** (the account the harness key
-belongs to is exhausted; every build needs Claude for the director/architect/orchestrator/
-review layers). Once topped up: rerun the film validation, then the factory rehearsal
-acceptance test (queue a website, a `/continue` feature, and a film from Telegram only;
-verify live URLs, pushes, honest failure + crash drills, FIFO, cold start).
+**The single remaining blocker is Anthropic API credits** — but the bill they gate shrank:
+with PR #30 merged the orchestrator runs on free-tier Gemini, so Anthropic is only the
+worker-escalation rung (≤15 calls, budget-capped) plus four Haiku roles
+(director/architect/review/error). Once topped up: rerun the film validation, then the
+factory rehearsal acceptance test (queue a website, a `/continue` feature, and a film from
+Telegram only; verify live URLs, pushes, honest failure + crash drills, FIFO, cold start).
 
 ### Honest capability scorecard
 
@@ -570,24 +578,29 @@ fourth is structural and remains by design.
 2. ~~Fix the OpenClaw bot~~ — done (2026-06-04): Haiku router, replies confirmed live.
 3. ~~Heal-loop convergence detection~~ — done (`056ad67`): `heal_metrics.py` similarity + escalate-then-stop.
 4. ~~Phase 2 — movies pipeline~~ — done (`056ad67`): `generate_video` data-flow fix, real director→renderer prompts, music backend gate, honest frame/sync checks. *(Still needs a live render test — see below.)*
-5. **Sprint A** — worker ladder (`qwen3:8b → qwen2.5-coder:14b → sonnet`) + paid-call budget + dispatch timeouts + bounded heal loop. *(`ac3bdce`)*
+5. **Sprint A** — worker ladder (`qwen3:8b → qwen2.5-coder:14b → sonnet`; rung-1 upgraded to `deepseek-coder-v2:16b` 2026-06-12) + paid-call budget + dispatch timeouts + bounded heal loop. *(`ac3bdce`)*
 6. **Pre-merge review fixes** — failure-handoff phase tracking made functional; worker-timeout liveness limitation documented. *(`7c7656e`)*
 
 ### Remaining work to finalize (priority order)
 
-1. **Operator: top up Anthropic API credits** — the film validation rerun crashed in INIT on
+1. **Operator: merge PR #30** (Gemini orchestrator — live-validated) and **regenerate the
+   Google API key** at aistudio.google.com (it transited a chat session), then update
+   `GOOGLE_API_KEY` in `harness/.env`.
+2. **Operator: top up Anthropic API credits** — the film validation rerun crashed in INIT on
    `credit balance is too low` (2026-06-11; re-confirmed 2026-06-12). The crash path itself
-   behaved: failure HANDOFF written, Telegram crash push sent. **This is the only blocker.**
-2. **Re-run the film validation** (`film_validation_v2` recovery command in its HANDOFF) —
+   behaved: failure HANDOFF written, Telegram crash push sent. Per-build need is now
+   ~$0.05–0.15 (worker escalation + Haiku roles only).
+3. **Re-run the film validation** (`film_validation_v2` recovery command in its HANDOFF) —
    acceptance: real per-scene mp4s at honest durations, probe-clean `final.mp4`, zero silent
-   skips, one aggregate Telegram push, honest exit code.
-3. **Factory rehearsal (acceptance test for "hands-off factory"):** from Telegram only —
+   skips, one aggregate Telegram push, honest exit code. Also the first live exercise of the
+   Gemini orchestrator across all pipeline states and the slim PR #29 payloads.
+4. **Factory rehearsal (acceptance test for "hands-off factory"):** from Telegram only —
    `/run` a website (live URL — covers pipeline-integrated deploy + HANDOFF `## Deployment`
    verification), `/continue` a feature (same URL redeployed), `/run` a film (aggregate
    push), an impossible intent (honest FAIL push), kill Ollama mid-build (crash push), two
    queued builds (strict FIFO), reboot + repeat (no interactive auth anywhere). All green →
    update README/SESSION_HANDOFF to "factory" status.
-4. **Carry-overs:** native mobile CI runner (or stays generate-only); Playwright runner task
+5. **Carry-overs:** native mobile CI runner (or stays generate-only); Playwright runner task
    inside the orchestrator DAG; IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect;
    worker-timeout hard bound; prune stale `worktree-agent-*` branches + dangling Ollama
    manifests.
