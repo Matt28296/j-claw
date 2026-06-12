@@ -19,13 +19,17 @@ from config import (
     ORCHESTRATOR_API_MODEL, TECHNICAL_ARCHITECT_ENABLED, DASHBOARD_PORT, DASHBOARD_AUTOOPEN,
     PIPELINE_MAX_RETRIES,
     HEAL_MAX_CYCLES,
+    GEMINI_ORCHESTRATOR_MODEL,
     spec_stack,
 )
 from completeness import check_completeness
 
 # Display name shown in dashboard active-agent box during orchestrator calls
-_ORCH_DISPLAY = ORCHESTRATOR_API_MODEL if ORCHESTRATOR_PROVIDER == "openrouter" else ORCHESTRATOR_MODEL
-from orchestrator import Orchestrator, ManualOrchestrator, OpenRouterOrchestrator
+_ORCH_DISPLAY = {
+    "openrouter": ORCHESTRATOR_API_MODEL,
+    "gemini": GEMINI_ORCHESTRATOR_MODEL,
+}.get(ORCHESTRATOR_PROVIDER, ORCHESTRATOR_MODEL)
+from orchestrator import Orchestrator, ManualOrchestrator, OpenRouterOrchestrator, GeminiOrchestrator
 from state_writer import writer as sw
 from project import ProjectInstance
 from scheduler import Scheduler
@@ -114,6 +118,8 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
 
     if ORCHESTRATOR_PROVIDER == "openrouter":
         orch = OpenRouterOrchestrator()
+    elif ORCHESTRATOR_PROVIDER == "gemini":
+        orch = GeminiOrchestrator()
     else:
         orch = Orchestrator()
 
@@ -214,6 +220,8 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         orch = ManualOrchestrator()
     elif ORCHESTRATOR_PROVIDER == "openrouter":
         orch = OpenRouterOrchestrator()
+    elif ORCHESTRATOR_PROVIDER == "gemini":
+        orch = GeminiOrchestrator()
     else:
         orch = Orchestrator()
 

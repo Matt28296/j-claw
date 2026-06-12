@@ -14,8 +14,13 @@ def spec_stack(spec: dict) -> str:
     return spec.get("stack", "") or spec.get("architecture", {}).get("stack", "")
 
 ORCHESTRATOR_MODEL: str = "claude-sonnet-4-6"
-ORCHESTRATOR_PROVIDER: str = os.getenv("ORCHESTRATOR_PROVIDER", "anthropic")  # "anthropic" | "openrouter"
+ORCHESTRATOR_PROVIDER: str = os.getenv("ORCHESTRATOR_PROVIDER", "anthropic")  # "anthropic" | "openrouter" | "gemini"
 ORCHESTRATOR_API_MODEL: str = os.getenv("ORCHESTRATOR_API_MODEL", "openrouter/auto")
+
+# Gemini orchestrator (ORCHESTRATOR_PROVIDER=gemini) — calls Google's OpenAI-compatible
+# endpoint directly with GOOGLE_API_KEY, so the AI Studio free tier applies (unlike routing
+# the same model through OpenRouter, which always bills).
+GEMINI_ORCHESTRATOR_MODEL: str = os.getenv("GEMINI_ORCHESTRATOR_MODEL", "gemini-2.5-flash")
 
 # Comma-separated fallback models tried in order when the primary is rate-limited
 # e.g. "nvidia/nemotron-3-super-120b-a12b:free,meta-llama/llama-3.3-70b-instruct:free"
@@ -73,6 +78,7 @@ LOCAL_FIRST_TASK_TYPES: set[str] = set(
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
 GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY: str | None = os.getenv("OPENROUTER_API_KEY")
+GOOGLE_API_KEY: str | None = os.getenv("GOOGLE_API_KEY")
 
 # Default JWT secret injected into generated full-stack projects that include auth tasks.
 # Workers read JWT_SECRET from this env var at code-gen time so .env.example is pre-populated.

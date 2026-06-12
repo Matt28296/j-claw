@@ -10,6 +10,7 @@ from config import (
     ORCHESTRATOR_MODEL, ANTHROPIC_API_KEY, ORCHESTRATOR_PROMPT_PATH,
     ORCHESTRATOR_API_MODEL, ORCHESTRATOR_FALLBACK_MODELS, OPENROUTER_API_KEY,
     ORCHESTRATOR_MAX_TOKENS, EXECUTION_ERROR_MODEL, ORCHESTRATOR_TIMEOUT,
+    GOOGLE_API_KEY, GEMINI_ORCHESTRATOR_MODEL,
 )
 from validator import validate_response, OrchestratorOutputError
 from cache_telemetry import log_cache_usage
@@ -121,16 +122,22 @@ class Orchestrator:
         raise RuntimeError(f"Orchestrator failed after {max_retries + 1} attempts: {last_error}") from last_error
 
 
-class OpenRouterOrchestrator:
-    def __init__(self) -> None:
-        if not OPENROUTER_API_KEY:
-            raise RuntimeError("OPENROUTER_API_KEY is not set. Add it to harness/.env.")
+class _OpenAICompatOrchestrator:
+    """Orchestrator over any OpenAI-compatible chat-completions endpoint.
+
+    Subclasses supply credentials, base_url, and the model fallback chain;
+    the call/validate/retry logic is identical across providers.
+    """
+
+    def __init__(self, api_key: str, base_url: str, model_chain: list[str],
+                 headers: dict | None = None) -> None:
         from openai import OpenAI
         self._client = OpenAI(
-            api_key=OPENROUTER_API_KEY,
-            base_url="https://openrouter.ai/api/v1",
-            default_headers={"X-Title": "J-Claw"},
+            api_key=api_key,
+            base_url=base_url,
+            default_headers=headers or {},
         )
+        self._model_chain = model_chain
         self._system_prompt = ORCHESTRATOR_PROMPT_PATH.read_text(encoding="utf-8")
 
     def call(self, payload: dict, max_retries: int = 3) -> dict:
@@ -139,7 +146,7 @@ class OpenRouterOrchestrator:
         user_message = json.dumps(payload)
         last_error: Exception | None = None
 
-        model_chain = [ORCHESTRATOR_API_MODEL] + ORCHESTRATOR_FALLBACK_MODELS
+        model_chain = self._model_chain
         current_model = model_chain[0]
         model_idx = 0
 
@@ -190,8 +197,34 @@ class OpenRouterOrchestrator:
                     time.sleep(2 + attempt)
 
         raise RuntimeError(
-            f"OpenRouterOrchestrator failed after {max_retries + 1} attempts: {last_error}"
+            f"{type(self).__name__} failed after {max_retries + 1} attempts: {last_error}"
         ) from last_error
+
+
+class OpenRouterOrchestrator(_OpenAICompatOrchestrator):
+    def __init__(self) -> None:
+        if not OPENROUTER_API_KEY:
+            raise RuntimeError("OPENROUTER_API_KEY is not set. Add it to harness/.env.")
+        super().__init__(
+            api_key=OPENROUTER_API_KEY,
+            base_url="https://openrouter.ai/api/v1",
+            model_chain=[ORCHESTRATOR_API_MODEL] + ORCHESTRATOR_FALLBACK_MODELS,
+            headers={"X-Title": "J-Claw"},
+        )
+
+
+class GeminiOrchestrator(_OpenAICompatOrchestrator):
+    """Gemini via Google's OpenAI-compatible endpoint, called directly so the
+    AI Studio free tier applies (routing the same model through OpenRouter bills)."""
+
+    def __init__(self) -> None:
+        if not GOOGLE_API_KEY:
+            raise RuntimeError("GOOGLE_API_KEY is not set. Add it to harness/.env.")
+        super().__init__(
+            api_key=GOOGLE_API_KEY,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            model_chain=[GEMINI_ORCHESTRATOR_MODEL, "gemini-2.5-flash-lite"],
+        )
 
 
 def _sanitize(text: str) -> str:
