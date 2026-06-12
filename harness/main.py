@@ -75,17 +75,31 @@ def _handoff_has_stamp_issues(handoff_path: Path) -> bool:
         return False
 
 
+def _dashboard_running() -> bool:
+    """True when something already listens on the dashboard port. Prevents every
+    build run from stacking another dashboard.py onto the port (Windows allows
+    multiple binds via SO_REUSEADDR; stale instances then wedge the connection
+    lottery and the UI stops getting data)."""
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", DASHBOARD_PORT), timeout=1.0):
+            return True
+    except OSError:
+        return False
+
+
 def _start_dashboard() -> None:
     """Start dashboard.py in the background and optionally open the browser."""
     import subprocess
     repo_root = Path(__file__).parent.parent
     try:
-        subprocess.Popen(
-            [sys.executable, "dashboard.py"],
-            cwd=str(repo_root),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if not _dashboard_running():
+            subprocess.Popen(
+                [sys.executable, "dashboard.py"],
+                cwd=str(repo_root),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         if DASHBOARD_AUTOOPEN:
             import webbrowser, time as _t
             _t.sleep(0.8)
