@@ -10,7 +10,7 @@ import anthropic
 from pathlib import Path
 from rich.console import Console
 
-from config import ANTHROPIC_API_KEY, ORCHESTRATOR_MODEL
+from config import ANTHROPIC_API_KEY, FINAL_REVIEW_MODEL
 from cache_telemetry import log_cache_usage
 from cost import record_usage
 
@@ -85,13 +85,13 @@ def run_final_review(output_dir: Path, spec: dict) -> bool:
         try:
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
             response = client.messages.create(
-                model=ORCHESTRATOR_MODEL,
+                model=FINAL_REVIEW_MODEL,
                 max_tokens=1024,
                 system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": user_message}],
             )
             log_cache_usage(response.usage, "review")
-            record_usage(response.usage, ORCHESTRATOR_MODEL, "review")
+            record_usage(response.usage, FINAL_REVIEW_MODEL, "review")
             review_text = response.content[0].text.strip()
             break
         except Exception as exc:  # noqa: BLE001
