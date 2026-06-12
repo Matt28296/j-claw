@@ -110,6 +110,19 @@ class Orchestrator:
                 if attempt < max_retries:
                     time.sleep(2 + attempt)
 
+            except (anthropic.RateLimitError, anthropic.InternalServerError, anthropic.APIConnectionError) as exc:
+                # 429 rate limits and transient server errors (529 overloaded, 5xx,
+                # dropped connections) resolve on their own — back off and retry
+                # instead of crashing the sub-project.
+                last_error = exc
+                wait = 20 * (attempt + 1)
+                console.print(
+                    f"[yellow]Orchestrator unavailable ({type(exc).__name__}) — "
+                    f"waiting {wait}s (attempt {attempt + 1}/{max_retries + 1})…[/yellow]"
+                )
+                if attempt < max_retries:
+                    time.sleep(wait)
+
             except (json.JSONDecodeError, OrchestratorOutputError) as exc:
                 last_error = exc
                 if attempt < max_retries:
@@ -141,7 +154,7 @@ class _OpenAICompatOrchestrator:
         self._system_prompt = ORCHESTRATOR_PROMPT_PATH.read_text(encoding="utf-8")
 
     def call(self, payload: dict, max_retries: int = 3) -> dict:
-        from openai import RateLimitError
+        from openai import APIConnectionError, InternalServerError, RateLimitError
         state = payload.get("system_state", "INIT")
         user_message = json.dumps(payload)
         last_error: Exception | None = None
@@ -168,13 +181,17 @@ class _OpenAICompatOrchestrator:
                 validate_response(state, parsed)
                 return parsed
 
-            except RateLimitError as exc:
+            except (RateLimitError, InternalServerError, APIConnectionError) as exc:
+                # 429 rate limits AND transient server-side failures (503 UNAVAILABLE,
+                # 5xx, dropped connections) — all benefit from the same fallback-model
+                # switch + backoff. Gemini free tier in particular throws intermittent
+                # 503s under load that resolve within seconds.
                 last_error = exc
                 # Try next fallback model before waiting
                 model_idx += 1
                 if model_idx < len(model_chain):
                     current_model = model_chain[model_idx]
-                    console.print(f"[yellow]Orchestrator rate limited — switching to fallback: {current_model}[/yellow]")
+                    console.print(f"[yellow]Orchestrator unavailable ({type(exc).__name__}) — switching to fallback: {current_model}[/yellow]")
                 else:
                     # All models exhausted for this attempt — wait then reset
                     model_idx = 0
@@ -183,7 +200,7 @@ class _OpenAICompatOrchestrator:
                         wait = int(exc.response.json()["error"]["metadata"]["retry_after_seconds"]) + 2
                     except Exception:
                         wait = 35 * (attempt + 1)
-                    console.print(f"[yellow]All orchestrator models rate limited — waiting {wait}s (attempt {attempt + 1}/{max_retries + 1})…[/yellow]")
+                    console.print(f"[yellow]All orchestrator models unavailable — waiting {wait}s (attempt {attempt + 1}/{max_retries + 1})…[/yellow]")
                     if attempt < max_retries:
                         time.sleep(wait)
 
