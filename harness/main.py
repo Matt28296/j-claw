@@ -396,7 +396,8 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         # to exist (rendering it on demand) even if every task was mistyped with
         # verification "none" — otherwise a film build can go green frameless.
         if spec_stack(instance.spec) in ("film", "video-editor"):
-            from verification import _ensure_rendered, _run_ffprobe_check, _find_project_videos
+            from verification import (_ensure_rendered, _run_ffprobe_check, _find_project_videos,
+                                      _probe_duration, expected_film_duration)
             rendered, render_log = _ensure_rendered(output_dir)
             videos = _find_project_videos(output_dir, min_bytes=1024)
             if not videos:
@@ -409,6 +410,19 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
                 if not probe_ok:
                     ok = False
                     issues.append(f"Rendered video failed ffprobe: {probe_log[:300]}")
+                else:
+                    # Duration honesty: ffprobe passes any >0.05s clip, so a
+                    # 1-second render of a 20-second scene would sail through
+                    # (observed live). Fail when the render is under half the
+                    # spec/shotlist expectation.
+                    expected = expected_film_duration(output_dir, instance.spec)
+                    actual = _probe_duration(videos[0])
+                    if expected and actual is not None and actual < 0.5 * expected:
+                        ok = False
+                        msg = (f"Rendered video is {actual:.1f}s but the spec/shotlist "
+                               f"expects ~{expected:.0f}s — the render is incomplete")
+                        sw.on_verification_result("project", "film_duration", ecosystem, False, msg)
+                        issues.append(msg)
         return ok, issues
 
     if not manual:

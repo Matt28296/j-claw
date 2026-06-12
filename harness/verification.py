@@ -1009,6 +1009,52 @@ def _run_video_evidence_check(method: str, task, project_dir: Path) -> tuple[boo
     return _run_sync_check(target)
 
 
+def _probe_duration(video_path: Path) -> float | None:
+    """Container duration in seconds via ffprobe, or None when unavailable."""
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(video_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float(result.stdout.strip())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def expected_film_duration(project_dir: Path, spec: dict | None = None) -> float | None:
+    """Expected film duration: the sum of shotlist.json shot durations (the
+    director prompt requires that manifest), else an 'N-second' phrase in the
+    spec goal. None when no expectation is derivable — the duration check is
+    then skipped (false-negative bias)."""
+    import json as _json
+    import re as _re
+    for name in ("shotlist.json", "shot_list.json"):
+        p = project_dir / name
+        if p.exists():
+            try:
+                data = _json.loads(p.read_text(encoding="utf-8"))
+                shots = data if isinstance(data, list) else data.get("shots", [])
+                total = sum(
+                    float(s.get("duration_seconds", 0) or 0)
+                    for s in shots if isinstance(s, dict)
+                )
+                if total > 0:
+                    return total
+            except Exception:  # noqa: BLE001
+                pass
+    m = _re.search(r"(\d+(?:\.\d+)?)[\s-]*second", (spec or {}).get("goal", ""))
+    if m:
+        try:
+            value = float(m.group(1))
+            return value if value > 0 else None
+        except ValueError:
+            pass
+    return None
+
+
 def _run_ffprobe_check(video_path: Path) -> tuple[bool, str]:
     """Run ffprobe on video_path to verify it has a valid video stream with duration > 0.05s."""
     import json as _json
