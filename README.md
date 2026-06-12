@@ -391,12 +391,24 @@ Run a deployment command automatically after every successful project build:
 
 ```
 # harness/.env
-DEPLOY_HOOK=vercel --prod --yes          # Vercel
-DEPLOY_HOOK=netlify deploy --prod        # Netlify
-DEPLOY_HOOK=railway up                   # Railway
+DEPLOY_HOOK=<venv-python> harness\deploy_netlify.py   # Netlify (recommended — see below)
+DEPLOY_HOOK=vercel --prod --yes                       # Vercel
+DEPLOY_HOOK=railway up                                # Railway
+DEPLOY_TIMEOUT=300
 ```
 
-The hook runs in the project output directory after git commit. The deployment URL is extracted from the command output and written to `HANDOFF.md`.
+The hook runs in the project output directory after git commit, **gated to static web
+stacks** (`vanilla`, `react-vite`, `phaser`, `three-js`) — APIs, films, and desktop apps
+are skipped with an honest `⊘` note instead of half-deployed. The outcome (URL or
+skip/failure reason) is written to a `## Deployment` section in `HANDOFF.md` and included
+in the Telegram terminal push.
+
+**`harness/deploy_netlify.py`** makes Netlify deploys truly unattended (a bare
+`netlify deploy` prompts interactively in an unlinked directory): it authenticates via
+`NETLIFY_AUTH_TOKEN` (create one at app.netlify.com → User settings → Applications),
+finds-or-creates one site per project (`jclaw-<slug>` — re-runs redeploy the same URL),
+publishes `dist/` when present (react-vite) else the project root, and prints exactly one
+URL for the harness to record. Missing token = loud recorded failure, never a hang.
 
 ---
 
@@ -487,12 +499,33 @@ Every project writes to `harness/projects/<slug>/`:
 | **Phase 2 — movies pipeline:** `generate_video` reads `task.files` + ffmpeg render, real film/video-editor director→renderer prompts, `music_worker` real-backend gate, honest `frame_integrity`/`sync_check` (`056ad67`) | ✅ |
 | **OpenClaw bot fixed (2026-06-04):** Haiku router + `tools.profile: minimal`; replies confirmed live (root cause: stale orphaned gateway process) | ✅ |
 | **Pre-merge review fixes:** failure-handoff phase tracking made functional; worker-timeout liveness limitation documented (`7c7656e`) | ✅ |
+| **Completeness gate + cost telemetry (PR #10):** static stub/asset/duplicate-decl checks gate per-task and project-level; per-build Anthropic cost + prompt-cache telemetry | ✅ |
+| **Telegram terminal push (PR #11):** `notify.py` pushes PASS/FAIL/crash with heal cycles, cost line, HANDOFF path, deploy URL — the factory is silent while working, loud at the end | ✅ |
+| **Telegram FIFO queue + `/continue` (PR #13):** builds queue strictly sequentially (one GPU); feature additions to existing projects from the phone | ✅ |
+| **Experience lessons → planning (PR #14):** recurring failure patterns per stack aggregated into a ≤500-token lessons block in the orchestrator INIT/DAG payloads | ✅ |
+| **Film render execution + honest video gates (PR #15, 2026-06-11):** `_ensure_rendered` executes the project's render pipeline (ffmpeg edit-script lines / Python entry) as part of verification; missing video now **FAILS** ffprobe/frame/sync instead of "auto-passed"; film stacks never get silent placeholder videos; `completeness.py` statically flags entry-script imports to never-written modules | ✅ |
+| **FORMAT 5 aggregation + parent film assembly (PR #16):** sub-project outcomes collected (one crashed scene no longer sinks the rest); parent exit code + single aggregate Telegram push reflect honest aggregate; parent concatenates scene clips → frame-checked `final.mp4`; aggregate parent `HANDOFF.md` | ✅ |
+| **Unattended Netlify deployment (PR #17):** `deploy_netlify.py` wrapper + stack gating + `## Deployment` in HANDOFF — see Deployment Hooks | ✅ |
+| **Validation-driven hardening (PRs #18–#23, 2026-06-11):** six defects caught by live film validation runs — FORMAT 5 recursion spiral stopped (runtime `decomposition_allowed: false`); assembly sub-projects detected by name/goal/dependency-shape and skipped; render shell scripts executed via Git Bash (WSL-stub rejected); task completion gated on declared files actually existing; video tasks routed by output not label; final review fails **closed** on API errors, can finally see `.sh`/`.sol`/`.gd` files, and all stack reads go through `config.spec_stack()` (was silently reading an empty top-level key) | ✅ |
 
 ---
 
 ## Current Status & What's Left to Finalize
 
-A supervised live build (a vanilla multi-page site, 2026-06-04) validated the pipeline end-to-end: the full Creative Director → Architect → Orchestrator → worker → verify → **honest gate** → self-heal flow ran with no hang, correctly exited **"ISSUES FOUND"** instead of false-greening, and the Phase 1 changes above all fired as designed. That run also surfaced the real, honest state of the system — **and every actionable issue it surfaced has since been fixed and merged to `main` via PR #5** (escalation tax, heal-loop convergence, movies Phase 2, OpenClaw bot). The pipeline now awaits a fresh supervised run to confirm the engine fixes against merged `main`.
+**2026-06-11 — the "hands-off product factory" roadmap is code-complete (PRs #10–#23).** The
+target: Telegram is the only human interface; builds queue and run unattended; finished web
+builds auto-deploy to a reachable URL; the operator is contacted only on terminal outcome.
+All machinery for that is merged: completeness gate, cost telemetry, terminal Telegram push,
+FIFO queue + `/continue`, experience-lessons feedback, film render execution with honest
+gates, FORMAT 5 aggregation + parent assembly, and unattended Netlify deployment.
+
+A vanilla validation build (2026-06-04 baseline rerun) **PASSED end-to-end** against merged
+main. The film-stack validation drove seven live runs, each catching and fixing a real
+defect (PRs #18–#23 — see the roadmap table); the final rerun is **blocked on Anthropic API
+credits**, and live deploy validation is **blocked on a `NETLIFY_AUTH_TOKEN`** — both
+operator-side items, not code. After those: the factory rehearsal acceptance test (queue a
+website, a `/continue` feature, and a film from Telegram only; verify URLs, pushes, honest
+failure + crash drills, FIFO, cold start).
 
 ### Honest capability scorecard
 
@@ -503,7 +536,7 @@ Rough confidence that an unattended run from a *detailed* prompt yields a finish
 | 🟢 **Websites** (static / SPA / simple full-stack) | ~80% | Strong stacks + the one category with a real verification backbone (`npm`/`pip` build gates genuinely block). Closest to true one-shot. |
 | 🟡 **Videogames** (Phaser / Three.js) | ~70% | Strong generation; gates now catch JS errors + dead canvas, but there is still no *gameplay* validation ("is it winnable"). |
 | 🟡 **Apps / Dapps** | ~65% web | Web apps + web3 dapps are solid; desktop (Electron/Tauri) generates but verifies thinly; native mobile (Swift/Kotlin) **cannot be built/verified on Windows** — generate-only. |
-| 🟡 **Movies** (film / video / music) | ~40% *(pending live test)* | **Phase 2 landed:** `generate_video` now reads `task.files` and renders via ffmpeg; real `film`/`video-editor` director→renderer prompts; `music_worker` gates on a real backend (audiocraft / `MUSICGEN_API_URL`); honest `frame_integrity`/`sync_check` (ffprobe). **Not yet live-validated** — needs `ffmpeg`/`ffprobe` installed to actually render+verify (honest SKIP otherwise). |
+| 🟡 **Movies** (film / video / music) | ~55% *(validation in progress)* | **ffmpeg/ffprobe installed; the render actually executes now.** Verification runs the project's render pipeline (`render.sh` via Git Bash, ffmpeg edit-script lines, or a Python entry) and a missing/stub video **fails** the build — no more hollow greens. The parent assembles per-scene clips into a frame-checked `final.mp4`. Seven live validation runs each removed a real defect (PRs #18–#23); the ceiling that remains is worker quality (the local model writing a correct 20s filtergraph vs a 1s one — heal escalation to Sonnet covers part of this). Final end-to-end validation pending API credits. |
 
 ### Issues surfaced by validation — now addressed on `main`
 
@@ -535,11 +568,28 @@ fourth is structural and remains by design.
 
 ### Remaining work to finalize (priority order)
 
-1. **Re-run a supervised build against merged `main`** — confirm the escalation-tax + convergence fixes drop the Sonnet-escalation count vs the 2026-06-04 baseline. *(Pre-req: free GPU VRAM — unload any pinned model so `qwen2.5-coder:14b` loads cleanly; optionally `OLLAMA_MAX_LOADED_MODELS=1`.)*
-2. **Movies — live-validate:** install `ffmpeg`/`ffprobe`, run a "10-second video" build, and confirm it actually renders + verifies (otherwise honest SKIP).
-3. **Phase 3 — native mobile verification:** stand up a macOS/Android CI runner, or explicitly mark Swift/Kotlin as "generate-only, human-verified" so the pipeline doesn't over-claim.
-4. **Carry-overs:** Playwright runner task inside the orchestrator DAG; IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect multi-vendor.
-5. **Optional hardening / polish:** worker-timeout hard bound (`shutdown(wait=False, cancel_futures=True)` + audit inner timeouts); OpenClaw bot self-description (says it routes to `qwen2.5-coder:14b` — actually the 3-rung ladder); prune the 6 stale `worktree-agent-*` branches and the dangling Ollama manifests.
+1. **Operator: top up Anthropic API credits** — the film validation rerun crashed in INIT on
+   `credit balance is too low` (2026-06-11). The crash path itself behaved: failure HANDOFF
+   written, Telegram crash push sent.
+2. **Operator: add `NETLIFY_AUTH_TOKEN` to `harness/.env`** (app.netlify.com → User settings
+   → Applications → New access token). `DEPLOY_HOOK`/`DEPLOY_TIMEOUT` are already configured;
+   without the token, web builds record a loud deploy-failure note and continue.
+3. **Re-run the film validation** (`film_validation_v2` recovery command in its HANDOFF) —
+   acceptance: real per-scene mp4s, probe-clean `final.mp4`, zero silent skips, one aggregate
+   Telegram push, honest exit code.
+4. **Live-validate deployment** — tiny vanilla build → URL in HANDOFF + Telegram + HTTP 200;
+   re-run → same site; fastapi build → honest ⊘ skip.
+5. **Factory rehearsal (acceptance test for "hands-off factory"):** from Telegram only —
+   `/run` a website (live URL), `/continue` a feature (same URL redeployed), `/run` a film
+   (aggregate push), an impossible intent (honest FAIL push), kill Ollama mid-build (crash
+   push), two queued builds (strict FIFO), reboot + repeat (no interactive auth anywhere).
+6. **Known quality gap (not a gate):** scene duration honesty — ffprobe passes any video
+   > 0.05s, so a 1-second render of a 20-second scene passes the probe (the Claude review
+   usually catches it). A duration-vs-shotlist assertion would close it.
+7. **Carry-overs:** native mobile CI runner (or stays generate-only); Playwright runner task
+   inside the orchestrator DAG; IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect;
+   worker-timeout hard bound; prune stale `worktree-agent-*` branches + dangling Ollama
+   manifests.
 
 ---
 

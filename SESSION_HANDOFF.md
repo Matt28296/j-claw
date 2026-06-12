@@ -1,16 +1,78 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-04**. Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-11** (previous: 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**All session work is MERGED to `main`.** `main` is at **`dc0f854`** (PR #5 + PR #6 both merged).
-Working tree clean. Direct push to `main` is intentionally blocked — land changes via PR.
+**All session work is MERGED to `main`** (PRs #10–#23). Working tree clean.
+Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
 
-## ✅ DONE THIS SESSION (all merged to `main`)
+## ✅ DONE 2026-06-11 — "hands-off product factory" roadmap (PRs #10–#23)
+
+Goal locked with the operator: Telegram is the only human interface; builds queue and run
+unattended; web builds auto-deploy to a URL; operator contacted only on terminal outcome.
+
+1. **PR #10** — completeness gate (static stub/asset checks gate per-task + project) +
+   per-build cost & prompt-cache telemetry. Vanilla validation build **PASSED** post-merge.
+2. **PR #11** — `notify.py`: Telegram push on terminal outcome (PASS/FAIL/crash + heal
+   cycles + cost + HANDOFF path + deploy URL). Live round-trip confirmed.
+3. **PR #12** — README stack tiers: verified vs generate-only, verification-depth legend.
+4. **PR #13** — Telegram FIFO build queue (strictly sequential, one GPU) + `/continue`
+   command; `/cancel queue|all`.
+5. **PR #14** — experience.jsonl lessons aggregated per stack into orchestrator INIT/DAG
+   payloads (deterministic, ≤500 tokens, no extra LLM call).
+6. **PR #15** — film render EXECUTION + honest video gates: `_ensure_rendered` runs the
+   render (ffmpeg edit-script lines / Python entry) inside verification; missing video FAILS
+   ffprobe/frame/sync (was "auto-passed: no video files"); film stacks never get placeholder
+   videos; `completeness._missing_python_imports` flags imports to never-written modules;
+   mistyped all-video tasks route to video_worker; video tasks must pass their declared
+   verification. ffmpeg/ffprobe 8.1.1 installed via winget, on persistent PATH.
+7. **PR #16** — FORMAT 5 aggregation: `run_project` returns the verdict; one crashed scene
+   no longer sinks the rest; parent HANDOFF aggregates per-scene ✓/✗; parent assembles scene
+   clips → frame-checked `final.mp4` (`video_worker.assemble_film`); ONE aggregate Telegram
+   push (sub-projects quiet); exit code honest; `handoff._MAX_HEAL` now reads config.
+8. **PR #17** — unattended Netlify deploy: `deploy_netlify.py` (token auth, find-or-create
+   site `jclaw-<slug>`, `--json`, prints one URL); deploys gated to static web stacks with
+   honest ⊘ skip; `## Deployment` section in HANDOFF. `.env` has DEPLOY_HOOK + DEPLOY_TIMEOUT;
+   **NETLIFY_AUTH_TOKEN still needed from operator.**
+9. **PRs #18–#23 — seven live film-validation runs, each caught a real defect:**
+   - **#18** FORMAT 5 recursion spiral (scene → scripts → …): sub-project INIT payloads carry
+     `decomposition_allowed: false`; one corrective retry then honest fail; rule 21 exception.
+   - **#19** assembly sub-projects detected by dependency shape (depends on all siblings).
+   - **#20** render shell scripts EXECUTED via Git Bash (`_find_bash` rejects the WindowsApps
+     WSL stub); workers wrap ffmpeg in preflight/variables so line-scraping wasn't enough.
+   - **#21** task completion gated on declared files actually existing on disk (worker
+     returned plausible JSON, task "done", render.sh never written — 3 heal cycles burned).
+   - **#22** video tasks routed by OUTPUT not label (a type:video task declaring only
+     render.sh went to video_worker, which renders but doesn't author — silently skipped).
+   - **#23** final review fails CLOSED on API error (a crashed review call had green-lit a
+     scene with zero video); `.sh`/`.sol`/`.gd` added to reviewable extensions (reviewer
+     literally couldn't see render.sh); `config.spec_stack()` helper — film gates keyed on
+     empty top-level `spec["stack"]` while FORMAT 1 nests it under `architecture.stack`.
+
+### ⛔ BLOCKED ON OPERATOR (both items, then ~1 session to finish)
+1. **Anthropic API credits exhausted** — film validation attempt 7 crashed in INIT
+   (`credit balance is too low`, 2026-06-11). Crash path behaved: failure HANDOFF + Telegram
+   crash push. Recovery command is in `harness/projects/film_validation_v2/HANDOFF.md`.
+2. **NETLIFY_AUTH_TOKEN** — create at app.netlify.com → User settings → Applications, paste
+   into the commented line in `harness/.env`.
+
+### Then remaining:
+- Film validation rerun (acceptance: real per-scene mp4s, probe-clean `final.mp4`, zero
+  silent skips, one aggregate push, honest exit code).
+- Live deploy validation (vanilla → URL 200; re-run same site; fastapi → ⊘ skip).
+- **Factory rehearsal** (the binding acceptance test): from Telegram only — website with live
+  URL, `/continue` redeploy, film, impossible-intent FAIL push, kill-Ollama crash push,
+  two-build FIFO, reboot + repeat.
+- Known quality gap (not a gate): ffprobe passes any >0.05s video, so a 1s render of a 20s
+  scene passes the probe; duration-vs-shotlist assertion would close it.
+
+---
+
+## ✅ DONE 2026-06-04 (previous session, all merged to `main`)
 
 1. **Sprint A** (`ac3bdce`) — worker ladder (`qwen3:8b → qwen2.5-coder:14b → sonnet`), paid-call
    budget (`MAX_PAID_WORKER_CALLS=15`), dispatch timeouts, bounded heal loop, mypy/ruff.
