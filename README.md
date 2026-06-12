@@ -507,25 +507,32 @@ Every project writes to `harness/projects/<slug>/`:
 | **FORMAT 5 aggregation + parent film assembly (PR #16):** sub-project outcomes collected (one crashed scene no longer sinks the rest); parent exit code + single aggregate Telegram push reflect honest aggregate; parent concatenates scene clips → frame-checked `final.mp4`; aggregate parent `HANDOFF.md` | ✅ |
 | **Unattended Netlify deployment (PR #17):** `deploy_netlify.py` wrapper + stack gating + `## Deployment` in HANDOFF — see Deployment Hooks | ✅ |
 | **Validation-driven hardening (PRs #18–#23, 2026-06-11):** six defects caught by live film validation runs — FORMAT 5 recursion spiral stopped (runtime `decomposition_allowed: false`); assembly sub-projects detected by name/goal/dependency-shape and skipped; render shell scripts executed via Git Bash (WSL-stub rejected); task completion gated on declared files actually existing; video tasks routed by output not label; final review fails **closed** on API errors, can finally see `.sh`/`.sol`/`.gd` files, and all stack reads go through `config.spec_stack()` (was silently reading an empty top-level key) | ✅ |
+| **Film duration honesty (PR #25):** rendered video under half the expected duration (shotlist sum or "N-second" goal phrase) fails the build — ffprobe alone passed a 1-second render of a 20-second scene | ✅ |
+| **Netlify deployment LIVE-VALIDATED (PR #26, 2026-06-12):** token configured; wrapper hardened from live testing — site management via Netlify REST API (the CLI's Windows cmd shim mangled JSON and minted randomly-named sites), CLI candidates probed with `--version` (both pre-existing installs were broken), `.env` self-load. Proof: two consecutive deploys → same named site, HTTP 200 | ✅ |
 
 ---
 
 ## Current Status & What's Left to Finalize
 
-**2026-06-11 — the "hands-off product factory" roadmap is code-complete (PRs #10–#23).** The
-target: Telegram is the only human interface; builds queue and run unattended; finished web
-builds auto-deploy to a reachable URL; the operator is contacted only on terminal outcome.
-All machinery for that is merged: completeness gate, cost telemetry, terminal Telegram push,
-FIFO queue + `/continue`, experience-lessons feedback, film render execution with honest
-gates, FORMAT 5 aggregation + parent assembly, and unattended Netlify deployment.
+**2026-06-12 — the "hands-off product factory" roadmap is code-complete (PRs #10–#26), and
+deployment is live-validated.** The target: Telegram is the only human interface; builds
+queue and run unattended; finished web builds auto-deploy to a reachable URL; the operator
+is contacted only on terminal outcome. All machinery for that is merged: completeness gate,
+cost telemetry, terminal Telegram push, FIFO queue + `/continue`, experience-lessons
+feedback, film render execution with honest gates (including duration honesty), FORMAT 5
+aggregation + parent assembly, and unattended Netlify deployment.
 
-A vanilla validation build (2026-06-04 baseline rerun) **PASSED end-to-end** against merged
-main. The film-stack validation drove seven live runs, each catching and fixing a real
-defect (PRs #18–#23 — see the roadmap table); the final rerun is **blocked on Anthropic API
-credits**, and live deploy validation is **blocked on a `NETLIFY_AUTH_TOKEN`** — both
-operator-side items, not code. After those: the factory rehearsal acceptance test (queue a
-website, a `/continue` feature, and a film from Telegram only; verify URLs, pushes, honest
-failure + crash drills, FIFO, cold start).
+Validated so far: a vanilla build **PASSED end-to-end** against merged main; the Telegram
+push and crash paths are live-confirmed; **Netlify deployment is live-validated** (named
+site, idempotent re-deploys, HTTP 200 — see the roadmap table for the three real wrapper
+defects the live test exposed and fixed). The film-stack validation drove seven live runs,
+each catching and fixing a real defect (PRs #18–#23).
+
+**The single remaining blocker is Anthropic API credits** (the account the harness key
+belongs to is exhausted; every build needs Claude for the director/architect/orchestrator/
+review layers). Once topped up: rerun the film validation, then the factory rehearsal
+acceptance test (queue a website, a `/continue` feature, and a film from Telegram only;
+verify live URLs, pushes, honest failure + crash drills, FIFO, cold start).
 
 ### Honest capability scorecard
 
@@ -569,27 +576,24 @@ fourth is structural and remains by design.
 ### Remaining work to finalize (priority order)
 
 1. **Operator: top up Anthropic API credits** — the film validation rerun crashed in INIT on
-   `credit balance is too low` (2026-06-11). The crash path itself behaved: failure HANDOFF
-   written, Telegram crash push sent.
-2. **Operator: add `NETLIFY_AUTH_TOKEN` to `harness/.env`** (app.netlify.com → User settings
-   → Applications → New access token). `DEPLOY_HOOK`/`DEPLOY_TIMEOUT` are already configured;
-   without the token, web builds record a loud deploy-failure note and continue.
-3. **Re-run the film validation** (`film_validation_v2` recovery command in its HANDOFF) —
-   acceptance: real per-scene mp4s, probe-clean `final.mp4`, zero silent skips, one aggregate
-   Telegram push, honest exit code.
-4. **Live-validate deployment** — tiny vanilla build → URL in HANDOFF + Telegram + HTTP 200;
-   re-run → same site; fastapi build → honest ⊘ skip.
-5. **Factory rehearsal (acceptance test for "hands-off factory"):** from Telegram only —
-   `/run` a website (live URL), `/continue` a feature (same URL redeployed), `/run` a film
-   (aggregate push), an impossible intent (honest FAIL push), kill Ollama mid-build (crash
-   push), two queued builds (strict FIFO), reboot + repeat (no interactive auth anywhere).
-6. **Known quality gap (not a gate):** scene duration honesty — ffprobe passes any video
-   > 0.05s, so a 1-second render of a 20-second scene passes the probe (the Claude review
-   usually catches it). A duration-vs-shotlist assertion would close it.
-7. **Carry-overs:** native mobile CI runner (or stays generate-only); Playwright runner task
+   `credit balance is too low` (2026-06-11; re-confirmed 2026-06-12). The crash path itself
+   behaved: failure HANDOFF written, Telegram crash push sent. **This is the only blocker.**
+2. **Re-run the film validation** (`film_validation_v2` recovery command in its HANDOFF) —
+   acceptance: real per-scene mp4s at honest durations, probe-clean `final.mp4`, zero silent
+   skips, one aggregate Telegram push, honest exit code.
+3. **Factory rehearsal (acceptance test for "hands-off factory"):** from Telegram only —
+   `/run` a website (live URL — covers pipeline-integrated deploy + HANDOFF `## Deployment`
+   verification), `/continue` a feature (same URL redeployed), `/run` a film (aggregate
+   push), an impossible intent (honest FAIL push), kill Ollama mid-build (crash push), two
+   queued builds (strict FIFO), reboot + repeat (no interactive auth anywhere). All green →
+   update README/SESSION_HANDOFF to "factory" status.
+4. **Carry-overs:** native mobile CI runner (or stays generate-only); Playwright runner task
    inside the orchestrator DAG; IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect;
    worker-timeout hard bound; prune stale `worktree-agent-*` branches + dangling Ollama
    manifests.
+
+~~Add `NETLIFY_AUTH_TOKEN`~~ — **done 2026-06-12**, deploy live-validated (PR #26).
+~~Duration honesty gap~~ — **closed** (PR #25).
 
 ---
 

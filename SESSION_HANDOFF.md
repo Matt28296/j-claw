@@ -1,12 +1,46 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-11** (previous: 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-12** (previous: 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**All session work is MERGED to `main`** (PRs #10–#23). Working tree clean.
+**All session work is MERGED to `main`** (PRs #10–#26). Working tree clean.
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-12 — duration honesty + Netlify LIVE (PRs #25–#26)
+
+1. **PR #25 — film duration honesty:** ffprobe passes any clip >0.05s, so a 1-second render
+   of a 20-second scene passed the probe (observed live). The film project-level gate now
+   derives the expected duration (`verification.expected_film_duration`: shotlist.json shot
+   sum, else "N-second" in the goal) and FAILS when the render is under half of it.
+2. **PR #26 — Netlify deployment LIVE-VALIDATED.** Operator's token added to `harness/.env`
+   (gitignored). Live testing exposed and fixed three wrapper defects:
+   - Both pre-existing netlify CLI installs were broken (stale standalone shadowing PATH +
+     npm-global incompatible with Node 25) — reinstalled; wrapper now probes candidates with
+     `--version` instead of trusting PATH order.
+   - JSON through the CLI's Windows cmd shim loses its quotes → createSite minted a
+     RANDOMLY-NAMED site, breaking re-deploy idempotency. Site find/create now goes through
+     the Netlify REST API directly (urllib).
+   - Wrapper self-loads `harness/.env` so standalone runs work.
+   **Proof:** two consecutive deploys both landed on https://jclaw-jclaw-deploy-test.netlify.app
+   (HTTP 200, correct content); stray misnamed site deleted from the account.
+
+### ⛔ ONE remaining blocker: Anthropic API credits
+Exhausted (probed repeatedly through 2026-06-12). Every build needs Claude for the
+director/architect/orchestrator/review layers. Top up at console.anthropic.com → Plans &
+Billing for the key in `harness/.env`. Validation builds cost ~$0.50 each (mostly cache hits).
+
+### Then remaining (execution only, no new code expected):
+1. Film validation rerun — recovery command in `harness/projects/film_validation_v2/HANDOFF.md`.
+   Acceptance: real per-scene mp4s at honest durations, probe-clean `final.mp4`, zero silent
+   skips, ONE aggregate Telegram push, honest exit code.
+2. Factory rehearsal (the binding acceptance test) — from Telegram only: `/run` website →
+   live URL; `/continue` feature → same URL redeployed; `/run` film → aggregate push;
+   impossible intent → honest FAIL push; kill Ollama mid-build → crash push; two builds →
+   strict FIFO; reboot + repeat → zero interactive auth. All green → "factory" status.
 
 ---
 
@@ -53,22 +87,11 @@ unattended; web builds auto-deploy to a URL; operator contacted only on terminal
      literally couldn't see render.sh); `config.spec_stack()` helper — film gates keyed on
      empty top-level `spec["stack"]` while FORMAT 1 nests it under `architecture.stack`.
 
-### ⛔ BLOCKED ON OPERATOR (both items, then ~1 session to finish)
-1. **Anthropic API credits exhausted** — film validation attempt 7 crashed in INIT
-   (`credit balance is too low`, 2026-06-11). Crash path behaved: failure HANDOFF + Telegram
-   crash push. Recovery command is in `harness/projects/film_validation_v2/HANDOFF.md`.
-2. **NETLIFY_AUTH_TOKEN** — create at app.netlify.com → User settings → Applications, paste
-   into the commented line in `harness/.env`.
-
-### Then remaining:
-- Film validation rerun (acceptance: real per-scene mp4s, probe-clean `final.mp4`, zero
-  silent skips, one aggregate push, honest exit code).
-- Live deploy validation (vanilla → URL 200; re-run same site; fastapi → ⊘ skip).
-- **Factory rehearsal** (the binding acceptance test): from Telegram only — website with live
-  URL, `/continue` redeploy, film, impossible-intent FAIL push, kill-Ollama crash push,
-  two-build FIFO, reboot + repeat.
-- Known quality gap (not a gate): ffprobe passes any >0.05s video, so a 1s render of a 20s
-  scene passes the probe; duration-vs-shotlist assertion would close it.
+### ⛔ Blockers as of 2026-06-11 *(superseded — see the 2026-06-12 section above: Netlify
+resolved + duration gap closed; API credits remain the sole blocker)*
+1. ~~Anthropic API credits exhausted~~ — still true 2026-06-12.
+2. ~~NETLIFY_AUTH_TOKEN~~ — resolved 2026-06-12 (PR #26, live-validated).
+3. ~~Duration honesty gap~~ — closed 2026-06-12 (PR #25).
 
 ---
 
