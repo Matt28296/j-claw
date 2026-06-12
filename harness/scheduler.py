@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, wait as _cf_wait, FIRST_EXCEP
 from pathlib import Path
 from rich.console import Console
 
-from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, MAX_PARALLEL_WORKERS, MAX_TASKS, WORKER_TASK_TIMEOUT, WORKER_LADDER
+from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, MAX_PARALLEL_WORKERS, MAX_TASKS, WORKER_TASK_TIMEOUT, WORKER_LADDER, spec_stack
 from experience_log import log_outcome, get_relevant_hints
 from project import ProjectInstance, Task
 from worker import execute_task, routed_rung
@@ -298,7 +298,7 @@ class Scheduler:
             sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
             if task.retry_count >= MAX_RETRIES_PER_TASK:
                 log_outcome(task.id, task.type, str(exc)[:200], "none", "", succeeded=False,
-                            stack=self.instance.spec.get("stack", ""))
+                            stack=spec_stack(self.instance.spec))
             self._handle_error(task)
 
     # ── error handling ────────────────────────────────────────────────────────
@@ -361,7 +361,7 @@ class Scheduler:
             refinement["action"],
             refinement["updated_tasks"][0]["objective"] if refinement.get("updated_tasks") else "",
             succeeded=True,
-            stack=self.instance.spec.get("stack", ""),
+            stack=spec_stack(self.instance.spec),
         )
 
     # ── project review ────────────────────────────────────────────────────────

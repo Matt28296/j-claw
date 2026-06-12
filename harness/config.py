@@ -5,6 +5,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def spec_stack(spec: dict) -> str:
+    """Stack of a FORMAT 1 spec. The orchestrator nests it under architecture
+    ('architecture': {'stack': 'film'}) with the top-level 'stack' usually
+    absent — reading only spec['stack'] silently disabled the film honesty
+    gates (observed live). All stack reads must go through this helper."""
+    return spec.get("stack", "") or spec.get("architecture", {}).get("stack", "")
+
 ORCHESTRATOR_MODEL: str = "claude-sonnet-4-6"
 ORCHESTRATOR_PROVIDER: str = os.getenv("ORCHESTRATOR_PROVIDER", "anthropic")  # "anthropic" | "openrouter"
 ORCHESTRATOR_API_MODEL: str = os.getenv("ORCHESTRATOR_API_MODEL", "openrouter/auto")
