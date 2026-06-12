@@ -4,6 +4,8 @@ Collects all project output files, sends them to Claude for a code review,
 writes the verdict to REVIEW.md, and returns True (pass) or False (issues found).
 """
 from __future__ import annotations
+import time
+
 import anthropic
 from pathlib import Path
 from rich.console import Console
@@ -15,7 +17,11 @@ from cost import record_usage
 console = Console()
 
 _SKIP_DIRS = {"node_modules", ".venv", "__pycache__", ".git", "dist", ".playwright"}
-_REVIEW_EXTS = {".js", ".py", ".html", ".css", ".ts", ".jsx", ".tsx", ".json", ".md"}
+# .sh/.sol/.gd were missing — the reviewer literally could not see a film
+# project's render.sh (its core deliverable) or a web3 project's contracts,
+# and kept flagging them "missing" after they were written.
+_REVIEW_EXTS = {".js", ".py", ".html", ".css", ".ts", ".jsx", ".tsx", ".json", ".md",
+                ".sh", ".sol", ".gd", ".toml", ".yml", ".yaml", ".txt"}
 _SKIP_FILES = {"REVIEW.md", "HANDOFF.md", "package-lock.json", "yarn.lock"}
 _MAX_TOTAL_CHARS = 120_000  # stay well under token limits
 
@@ -74,20 +80,30 @@ def run_final_review(output_dir: Path, spec: dict) -> bool:
         total += len(chunk)
         included.append(rel)
 
-    try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model=ORCHESTRATOR_MODEL,
-            max_tokens=1024,
-            system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user_message}],
-        )
-        log_cache_usage(response.usage, "review")
-        record_usage(response.usage, ORCHESTRATOR_MODEL, "review")
-        review_text = response.content[0].text.strip()
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"  [red]Final review API call failed: {exc}[/red]")
-        return True  # don't block the pipeline on review failure
+    review_text = None
+    for attempt in (1, 2):
+        try:
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            response = client.messages.create(
+                model=ORCHESTRATOR_MODEL,
+                max_tokens=1024,
+                system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
+                messages=[{"role": "user", "content": user_message}],
+            )
+            log_cache_usage(response.usage, "review")
+            record_usage(response.usage, ORCHESTRATOR_MODEL, "review")
+            review_text = response.content[0].text.strip()
+            break
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"  [red]Final review API call failed (attempt {attempt}/2): {exc}[/red]")
+            if attempt == 1:
+                time.sleep(5)
+    if review_text is None:
+        # Fail CLOSED: an unreviewed build must not pass. (Observed live: a
+        # crashed review call returned True and green-lit a film scene whose
+        # REVIEW.md still said ISSUES FOUND and which had rendered no video.)
+        console.print("  [bold red]Final review unavailable after retry — failing closed.[/bold red]")
+        return False
 
     passed = review_text.startswith("VERDICT: PASS")
     color = "green" if passed else "red"

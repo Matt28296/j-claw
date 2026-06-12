@@ -50,7 +50,8 @@ def generate_video(task, spec: dict, output_dir: Path) -> tuple[list[Path], dict
     """
     written: list[Path] = []
     failures: dict[str, str] = {}
-    video_is_deliverable = spec.get("stack", "") in ("film", "video-editor")
+    from config import spec_stack
+    video_is_deliverable = spec_stack(spec) in ("film", "video-editor")
 
     # Inline content the worker may have attached (keyed by relative path).
     inline = getattr(task, "output_files", {}) or {}

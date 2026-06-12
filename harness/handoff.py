@@ -325,7 +325,8 @@ def deploy_project(output_dir: Path, spec: dict) -> tuple[str | None, str]:
     from config import DEPLOY_HOOK, DEPLOY_TIMEOUT
     if not DEPLOY_HOOK:
         return None, "deploy skipped: DEPLOY_HOOK not configured"
-    stack = spec.get("stack", "") or spec.get("architecture", {}).get("stack", "")
+    from config import spec_stack
+    stack = spec_stack(spec)
     if stack not in _DEPLOYABLE_STACKS:
         note = f"deploy skipped: stack '{stack or 'unknown'}' is not a deployable web stack"
         console.print(f"  [dim]⊘ {note}[/dim]")

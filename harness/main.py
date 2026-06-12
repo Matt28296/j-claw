@@ -19,6 +19,7 @@ from config import (
     ORCHESTRATOR_API_MODEL, TECHNICAL_ARCHITECT_ENABLED, DASHBOARD_PORT, DASHBOARD_AUTOOPEN,
     PIPELINE_MAX_RETRIES,
     HEAL_MAX_CYCLES,
+    spec_stack,
 )
 from completeness import check_completeness
 
@@ -329,7 +330,7 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
     console.print("\n[bold]Generating task DAG…[/bold]")
     sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "SPEC_ACCEPTED")
     _dag_payload: dict = {"system_state": "SPEC_ACCEPTED", "accepted_spec": spec}
-    _lessons = get_stack_lessons(spec.get("stack", "") or (tech_spec or {}).get("confirmed_stack", ""))
+    _lessons = get_stack_lessons(spec_stack(spec) or (tech_spec or {}).get("confirmed_stack", ""))
     if _lessons:
         _dag_payload["past_failure_lessons"] = _lessons
     dag_response = orch.call(_dag_payload)
@@ -394,7 +395,7 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         # Film/video-editor: the rendered video IS the deliverable. Require one
         # to exist (rendering it on demand) even if every task was mistyped with
         # verification "none" — otherwise a film build can go green frameless.
-        if instance.spec.get("stack", "") in ("film", "video-editor"):
+        if spec_stack(instance.spec) in ("film", "video-editor"):
             from verification import _ensure_rendered, _run_ffprobe_check, _find_project_videos
             rendered, render_log = _ensure_rendered(output_dir)
             videos = _find_project_videos(output_dir, min_bytes=1024)
@@ -531,7 +532,7 @@ def _sub_project_stack(sp_dir: Path) -> str:
     try:
         import json as _js
         spec = _js.loads((sp_dir / "spec.json").read_text(encoding="utf-8"))
-        return spec.get("stack", "") or spec.get("architecture", {}).get("stack", "")
+        return spec_stack(spec)
     except Exception:
         return ""
 
