@@ -153,13 +153,13 @@ browser, etc.). That tooling setup must itself be a task. Never assume tooling e
 ```json
 {
   "reasoning": "optional planning scratch; ignored by downstream",
-  "project_type": "web | app | game",
+  "project_type": "web | app | game | film",
   "complexity": "low | medium",
   "goal": "one-sentence description of the final product",
   "features": ["feature as a short phrase"],
   "constraints": ["every assumption and limit made for missing info, stated explicitly"],
   "architecture": {
-    "stack": "vanilla | react-vite | fastapi | phaser | full-stack | web3 | react-native | socket-io | three-js | electron | asset",
+    "stack": "vanilla | react-vite | fastapi | phaser | full-stack | web3 | react-native | socket-io | three-js | electron | asset | film",
     "frontend": "framework or 'none'",
     "backend": "framework or 'none'",
     "database": "type or 'none'",

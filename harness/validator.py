@@ -31,7 +31,7 @@ _FORMAT1_SCHEMA = {
     "required": ["project_type", "complexity", "goal", "features",
                  "constraints", "architecture", "modules"],
     "properties": {
-        "project_type": {"type": "string", "enum": ["web", "app", "game"]},
+        "project_type": {"type": "string", "enum": ["web", "app", "game", "film"]},
         "complexity":   {"type": "string", "enum": ["low", "medium"]},
         "goal":         {"type": "string"},
         "features":     {"type": "array", "items": {"type": "string"}},
