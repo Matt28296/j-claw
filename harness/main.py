@@ -485,7 +485,7 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
             _fix_payload = {
                 "system_state": "REVIEW_FAILED",
                 "accepted_spec": instance.spec,
-                "completed_tasks": instance.tasks_as_list(),
+                "completed_tasks": instance.tasks_slim_list(),
                 "review_issues": issues,
             }
             if convergence_hint:

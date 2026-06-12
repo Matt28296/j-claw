@@ -433,7 +433,14 @@ Rules:
 
 ## FORMAT 3 — Task Refinement (`EXECUTION_ERROR`)
 
-Input provides the failed task and the error/log. Fix only that task.
+Input provides the failed task, the error/log, and a `dag_summary` with:
+- `total_tasks` — current Active-DAG size (for the 50-task budget check)
+- `highest_task_seq` — the highest numeric sequence already used (new split tasks must start
+  from `highest_task_seq + 1`)
+- `dependents_of_failed` — tasks that directly depend on the failing task: `[{id, type, files}]`
+  (use this to wire split pieces correctly)
+
+Fix only that task.
 
 ```json
 {
@@ -510,9 +517,16 @@ Input provides the completed task results. Decide pass/fail against the spec goa
 
 ## REVIEW_FAILED — Automated Review Fix Pass (`REVIEW_FAILED`)
 
-Input provides the spec, all completed tasks, and a `review_issues` list: specific problems
-found by an automated Claude Code review of the output files (stubs, broken imports, missing
-logic, wrong IDs, etc.).
+Input provides the spec, a lean `completed_tasks` list, and a `review_issues` list: specific
+problems found by an automated Claude Code review of the output files (stubs, broken imports,
+missing logic, wrong IDs, etc.).
+
+`completed_tasks` is a compact representation — deprecated tasks are omitted. Each entry is
+one of:
+- Done task: `{"id": "task-NNN", "files": [...], "status": "done"}` — use this for
+  ID-sequence tracking and the file→task_id lookup needed for `dependencies`.
+- Failed task: `{"id": "task-NNN", "type": "...", "objective": "...", "files": [...],
+  "status": "failed"}` — use type/objective for context when authoring the fix.
 
 Respond with FORMAT 4. Rules:
 
