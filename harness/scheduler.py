@@ -330,7 +330,15 @@ class Scheduler:
                 "verification": task.verification,
             },
             "error_log": task.error_log[:3000],
-            "active_dag": self.instance.tasks_as_list(),
+            "dag_summary": {
+                "total_tasks": len(self.instance.tasks),
+                "highest_task_seq": self.instance._id_watermark,
+                "dependents_of_failed": [
+                    {"id": t.id, "type": t.type, "files": t.files}
+                    for t in self.instance.tasks.values()
+                    if task.id in t.dependencies
+                ],
+            },
         }
         if hints:
             payload["experience_hints"] = hints

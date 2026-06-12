@@ -120,6 +120,29 @@ class ProjectInstance:
     def failed_tasks(self) -> list[Task]:
         return [t for t in self.tasks.values() if t.status == "failed"]
 
+    def tasks_slim_list(self) -> list[dict]:
+        """Lean version for REVIEW_FAILED orchestrator payloads.
+
+        Omits fields the orchestrator doesn't need when issuing fix tasks
+        (acceptance_criteria, priority, verification, dependencies). Keeps enough
+        for ID-sequence tracking and file→task_id dependency lookup.
+        - deprecated tasks are omitted entirely (no files were written)
+        - failed tasks include type+objective so the orchestrator has error context
+        - done/running tasks are reduced to {id, files, status}
+        """
+        result = []
+        for t in self.tasks.values():
+            if t.status == "deprecated":
+                continue
+            if t.status == "failed":
+                result.append({
+                    "id": t.id, "type": t.type, "objective": t.objective,
+                    "files": t.files, "status": t.status,
+                })
+            else:
+                result.append({"id": t.id, "files": t.files, "status": t.status})
+        return result
+
     def tasks_as_list(self) -> list[dict]:
         return [
             {
