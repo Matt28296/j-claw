@@ -181,7 +181,7 @@ def _call_worker(system: str, user: str) -> str | None:
                 resp = client.messages.create(
                     model=model,
                     max_tokens=4096,
-                    system=system,
+                    system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
                     messages=[{"role": "user", "content": user}],
                 )
                 return resp.content[0].text.strip()
