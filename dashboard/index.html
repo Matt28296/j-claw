@@ -693,7 +693,7 @@ body::before {
     <span id="live-label">LIVE</span>
   </div>
   <span id="state-badge" class="state-badge s-IDLE">IDLE</span>
-  <span id="heal-badge">&#x27F3; Heal 0/2</span>
+  <span id="heal-badge">&#x27F3; Heal 0</span>
   <span id="goal" class="goal">Waiting for pipeline…</span>
   <span id="badge-stack" class="badge" style="display:none"></span>
   <span id="badge-complexity" class="badge" style="display:none"></span>
@@ -1446,7 +1446,7 @@ function render(d) {
   const healBadge = document.getElementById('heal-badge');
   if (healVisited || healCount > 0) {
     healBadge.style.display = '';
-    healBadge.textContent = '⟳ Heal ' + healCount + '/2';
+    healBadge.textContent = '⟳ Heal ' + healCount;
   } else {
     healBadge.style.display = 'none';
   }
