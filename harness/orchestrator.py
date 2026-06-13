@@ -11,6 +11,7 @@ from config import (
     ORCHESTRATOR_API_MODEL, ORCHESTRATOR_FALLBACK_MODELS, OPENROUTER_API_KEY,
     ORCHESTRATOR_MAX_TOKENS, EXECUTION_ERROR_MODEL, ORCHESTRATOR_TIMEOUT,
     GOOGLE_API_KEY, GEMINI_ORCHESTRATOR_MODEL,
+    ORCHESTRATOR_EMERGENCY_PROVIDER, EMERGENCY_ORCHESTRATOR_MODEL,
 )
 from validator import validate_response, OrchestratorOutputError
 from cache_telemetry import log_cache_usage
@@ -239,6 +240,64 @@ class GeminiOrchestrator(_OpenAICompatOrchestrator):
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             model_chain=[GEMINI_ORCHESTRATOR_MODEL, "gemini-2.5-flash-lite"],
         )
+
+
+class CompositeOrchestrator:
+    """Wraps a primary orchestrator with an emergency cross-provider fallback.
+
+    When the primary exhausts all its retries and raises RuntimeError, we log
+    a loud warning and route the same payload through a secondary provider at
+    the same capability tier (Sonnet, not Opus — orchestrator work is
+    planning/JSON, not capability-bound; Opus would just multiply cost during
+    outages when EVERY call hits the emergency rung).
+
+    Availability failures go sideways to another provider (this class).
+    Capability failures escalate up the worker ladder (PR #36 — separate concern).
+    """
+
+    def __init__(self, primary, emergency) -> None:
+        self._primary = primary
+        self._emergency = emergency
+
+    def call(self, payload: dict, max_retries: int = 2) -> dict:
+        try:
+            return self._primary.call(payload, max_retries=max_retries)
+        except RuntimeError as exc:
+            console.print(
+                f"\n[bold red]EMERGENCY: Primary orchestrator exhausted all retries — "
+                f"falling back to {type(self._emergency).__name__} "
+                f"({EMERGENCY_ORCHESTRATOR_MODEL})[/bold red]\n"
+                f"  Primary failure: {exc}\n"
+            )
+            return self._emergency.call(payload, max_retries=max_retries)
+
+
+def make_orchestrator(provider: str | None = None, *, manual: bool = False):
+    """Factory that returns the right orchestrator for ORCHESTRATOR_PROVIDER,
+    wrapped with an emergency fallback when configured."""
+    from config import ORCHESTRATOR_PROVIDER
+    p = provider or ORCHESTRATOR_PROVIDER
+
+    if manual:
+        return ManualOrchestrator()
+
+    if p == "gemini":
+        primary = GeminiOrchestrator()
+        if ORCHESTRATOR_EMERGENCY_PROVIDER == "anthropic" and ANTHROPIC_API_KEY:
+            # Patch ORCHESTRATOR_MODEL temporarily so the Anthropic orchestrator
+            # uses EMERGENCY_ORCHESTRATOR_MODEL instead of the default.
+            import config as _cfg
+            _orig = _cfg.ORCHESTRATOR_MODEL
+            _cfg.ORCHESTRATOR_MODEL = EMERGENCY_ORCHESTRATOR_MODEL
+            emergency = Orchestrator()
+            _cfg.ORCHESTRATOR_MODEL = _orig
+            return CompositeOrchestrator(primary, emergency)
+        return primary
+
+    if p == "openrouter":
+        return OpenRouterOrchestrator()
+
+    return Orchestrator()  # anthropic (default)
 
 
 def _parse_retry_delay(exc: Exception, attempt: int) -> int:

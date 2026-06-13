@@ -29,7 +29,7 @@ _ORCH_DISPLAY = {
     "openrouter": ORCHESTRATOR_API_MODEL,
     "gemini": GEMINI_ORCHESTRATOR_MODEL,
 }.get(ORCHESTRATOR_PROVIDER, ORCHESTRATOR_MODEL)
-from orchestrator import Orchestrator, ManualOrchestrator, OpenRouterOrchestrator, GeminiOrchestrator
+from orchestrator import Orchestrator, ManualOrchestrator, OpenRouterOrchestrator, GeminiOrchestrator, make_orchestrator
 from state_writer import writer as sw
 from project import ProjectInstance
 from scheduler import Scheduler
@@ -130,12 +130,7 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
         title="J-Claw Continuation"
     ))
 
-    if ORCHESTRATOR_PROVIDER == "openrouter":
-        orch = OpenRouterOrchestrator()
-    elif ORCHESTRATOR_PROVIDER == "gemini":
-        orch = GeminiOrchestrator()
-    else:
-        orch = Orchestrator()
+    orch = make_orchestrator()
 
     sw.on_project_start(new_intent, str(project_dir))
 
@@ -230,14 +225,7 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
 
     _start_dashboard()
 
-    if manual:
-        orch = ManualOrchestrator()
-    elif ORCHESTRATOR_PROVIDER == "openrouter":
-        orch = OpenRouterOrchestrator()
-    elif ORCHESTRATOR_PROVIDER == "gemini":
-        orch = GeminiOrchestrator()
-    else:
-        orch = Orchestrator()
+    orch = make_orchestrator(manual=manual)
 
     sw.on_project_start(intent, str(output_dir))
     phase["current"] = "creative-director"
