@@ -1,12 +1,61 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-12, second session** (previous: 2026-06-12 morning, 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-12, third session** (previous: 2026-06-12 second session + morning, 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#29 are MERGED to `main`. PR #30 (Gemini orchestrator) is OPEN — operator review + merge.**
+**PRs #10–#37 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-12 (third session) — Gemini-literalism hardening + fallback layers (PRs #34–#37)
+
+Theme: the film validation rerun finally ran — four times (v3–v6) — and each run caught a real
+defect, all of the same species: **Gemini follows the prompt/schema literally where Claude
+inferred intent.** The pipeline has still never reached the ffmpeg render path; that's v7.
+
+| Run | Defect | Fix |
+|---|---|---|
+| v3 | Gemini 503 raises `InternalServerError` — only `RateLimitError` was caught, so the flash→flash-lite fallback never engaged and every scene crashed | **PR #34**: catch `InternalServerError` + `APIConnectionError` in both orchestrator retry loops (Gemini model-switch path AND Anthropic backoff path) |
+| v4 | `project_type: 'film'` rejected — validator enum was `[web, app, game]`; prompt's stack table lists film but the enum didn't | **PR #35**: add `film` to validator enum + both prompt lists |
+| v5 | Worker threads crashed on `'charmap' codec can't encode '▶'` — non-UTF-8 launch shell | env-only: launch builds with `PYTHONUTF8=1 PYTHONIOENCODING=utf-8` |
+| v6 | Gemini free-tier quota exhausted (20 req/min flash-lite); **root cause: scene sub-projects re-decompose at the DAG stage** — `SPEC_ACCEPTED` returned FORMAT 5 and `main.py:361` accepts it with no depth guard (INIT has one; Claude never did this at the DAG stage) | diagnosed; fix is next session's P2 |
+
+Also this session:
+- **PRs #30–#33 merged** (Gemini orchestrator, docs, .env.example, dashboard green theme).
+- **PR #36** — Opus 4.8 added as 4th worker-ladder rung (last resort). $5/$25/MTok = only
+  1.67× Sonnet now. Tasks never START on cloud; Opus fires only after deepseek AND Sonnet
+  failed the same task, carrying full error context. Live `.env` updated too. Decision:
+  Opus is **worker-only** — availability failures (provider down) get cross-provider
+  same-tier fallback instead (P3.4 below); capability failures escalate up the ladder.
+- **PR #37** — Mission Control outage root-caused: `_start_dashboard()` spawned a new
+  dashboard.py per build; Windows SO_REUSEADDR stacked **15 instances** on port 8765 and
+  the connection lottery wedged the UI. Fix: TCP-probe the port, skip the spawn. (Operator
+  note: if the UI goes quiet again, `netstat -ano | findstr 8765` — kill extras directly.)
+- **Final review model decision:** stays Haiku; deterministic gates backstop it. Audit its
+  verdicts during v7; bump `FINAL_REVIEW_MODEL` to Sonnet if it misses a stub.
+- Dashboard WIP (mission-control telemetry in scheduler.py / state_writer.py / dashboard.py /
+  index.html) is the operator's uncommitted work — left untouched in the working tree.
+
+### Next session plan (approved, in priority order)
+1. ~~Merge PRs #34–#37~~ — **done this session** (operator-authorized).
+2. **P2 — DAG-stage decomposition guard**: mirror the INIT guard (`main.py:289–319`) at
+   `main.py:361`; add `decomposition_allowed:false` to the `SPEC_ACCEPTED` payload; check the
+   discarded `_handle_oversize` return; scope orchestrator.txt rule 21 to top-level INIT only.
+   Cuts Gemini calls ~2–3×/build — this is also the quota fix.
+3. **P3 — honor Gemini's 429 retry delay** (parse `RetryInfo` / "retry in Ns"; currently waits
+   a blind 35–105s and exhausts attempts).
+4. **P3.4 — emergency cross-provider orchestrator fallback**: Gemini chain exhausted →
+   Anthropic **Sonnet** (not Opus — orchestrator work is planning/JSON, capability-proven on
+   PRs #10–25; worst case a quota-outage build completes at the old ~$0.50 instead of dying).
+5. **P3.5 — `harness/test_llm_layers.py`**: mocked coverage for EVERY llm layer + fallback
+   (operator requirement: each layer must provably work, not just the ones a run happens to
+   exercise). Live-only layers (worker rungs, final review) get checked off during v7.
+6. **v7 film validation** — on Gemini after the fixes + quota reset (operator decision: no
+   Anthropic-orchestrator detour). UTF-8 env vars required. Acceptance unchanged.
+7. **Factory rehearsal** — unchanged 7-item Telegram checklist.
 
 ---
 
@@ -232,20 +281,18 @@ self-description (it says it routes to `qwen2.5-coder:14b` — actually the 3-ru
 
 ---
 
-## 📋 WHAT'S LEFT TO FINALIZE (priority order, updated 2026-06-12 second session)
+## 📋 WHAT'S LEFT TO FINALIZE (priority order, updated 2026-06-12 third session)
 
-1. **Operator: merge PR #30** (Gemini orchestrator — live-validated, review + merge).
-2. **Operator: regenerate the Google API key** (was pasted into a chat session) at
-   aistudio.google.com → update `GOOGLE_API_KEY` in `harness/.env`.
-3. **Operator: top up Anthropic credits** — still needed for worker escalation + the four
-   Haiku roles, but the per-build bill is now ~$0.05–0.15 (orchestrator is free-tier Gemini).
-4. **Worker ladder rung-1 switch:** if the `deepseek-coder-v2:16b` ROCm smoke test passed
-   (see section above), set in `harness/.env`:
-   `WORKER_LADDER=ollama::qwen3:8b,ollama::deepseek-coder-v2:16b,anthropic::claude-sonnet-4-6`
-   If it crashed under ROCm, stay on qwen2.5-coder:14b — no change needed.
-5. **Film validation rerun** — recovery command in `harness/projects/film_validation_v2/HANDOFF.md`.
-   Also the first real exercise of Gemini on SPEC_ACCEPTED / EXECUTION_ERROR / REVIEW_FAILED
-   and of the slim payloads (PR #29) under fire.
+*(Items 1–4 of the second-session list are all done: #30 merged, Google key regenerated,
+Anthropic credits topped up, deepseek rung-1 live. Current list — see the third-session
+section above for detail:)*
+
+1. **P2** — DAG-stage decomposition guard (`main.py:361` + orchestrator.txt rule 21).
+2. **P3** — Gemini 429 retry-delay parsing (`orchestrator.py` wait extraction).
+3. **P3.4** — emergency cross-provider orchestrator fallback (Gemini exhausted → Sonnet).
+4. **P3.5** — `harness/test_llm_layers.py` mocked fallback-layer test suite.
+5. **v7 film validation** — Gemini, after fixes + quota reset; UTF-8 env; must reach the
+   render path for the first time.
 6. **Factory rehearsal** (binding acceptance test) — from Telegram only; see README roadmap.
 7. **Carry-overs:** native mobile CI runner; Playwright runner task type in the DAG;
    IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect prompts.
