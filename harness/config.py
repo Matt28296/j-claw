@@ -98,9 +98,18 @@ PROJECTS_DIR: Path = Path(os.getenv("PROJECTS_DIR", "./projects"))
 MAX_RETRIES_PER_TASK: int = int(os.getenv("MAX_RETRIES_PER_TASK", "3"))
 MAX_TASKS: int = int(os.getenv("MAX_TASKS", "75"))
 ORCHESTRATOR_MAX_TOKENS: int = int(os.getenv("ORCHESTRATOR_MAX_TOKENS", "16384"))
-CREATIVE_DIRECTOR_MODEL: str = os.getenv("CREATIVE_DIRECTOR_MODEL", "claude-opus-4-8")
+CREATIVE_DIRECTOR_MODEL: str = os.getenv("CREATIVE_DIRECTOR_MODEL", "claude-haiku-4-5-20251001")
 EXECUTION_ERROR_MODEL: str = os.getenv("EXECUTION_ERROR_MODEL", "claude-haiku-4-5-20251001")
 FINAL_REVIEW_MODEL: str = os.getenv("FINAL_REVIEW_MODEL", "claude-haiku-4-5-20251001")
+
+# Emergency orchestrator fallback: when the primary provider (e.g. Gemini) exhausts all
+# retries, route through this secondary provider instead of dying. "anthropic" uses the
+# Orchestrator class (Sonnet); set to "" to disable and propagate the original RuntimeError.
+ORCHESTRATOR_EMERGENCY_PROVIDER: str = os.getenv(
+    "ORCHESTRATOR_EMERGENCY_PROVIDER",
+    "anthropic" if os.getenv("ANTHROPIC_API_KEY") else "",
+)
+EMERGENCY_ORCHESTRATOR_MODEL: str = os.getenv("EMERGENCY_ORCHESTRATOR_MODEL", "claude-sonnet-4-6")
 CREATIVE_DIRECTOR_PROMPT_PATH: Path = Path(__file__).parent.parent / "creative_director.txt"
 MAX_FORMAT5_DEPTH: int = int(os.getenv("MAX_FORMAT5_DEPTH", "3"))
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -110,7 +119,7 @@ EXPERIENCE_LOG: str = os.getenv("EXPERIENCE_LOG", "experience.jsonl")
 ORCHESTRATOR_PROMPT_PATH: Path = Path(__file__).parent.parent / "orchestrator.txt"
 
 TECHNICAL_ARCHITECT_ENABLED: bool = os.getenv("TECHNICAL_ARCHITECT_ENABLED", "true") == "true"
-TECHNICAL_ARCHITECT_MODEL: str = os.getenv("TECHNICAL_ARCHITECT_MODEL", "claude-sonnet-4-6")
+TECHNICAL_ARCHITECT_MODEL: str = os.getenv("TECHNICAL_ARCHITECT_MODEL", "claude-haiku-4-5-20251001")
 TECHNICAL_ARCHITECT_PROMPT_PATH: Path = Path(__file__).parent.parent / "technical_architect.txt"
 DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "8765"))
 DASHBOARD_AUTOOPEN: bool = os.getenv("DASHBOARD_AUTOOPEN", "true") == "true"
