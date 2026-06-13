@@ -978,10 +978,10 @@ function _ecoIcon(eco) {
 
 let _testLogOpen = {};  // test card toggle state: key → bool
 
-function toggleTestLog(key) {
-  _testLogOpen[key] = !_testLogOpen[key];
-  const el = document.getElementById('tlog-' + key);
-  if (el) el.classList.toggle('open', !!_testLogOpen[key]);
+function toggleTestLog(rawKey) {
+  _testLogOpen[rawKey] = !_testLogOpen[rawKey];
+  const el = document.getElementById('tlog-' + rawKey);
+  if (el) el.classList.toggle('open', !!_testLogOpen[rawKey]);
 }
 
 function renderTestResults(d) {
@@ -1028,11 +1028,11 @@ function renderTestResults(d) {
       const atNum = t.attempt || g.attempts.indexOf(t) + 1;
       const badge = g.attempts.length > 1 ? `<span class="test-attempt-badge">#${atNum}</span>` : '';
       const logHtml = renderTestLog(t.log || '', t.ecosystem);
-      const key = esc(t.task_id + '-' + atNum);
-      const logId = 'tlog-' + key;
-      const openCls = _testLogOpen[key] ? ' open' : '';
+      const rawKey = (t.task_id + '-' + atNum).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const logId = 'tlog-' + rawKey;
+      const openCls = _testLogOpen[rawKey] ? ' open' : '';
       return `<div class="test-card ${cls}">
-        <div class="test-header" onclick="toggleTestLog('${key}')" title="Click to expand log">
+        <div class="test-header" onclick="toggleTestLog('${rawKey}')" title="Click to expand log">
           <span class="test-verdict">${verdict}</span>
           ${badge}
           <span class="test-method">${esc((t.method || '').toUpperCase())}</span>
@@ -1117,9 +1117,9 @@ function renderBuildHealth(d) {
   const total   = tasks.length;
   const pct = n => ((n / total) * 100).toFixed(1) + '%';
 
-  // Heal cycle count from events
+  // Heal cycle count from events — state_writer writes "Heal tasks added — N fix task(s) queued"
   const events = d.events || [];
-  const healCount = events.filter(e => /heal cycle|heal loop/i.test(e.message || e.msg || '')).length;
+  const healCount = events.filter(e => /heal tasks added/i.test(e.msg || e.message || '')).length;
 
   // Escalation count: work_log entries that mention escalation or nodes at rung > 1
   const rawNodes = d.agent_nodes || {};
@@ -1324,43 +1324,45 @@ function renderCostPanel(d) {
     totalEl.textContent = 'No API spend yet';
   }
 
-  // Per-model breakdown from work_log
+  // Per-model cost breakdown from cost.by_model (values are floats in USD)
   const workLog = d.work_log || [];
+  const costModels = cost.by_model || cost.models || {};
   const modelMap = {};
-  workLog.forEach(e => {
-    const m = e.model || 'unknown';
-    if (!modelMap[m]) modelMap[m] = { tokIn: 0, tokOut: 0, cost: 0 };
-    modelMap[m].tokIn  += Number(e.tokens_in  || e.input_tokens  || 0);
-    modelMap[m].tokOut += Number(e.tokens_out || e.output_tokens || 0);
-    modelMap[m].cost   += Number(e.cost_usd   || e.cost          || 0);
-  });
-
-  // Also pull from cost.models if the backend provides a breakdown there
-  const costModels = cost.models || cost.by_model || {};
   Object.keys(costModels).forEach(m => {
     const rec = costModels[m];
-    if (!modelMap[m]) modelMap[m] = { tokIn: 0, tokOut: 0, cost: 0 };
-    modelMap[m].tokIn  += Number(rec.input_tokens  || rec.tokens_in  || 0);
-    modelMap[m].tokOut += Number(rec.output_tokens || rec.tokens_out || 0);
-    modelMap[m].cost   += Number(rec.cost_usd      || rec.cost       || 0);
+    // by_model values are plain floats; .models (if ever added) would be objects
+    const costVal = typeof rec === 'number' ? rec : Number(rec.cost_usd || rec.cost || 0);
+    if (costVal > 0) {
+      if (!modelMap[m]) modelMap[m] = { cost: 0 };
+      modelMap[m].cost += costVal;
+    }
   });
+
+  // Global token totals from cost.tokens
+  const tokens = cost.tokens || {};
+  const tokIn  = (tokens.input || 0) + (tokens.cache_read || 0);
+  const tokOut  = tokens.output || 0;
 
   const modelRows = Object.entries(modelMap);
   const tableEl = document.getElementById('cost-model-table');
   if (modelRows.length) {
+    const tokenRow = (tokIn || tokOut)
+      ? `<tr style="border-top:1px solid var(--border);opacity:.7">
+           <td colspan="2" style="color:var(--muted)">total tokens</td>
+           <td>${tokIn > 0 ? tokIn.toLocaleString() : '-'} in / ${tokOut > 0 ? tokOut.toLocaleString() : '-'} out</td>
+         </tr>` : '';
     tableEl.innerHTML = `<table class="cost-table">
       <thead><tr>
-        <th>Model</th><th>In</th><th>Out</th><th>Cost</th>
+        <th>Model</th><th colspan="2">Cost</th>
       </tr></thead>
       <tbody>
         ${modelRows.map(([m, v]) =>
           `<tr>
             <td title="${esc(m)}">${esc(shortModel(m))}</td>
-            <td>${v.tokIn > 0 ? v.tokIn.toLocaleString() : '-'}</td>
-            <td>${v.tokOut > 0 ? v.tokOut.toLocaleString() : '-'}</td>
-            <td>${v.cost > 0 ? money(v.cost) : '-'}</td>
+            <td colspan="2">${v.cost > 0 ? money(v.cost) : '-'}</td>
           </tr>`
         ).join('')}
+        ${tokenRow}
       </tbody>
     </table>`;
   } else {
@@ -1374,11 +1376,9 @@ function renderCostPanel(d) {
     : Object.values(rawNodes);
   const escalations = nodeList.filter(n => Number(n.rung || 0) > 1).length;
 
-  // Paid call counter: work_log entries where provider === 'anthropic'
-  const paidCalls = workLog.filter(e =>
-    (e.provider || '').toLowerCase() === 'anthropic' ||
-    (e.model || '').toLowerCase().startsWith('claude-')
-  ).length;
+  // Paid calls: use the authoritative count from cost.paid_calls
+  // (work_log model names are prefixed "anthropic/..." so string matching is unreliable)
+  const paidCalls = cost.paid_calls || 0;
   const PAID_BUDGET = 15;
 
   const statsEl = document.getElementById('cost-stats');
