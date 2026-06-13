@@ -196,10 +196,7 @@ class _OpenAICompatOrchestrator:
                     # All models exhausted for this attempt — wait then reset
                     model_idx = 0
                     current_model = model_chain[0]
-                    try:
-                        wait = int(exc.response.json()["error"]["metadata"]["retry_after_seconds"]) + 2
-                    except Exception:
-                        wait = 35 * (attempt + 1)
+                    wait = _parse_retry_delay(exc, attempt)
                     console.print(f"[yellow]All orchestrator models unavailable — waiting {wait}s (attempt {attempt + 1}/{max_retries + 1})…[/yellow]")
                     if attempt < max_retries:
                         time.sleep(wait)
@@ -242,6 +239,40 @@ class GeminiOrchestrator(_OpenAICompatOrchestrator):
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             model_chain=[GEMINI_ORCHESTRATOR_MODEL, "gemini-2.5-flash-lite"],
         )
+
+
+def _parse_retry_delay(exc: Exception, attempt: int) -> int:
+    """Extract the server-recommended retry delay from a rate-limit / quota error.
+
+    Handles three shapes in order of preference:
+      1. Google / Gemini: error.details[].@type == RetryInfo with retryDelay "Ns"
+      2. OpenRouter: error.metadata.retry_after_seconds (integer)
+      3. Fallback: plain-text "retry in N" or "retry in N.Ms" anywhere in the message
+      4. Blind default: 35 * (attempt + 1) seconds
+    """
+    import re
+    try:
+        body = exc.response.json()
+        err = body.get("error", {})
+        # Shape 1: Google RetryInfo (details array)
+        for detail in err.get("details", []):
+            if "RetryInfo" in detail.get("@type", ""):
+                delay_str = detail.get("retryDelay", "")
+                m = re.match(r"(\d+(?:\.\d+)?)", delay_str)
+                if m:
+                    return max(2, int(float(m.group(1))) + 2)
+        # Shape 2: OpenRouter metadata
+        val = err.get("metadata", {}).get("retry_after_seconds")
+        if val is not None:
+            return int(val) + 2
+    except Exception:
+        pass
+    # Shape 3: plain-text in the exception message
+    m = re.search(r"retry in (\d+(?:\.\d+)?)", str(exc), re.IGNORECASE)
+    if m:
+        return max(2, int(float(m.group(1))) + 2)
+    # Shape 4: blind default — scale with attempt so repeated failures back off
+    return 35 * (attempt + 1)
 
 
 def _sanitize(text: str) -> str:

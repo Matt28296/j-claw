@@ -355,12 +355,41 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
     _lessons = get_stack_lessons(spec_stack(spec) or (tech_spec or {}).get("confirmed_stack", ""))
     if _lessons:
         _dag_payload["past_failure_lessons"] = _lessons
+    if depth:
+        # Already inside a FORMAT 5 decomposition — the same guard that works at INIT
+        # must also apply here. Without it Gemini answers SPEC_ACCEPTED with another
+        # FORMAT 5 and doubles (or triples) the orchestrator call count per build,
+        # exhausting the free-tier quota before any task is executed.
+        _dag_payload["sub_project_depth"] = depth
+        _dag_payload["decomposition_allowed"] = False
     dag_response = orch.call(_dag_payload)
     sw.on_agent_done()
 
     if dag_response.get("oversize"):
-        _handle_oversize(dag_response, output_dir, depth, auto_accept=auto_accept, manual=manual)
-        return
+        if depth:
+            # Corrective retry — mirror the INIT guard pattern.
+            console.print(
+                "  [yellow]Sub-project tried to decompose at DAG stage (FORMAT 5 inside SPEC_ACCEPTED) "
+                "— rejecting and requesting a flat FORMAT 2 task list.[/yellow]"
+            )
+            sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "SPEC_ACCEPTED")
+            dag_response = orch.call({
+                **_dag_payload,
+                "decomposition_rejected": (
+                    f"You are already a sub-project at depth {depth} of a FORMAT 5 "
+                    "decomposition. FORMAT 5 is FORBIDDEN here. Emit a flat FORMAT 2 "
+                    "task list (≤50 tasks) that implements this scene/segment directly. "
+                    "Trim scope to fit if needed — do NOT emit oversize/FORMAT 5."
+                ),
+            })
+            sw.on_agent_done()
+            if dag_response.get("oversize"):
+                console.print("  [red]Sub-project still demands decomposition at DAG stage — failing honestly.[/red]")
+                return False
+        else:
+            return _handle_oversize(dag_response, output_dir, depth, auto_accept=auto_accept, manual=manual,
+                                    intent=intent,
+                                    parent_stack=(tech_spec or {}).get("confirmed_stack", ""))
 
     instance = ProjectInstance(output_dir)
     instance.spec = spec
