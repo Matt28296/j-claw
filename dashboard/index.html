@@ -61,6 +61,19 @@ body::before {
   mix-blend-mode: screen;
   opacity: .38;
 }
+#matrix-rain {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 0;
+  opacity: .42;
+}
+.header, #stage-tracker, #review-banner, #openclaw-banner, .main, #copy-toast {
+  position: relative;
+  z-index: 1;
+}
 
 /* ── Header ──────────────────────────────────────────────── */
 .header {
@@ -88,7 +101,12 @@ body::before {
   box-shadow: 0 0 7px rgba(50,255,126,0.9), 0 0 16px rgba(50,255,126,0.35);
 }
 .live-dot.stale { background: var(--amber); animation: none; box-shadow: 0 0 7px rgba(245,215,110,0.6); }
+.live-dot.stalled { background: var(--red); animation: none; box-shadow: 0 0 9px rgba(255,94,94,0.7); }
+.live-dot.offline { background: #5f6b62; animation: none; box-shadow: none; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+.health-live { color: var(--green); }
+.health-stale { color: var(--amber); }
+.health-stalled, .health-unreachable { color: var(--red); }
 
 /* State badge — pill with glow */
 .state-badge {
@@ -219,6 +237,48 @@ body::before {
 .agent-name  { font-size: 13px; font-weight: bold; color: var(--blue); text-shadow: 0 0 8px rgba(68,147,248,0.4); }
 .agent-model { font-size: 11px; color: #8b949e; margin-top: 2px; }
 .agent-timer { font-size: 22px; font-weight: bold; color: var(--text); margin-top: 6px; font-variant-numeric: tabular-nums; }
+.agent-meta { font-size: 10px; color: var(--muted); margin-top: 4px; display: flex; gap: 6px; flex-wrap: wrap; }
+.agent-network {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.agent-node {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 6px 7px;
+  background: rgba(1,10,5,.72);
+  min-width: 0;
+}
+.agent-node.active { border-color: var(--green); box-shadow: 0 0 9px rgba(50,255,126,.18); }
+.agent-node-name { color: var(--green); font-size: 10px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-node-state { color: var(--text); font-size: 10px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-node-model { color: var(--muted); font-size: 9px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-node-header { display: flex; align-items: center; gap: 4px; }
+.rung-badge {
+  font-size: 8px; font-weight: bold; border-radius: 2px;
+  padding: 1px 3px; flex-shrink: 0; letter-spacing: .3px;
+}
+.rung-badge.local  { background: rgba(50,255,126,.15); color: var(--green); }
+.rung-badge.sonnet { background: rgba(245,215,110,.15); color: var(--amber); }
+.rung-badge.opus   { background: rgba(255,94,94,.18);  color: var(--red); }
+
+/* Build health bar */
+.build-health { margin-bottom: 6px; }
+.health-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 3px; display: flex; justify-content: space-between; }
+.health-track { width: 100%; height: 5px; background: #0b2211; border-radius: 3px; overflow: hidden; display: flex; gap: 1px; }
+.health-seg { height: 100%; transition: width .4s ease; }
+.health-seg.done    { background: var(--green); }
+.health-seg.failed  { background: var(--red); }
+.health-seg.running { background: var(--amber); }
+.health-seg.pending { background: #1a3a28; }
+.health-stats { display: flex; gap: 8px; margin-top: 3px; font-size: 9px; }
+.health-stat { color: var(--muted); }
+.health-stat span { font-weight: bold; }
+.health-stat span.warn { color: var(--amber); }
+.health-stat span.good { color: var(--green); }
+.health-stat span.bad  { color: var(--red); }
 
 /* Task progress bar */
 .task-count { font-size: 11px; color: #8b949e; margin-bottom: 4px; }
@@ -245,7 +305,9 @@ body::before {
   border-radius: 0 4px 4px 0;
   background: transparent;
   transition: background 0.2s;
+  cursor: pointer;
 }
+.task-row:hover { background: rgba(50,255,126,0.08); }
 .task-row.pending    { border-left-color: var(--muted); }
 .task-row.running    {
   border-left-color: var(--blue);
@@ -292,10 +354,40 @@ body::before {
 .events-section { border-bottom: 1px solid var(--border); overflow-y: auto; padding: 12px 14px; }
 .tests-section  { border-bottom: 1px solid var(--border); overflow-y: auto; padding: 12px 14px; }
 
-.bottom-row { display: grid; grid-template-columns: 1fr 1fr 1fr; overflow: hidden; }
+.bottom-row { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; overflow: hidden; }
 .errors-section  { border-right: 1px solid var(--border); overflow-y: auto; padding: 12px 14px; }
 .worklog-section { border-right: 1px solid var(--border); overflow-y: auto; padding: 12px 14px; }
-.files-section   { overflow-y: auto; padding: 12px 14px; }
+.files-section   { border-right: 1px solid var(--border); overflow-y: auto; padding: 12px 14px; }
+.cost-section    { overflow-y: auto; padding: 12px 14px; }
+
+/* ── Cost & Usage card ───────────────────────────────────── */
+.cost-toggle {
+  cursor: pointer; user-select: none;
+  display: flex; align-items: center; gap: 5px;
+}
+.cost-toggle-arrow { font-size: 9px; color: var(--muted); transition: transform .15s; }
+.cost-body { display: none; margin-top: 6px; }
+.cost-body.open { display: block; }
+.cost-total {
+  font-size: 20px; font-weight: bold; color: var(--green);
+  text-shadow: 0 0 10px var(--shadow-green);
+  margin-bottom: 8px; font-variant-numeric: tabular-nums;
+}
+.cost-total.zero { color: var(--muted); font-size: 13px; font-weight: normal; font-style: italic; }
+.cost-table { width: 100%; border-collapse: collapse; font-size: 10px; margin-bottom: 8px; }
+.cost-table th {
+  color: var(--muted); text-transform: uppercase; letter-spacing: .5px;
+  font-weight: normal; padding: 2px 0; text-align: left; border-bottom: 1px solid var(--border);
+}
+.cost-table th:last-child, .cost-table td:last-child { text-align: right; }
+.cost-table td { color: var(--text); padding: 2px 0; border-bottom: 1px solid #0e1a2a; white-space: nowrap; }
+.cost-table td:first-child { color: #8b949e; overflow: hidden; text-overflow: ellipsis; max-width: 80px; }
+.cost-stats { display: flex; flex-direction: column; gap: 4px; }
+.cost-stat-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.cost-stat-label { color: var(--muted); flex: 1; }
+.cost-stat-value { font-weight: bold; }
+.cost-stat-value.warn { color: var(--amber); }
+.cost-stat-value.good { color: var(--green); }
 
 .event-row {
   display: flex; gap: 8px; padding: 2px 0;
@@ -318,25 +410,86 @@ body::before {
 }
 .file-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; flex: 1; }
 .file-task { color: var(--muted); font-size: 10px; flex-shrink: 0; }
+.file-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.file-link {
+  color: var(--green);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 10px;
+}
+.file-link:hover { border-color: var(--green); box-shadow: 0 0 6px rgba(50,255,126,.2); }
+.summary-grid {
+  display: none;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 10px;
+}
+.summary-grid.visible { display: grid; }
+.summary-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 8px;
+  background: rgba(1,10,5,.78);
+  min-width: 0;
+}
+.summary-label { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .6px; }
+.summary-value { color: var(--text); font-size: 12px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.summary-value.good { color: var(--green); }
+.summary-value.warn { color: var(--amber); }
+.summary-value.bad { color: var(--red); }
 
 /* ── Test Results ────────────────────────────────────────── */
+.test-summary-bar {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 7px; font-size: 10px;
+}
+.test-summary-rate { color: var(--text); font-weight: bold; }
+.test-summary-rate.all-pass { color: var(--green); }
+.test-summary-rate.some-fail { color: var(--amber); }
+.test-summary-track { flex: 1; height: 3px; background: #0b2211; border-radius: 2px; overflow: hidden; }
+.test-summary-fill { height: 100%; background: var(--green); transition: width .4s; }
+.test-live-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--green); flex-shrink: 0;
+  animation: pulse-dot 1s ease-in-out infinite;
+}
+@keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+.test-group { margin-bottom: 8px; }
+.test-group-title {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 10px; color: var(--muted);
+  padding: 2px 0 4px; border-bottom: 1px solid #0e1a2a; margin-bottom: 4px;
+}
+.test-group-icon { font-size: 11px; }
+.test-group-id { color: var(--text); font-weight: bold; }
+.test-group-eco { font-size: 9px; }
+.test-attempts { display: flex; flex-direction: column; gap: 3px; }
+
 .test-card {
   border: 1px solid var(--border); border-radius: 5px;
-  margin-bottom: 7px; overflow: hidden;
+  overflow: hidden;
 }
 .test-card.pass { border-color: #0e3a14; }
 .test-card.fail { border-color: #3a1414; }
 .test-header {
   display: flex; align-items: center; gap: 6px;
-  padding: 5px 9px; font-size: 11px;
+  padding: 4px 8px; font-size: 11px; cursor: pointer;
 }
+.test-header:hover { opacity: .85; }
 .test-card.pass .test-header { background: #061a0a; }
 .test-card.fail .test-header { background: #180808; }
-.test-verdict { font-weight: bold; font-size: 12px; }
+.test-verdict { font-weight: bold; font-size: 11px; }
 .test-card.pass .test-verdict { color: var(--green); }
 .test-card.fail .test-verdict { color: var(--red); }
+.test-attempt-badge {
+  font-size: 9px; color: var(--muted); background: #0d1520;
+  border: 1px solid var(--border); border-radius: 2px; padding: 1px 4px;
+}
 .test-method {
-  padding: 1px 6px; border-radius: 3px; font-size: 10px;
+  padding: 1px 5px; border-radius: 3px; font-size: 9px;
   font-weight: bold; letter-spacing: .3px;
   background: #0d1520; color: #8b949e; border: 1px solid var(--border);
 }
@@ -349,7 +502,9 @@ body::before {
   max-height: 110px; overflow-y: auto;
   border-top: 1px solid var(--border);
   background: var(--bg);
+  display: none;
 }
+.test-log.open { display: block; }
 .test-line-pass { color: var(--green); }
 .test-line-fail { color: var(--red); }
 .test-line-info { color: #8b949e; }
@@ -389,8 +544,26 @@ body::before {
 }
 .copy-btn:hover { background: #1a2744; color: var(--text); border-color: #2d4a7a; }
 .copy-btn.copied { background: #061a0a; color: var(--green); border-color: #0e3a14; }
+.copy-btn:disabled { opacity: .45; cursor: not-allowed; }
 #restart-btn:hover { background: #2a0a0a; color: #ff8080; border-color: var(--red); }
 #restart-btn.restarting { background: #1a0808; color: var(--amber); border-color: var(--amber); }
+.control-status {
+  background: rgba(1,10,5,.72);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-family: inherit;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.control-status.allowed { color: var(--green); border-color: #145f31; }
+.control-status.blocked { color: var(--amber); border-color: #6d530e; }
+.control-status.error { color: var(--red); border-color: #7a2323; }
+.danger-btn { border-color: #f47067 !important; color: #f47067 !important; }
+.warn-btn { border-color: var(--amber) !important; color: var(--amber) !important; }
+.good-btn { border-color: var(--green) !important; color: var(--green) !important; }
 
 /* ── Toast ───────────────────────────────────────────────── */
 #copy-toast {
@@ -405,6 +578,49 @@ body::before {
 #copy-toast.show { opacity: 1; }
 
 .empty { color: var(--muted); font-size: 11px; font-style: italic; padding: 4px 0; }
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.48);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .16s ease;
+  z-index: 80;
+}
+.drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+.task-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(460px, 94vw);
+  height: 100vh;
+  transform: translateX(100%);
+  transition: transform .18s ease;
+  z-index: 90;
+  background: rgba(1,8,4,.97);
+  border-left: 1px solid var(--border-hi);
+  box-shadow: -18px 0 34px rgba(0,0,0,.62), 0 0 16px rgba(50,255,126,.14);
+  display: flex;
+  flex-direction: column;
+}
+.task-drawer.open { transform: translateX(0); }
+.drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.drawer-title { flex: 1; color: var(--green); font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drawer-body { overflow-y: auto; padding: 12px 14px 18px; }
+.drawer-section { margin-bottom: 13px; }
+.drawer-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .7px; margin-bottom: 5px; }
+.drawer-text { color: var(--text); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.drawer-kv { display: grid; grid-template-columns: 120px 1fr; gap: 5px 8px; font-size: 11px; }
+.drawer-kv span:nth-child(odd) { color: var(--muted); }
+.drawer-kv span:nth-child(even) { color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.drawer-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 
 /* ── Mobile / narrow viewports ───────────────────────────────
    Desktop locks to one 100vh frame with internally-scrolling panels
@@ -432,12 +648,12 @@ body::before {
 
   /* Panels flow to content height; the page scrolls between them */
   .agent-section, .tasks-section, .events-section, .tests-section,
-  .errors-section, .worklog-section, .files-section { overflow: visible; padding: 12px; }
+  .errors-section, .worklog-section, .files-section, .cost-section { overflow: visible; padding: 12px; }
 
   /* Bottom trio stacks; swap right-borders for bottom-borders as dividers */
   .bottom-row { display: flex; flex-direction: column; overflow: visible; }
   .events-section, .tests-section,
-  .errors-section, .worklog-section { border-right: none; border-bottom: 1px solid var(--border); }
+  .errors-section, .worklog-section, .files-section { border-right: none; border-bottom: 1px solid var(--border); }
 
   /* Drop desktop-fixed truncation widths so text uses the full width / wraps */
   .task-obj { max-width: 100%; white-space: normal; }
@@ -446,9 +662,14 @@ body::before {
 
   /* Cap only the two longest live lists so the page stays navigable */
   #event-list, #work-log { max-height: 60vh; overflow-y: auto; }
+  .agent-network, .summary-grid { grid-template-columns: 1fr 1fr; }
 
   /* Toast spans the bottom edge */
   #copy-toast { left: 12px; right: 12px; bottom: 12px; text-align: center; }
+}
+
+@media (max-width: 1100px) {
+  .bottom-row { grid-template-columns: 1fr 1fr; }
 }
 
 /* Extra-small phones: tighten paddings a touch */
@@ -456,11 +677,14 @@ body::before {
   .logo { font-size: 14px; letter-spacing: 1px; }
   .header { padding: 9px 10px; }
   .agent-section, .tasks-section, .events-section, .tests-section,
-  .errors-section, .worklog-section, .files-section { padding: 10px; }
+  .errors-section, .worklog-section, .files-section, .cost-section { padding: 10px; }
+  .agent-network, .summary-grid { grid-template-columns: 1fr; }
+  .control-status { order: 8; }
 }
 </style>
 </head>
 <body>
+<canvas id="matrix-rain" aria-hidden="true"></canvas>
 
 <div class="header">
   <span class="logo">J-CLAW</span>
@@ -469,15 +693,19 @@ body::before {
     <span id="live-label">LIVE</span>
   </div>
   <span id="state-badge" class="state-badge s-IDLE">IDLE</span>
-  <span id="heal-badge">&#x27F3; Heal 0/2</span>
+  <span id="heal-badge">&#x27F3; Heal 0</span>
   <span id="goal" class="goal">Waiting for pipeline…</span>
   <span id="badge-stack" class="badge" style="display:none"></span>
   <span id="badge-complexity" class="badge" style="display:none"></span>
   <span id="badge-orch-model" class="model-badge cloud" style="display:none" title="Orchestrator / planning model"></span>
   <span id="badge-worker-model" class="model-badge local" style="display:none" title="Worker / code-writing model"></span>
   <span id="elapsed" class="elapsed">0:00</span>
+  <button id="control-status" class="control-status" onclick="requestControlToken()" title="Click to enter dashboard control token">CTRL ?</button>
   <button class="copy-btn" id="copy-btn" onclick="copyLogs()" title="Copy all logs to clipboard">&#x1F4CB; Copy Logs</button>
-  <button class="copy-btn" id="restart-btn" onclick="restartPipeline()" title="Kill current run and restart with the same intent" style="border-color:#f47067;color:#f47067">&#x21BA; Restart</button>
+  <button class="copy-btn" id="restart-btn" onclick="runControl('restart')" title="Kill current run and restart with the same intent" style="border-color:#f47067;color:#f47067" disabled>&#x21BA; Restart</button>
+  <button class="copy-btn danger-btn" id="cancel-btn" onclick="runControl('cancel')" title="Cancel the current pipeline" disabled>Cancel</button>
+  <button class="copy-btn warn-btn" id="retry-btn" onclick="runControl('retry_failed_task')" title="Retry the selected or first failed task" disabled>Retry Failed</button>
+  <button class="copy-btn good-btn" id="continue-btn" onclick="runControl('continue')" title="Continue the current project" disabled>Continue</button>
 </div>
 <div id="copy-toast">Logs copied to clipboard</div>
 
@@ -510,6 +738,8 @@ body::before {
       <div id="agent-box" class="agent-box">
         <div class="empty">No agent running</div>
       </div>
+      <div id="build-health" class="build-health" style="display:none"></div>
+      <div id="agent-network" class="agent-network"></div>
     </div>
     <div class="tasks-section">
       <div class="panel-title">Tasks</div>
@@ -524,11 +754,13 @@ body::before {
   <!-- RIGHT -->
   <div class="right">
     <div class="events-section">
-      <div class="panel-title">Live Events</div>
+      <div class="panel-title">Events</div>
+      <div id="final-summary" class="summary-grid"></div>
       <div id="event-list"><div class="empty">No events yet.</div></div>
     </div>
     <div class="tests-section">
       <div class="panel-title">Test Results</div>
+      <div id="test-summary-bar" class="test-summary-bar" style="display:none"></div>
       <div id="test-results"><div class="empty">No tests run yet.</div></div>
     </div>
     <div class="bottom-row">
@@ -544,9 +776,29 @@ body::before {
         <div class="panel-title">Output Files</div>
         <div id="file-list"><div class="empty">No files written yet.</div></div>
       </div>
+      <div class="cost-section">
+        <div class="panel-title cost-toggle" id="cost-toggle" onclick="toggleCostPanel()" title="Toggle Cost &amp; Usage">
+          <span id="cost-toggle-arrow" class="cost-toggle-arrow">&#x25B6;</span>
+          Cost &amp; Usage
+        </div>
+        <div id="cost-body" class="cost-body">
+          <div id="cost-total" class="cost-total zero">No API spend yet</div>
+          <div id="cost-model-table"></div>
+          <div id="cost-stats" class="cost-stats"></div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
+
+<div id="drawer-backdrop" class="drawer-backdrop" onclick="closeTaskDrawer()"></div>
+<aside id="task-drawer" class="task-drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div id="drawer-title" class="drawer-title">Task</div>
+    <button class="copy-btn" onclick="closeTaskDrawer()" title="Close task inspector">Close</button>
+  </div>
+  <div id="drawer-body" class="drawer-body"></div>
+</aside>
 
 <script>
 'use strict';
@@ -556,6 +808,13 @@ let agentEpoch   = null;
 let reviewDone   = false;
 let lastState    = null;
 let healVisited  = false; // track if REVIEW_FAILED has been seen
+let selectedTaskId = null;
+let drawerOpen = false;
+let controlAllowed = false;
+let controlToken = sessionStorage.getItem('missionControlToken') || '';
+let lastFeedMark = null;
+let lastFeedMarkSeenAt = Date.now();
+let costPanelOpen = false; // cost panel collapsed by default
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -568,7 +827,42 @@ function esc(s) {
   return String(s)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function valueOrDash(v) {
+  return (v === undefined || v === null || v === '') ? '-' : String(v);
+}
+
+function isTerminalState(state) {
+  return state === 'DONE' || state === 'NEEDS_FOLLOWUP';
+}
+
+function isActiveState(state) {
+  return state && !['IDLE', 'DONE', 'NEEDS_FOLLOWUP'].includes(state);
+}
+
+function money(v) {
+  const n = Number(v);
+  if (!n) return '$0.00';
+  if (n < 0.001) return '$' + n.toFixed(6).replace(/0+$/, '');
+  if (n < 0.01)  return '$' + n.toFixed(4);
+  return '$' + n.toFixed(2);
+}
+
+const _STUB_LABELS = {
+  'stub:asset': '⊘ asset', 'stub:audio': '⊘ audio',
+  'stub:video': '⊘ video', 'stub:music': '⊘ music',
+  'placeholder': '⊘ asset', 'silent-placeholder': '⊘ audio', 'video-stub': '⊘ video',
+};
+function shortModel(model) {
+  if (!model || model === '-') return '-';
+  const s = String(model);
+  if (_STUB_LABELS[s]) return _STUB_LABELS[s];
+  const afterColons = s.includes('::') ? s.split('::').pop() : s;
+  return afterColons.includes('/') ? afterColons.split('/').pop() : afterColons;
 }
 
 const ICONS = { done: '✓', running: '▶', failed: '✗', pending: '○', deprecated: '–' };
@@ -632,6 +926,490 @@ function updateStageTracker(state) {
   });
 }
 
+function setHealth(status, detail) {
+  const dot = document.getElementById('live-dot');
+  const label = document.getElementById('live-label');
+  dot.className = 'live-dot';
+  label.className = '';
+  if (status === 'STALE') {
+    dot.classList.add('stale');
+    label.classList.add('health-stale');
+  } else if (status === 'STALLED') {
+    dot.classList.add('stalled');
+    label.classList.add('health-stalled');
+  } else if (status === 'UNREACHABLE') {
+    dot.classList.add('offline');
+    label.classList.add('health-unreachable');
+  } else {
+    label.classList.add('health-live');
+  }
+  label.textContent = detail ? `${status} ${detail}` : status;
+}
+
+function updateFeedHealth(data) {
+  const now = Date.now();
+  const state = data.pipeline_state || 'IDLE';
+  const feedMark = data.sequence !== undefined
+    ? 'seq:' + data.sequence
+    : (data.updated_at_epoch ? 'ts:' + data.updated_at_epoch : null);
+  if (feedMark && feedMark !== lastFeedMark) {
+    lastFeedMark = feedMark;
+    lastFeedMarkSeenAt = now;
+  }
+
+  const feedAge = data.updated_at_epoch
+    ? Math.max(0, Math.floor(now / 1000 - Number(data.updated_at_epoch)))
+    : 0;
+  const unchangedFor = Math.floor((now - lastFeedMarkSeenAt) / 1000);
+  const activeAgent = data.active_agent || null;
+  const activeAge = activeAgent?.started_epoch
+    ? Math.max(0, Math.floor(now / 1000 - Number(activeAgent.started_epoch)))
+    : 0;
+
+  if (!feedMark) {
+    setHealth('LIVE', '');
+  } else if (isActiveState(state) && activeAgent) {
+    setHealth('LIVE', `active ${fmt(activeAge)}`);
+  } else if (isActiveState(state) && unchangedFor >= 30) {
+    setHealth('STALLED', `${unchangedFor}s`);
+  } else if (feedAge >= 8) {
+    setHealth('STALE', `${feedAge}s`);
+  } else {
+    setHealth('LIVE', data.sequence !== undefined ? `#${data.sequence}` : '');
+  }
+}
+
+// ── Test Results (grouped) ────────────────────────────────────────────────────
+
+const ECOSYSTEM_ICON = {
+  film: '🎬', video: '🎬', 'video-editor': '🎬',
+  phaser: '🎮', 'three-js': '🎮', game: '🎮',
+  vanilla: '🌐', 'react-vite': '🌐', web: '🌐',
+  solidity: '⛓', rust: '🦀', python: '🐍',
+};
+
+function _ecoIcon(eco) {
+  return ECOSYSTEM_ICON[eco] || '🔬';
+}
+
+let _testLogOpen = {};  // test card toggle state: key → bool
+
+function toggleTestLog(rawKey) {
+  _testLogOpen[rawKey] = !_testLogOpen[rawKey];
+  const el = document.getElementById('tlog-' + rawKey);
+  if (el) el.classList.toggle('open', !!_testLogOpen[rawKey]);
+}
+
+function renderTestResults(d) {
+  const all = d.test_results || [];
+  const summaryEl = document.getElementById('test-summary-bar');
+  const listEl = document.getElementById('test-results');
+  const pipelineRunning = !isTerminalState(d.pipeline_state || 'IDLE');
+
+  if (!all.length) {
+    summaryEl.style.display = 'none';
+    listEl.innerHTML = '<div class="empty">No tests run yet.</div>';
+    return;
+  }
+
+  // Summary bar
+  const passN = all.filter(t => t.passed).length;
+  const rate = Math.round((passN / all.length) * 100);
+  const allPass = passN === all.length;
+  summaryEl.style.display = 'flex';
+  summaryEl.innerHTML = `
+    ${pipelineRunning ? '<div class="test-live-dot" title="Tests actively running"></div>' : ''}
+    <span class="test-summary-rate ${allPass ? 'all-pass' : 'some-fail'}">${passN}/${all.length} passing</span>
+    <div class="test-summary-track"><div class="test-summary-fill" style="width:${rate}%"></div></div>
+    <span style="font-size:10px;color:var(--muted)">${rate}%</span>`;
+
+  // Group by task_id, preserve chronological order of groups
+  const groups = [];
+  const groupIdx = {};
+  all.forEach(t => {
+    if (!(t.task_id in groupIdx)) {
+      groupIdx[t.task_id] = groups.length;
+      groups.push({ task_id: t.task_id, ecosystem: t.ecosystem, attempts: [] });
+    }
+    groups[groupIdx[t.task_id]].attempts.push(t);
+  });
+
+  // Render newest groups first; within each group show attempts newest-first
+  listEl.innerHTML = groups.slice().reverse().map(g => {
+    const latest = g.attempts[g.attempts.length - 1];
+    const icon = _ecoIcon(g.ecosystem);
+    const attemptsHtml = g.attempts.slice().reverse().map(t => {
+      const cls = t.passed ? 'pass' : 'fail';
+      const verdict = t.passed ? '✓ PASS' : '✗ FAIL';
+      const atNum = t.attempt || g.attempts.indexOf(t) + 1;
+      const badge = g.attempts.length > 1 ? `<span class="test-attempt-badge">#${atNum}</span>` : '';
+      const logHtml = renderTestLog(t.log || '', t.ecosystem);
+      const rawKey = (t.task_id + '-' + atNum).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const logId = 'tlog-' + rawKey;
+      const openCls = _testLogOpen[rawKey] ? ' open' : '';
+      return `<div class="test-card ${cls}">
+        <div class="test-header" onclick="toggleTestLog('${rawKey}')" title="Click to expand log">
+          <span class="test-verdict">${verdict}</span>
+          ${badge}
+          <span class="test-method">${esc((t.method || '').toUpperCase())}</span>
+          <span class="test-eco">${esc(t.ecosystem)}</span>
+          <span class="test-ts" style="margin-left:auto">${esc(t.ts)}</span>
+        </div>
+        ${logHtml ? `<div class="test-log${openCls}" id="${logId}">${logHtml}</div>` : ''}
+      </div>`;
+    }).join('');
+
+    const latestCls = latest.passed ? 'good' : 'bad';
+    return `<div class="test-group">
+      <div class="test-group-title">
+        <span class="test-group-icon">${icon}</span>
+        <span class="test-group-id">${esc(g.task_id)}</span>
+        <span class="test-group-eco">${esc(g.ecosystem)}</span>
+        ${g.attempts.length > 1 ? `<span style="font-size:9px;color:var(--muted);margin-left:auto">${g.attempts.length} attempts</span>` : ''}
+      </div>
+      <div class="test-attempts">${attemptsHtml}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderFinalSummary(d) {
+  const el = document.getElementById('final-summary');
+  const state = d.pipeline_state || 'IDLE';
+  if (!isTerminalState(state)) {
+    el.className = 'summary-grid';
+    el.innerHTML = '';
+    return;
+  }
+
+  const tasks = d.tasks || [];
+  const failed = tasks.filter(t => t.status === 'failed').length;
+  const artifacts = d.output_files || [];
+  const cost = d.cost || {};
+  const deployUrl = d.project?.deploy_url || d.deploy_url || d.project?.output_url || '';
+  const openClawStamp = d.openclaw_stamp || d.project?.openclaw_stamp || d.project?.stamp || (state === 'DONE' ? 'handoff ready' : 'needs followup');
+  const verdictClass = state === 'DONE' && failed === 0 ? 'good' : 'warn';
+  const cards = [
+    ['Verdict', state, verdictClass],
+    ['Deploy / Output', deployUrl || '-', deployUrl ? 'good' : ''],
+    ['Cost', money(cost.total_usd ?? cost.usd ?? cost.total), ''],
+    ['Elapsed', fmt(d.elapsed_s || 0), ''],
+    ['Tasks', `${tasks.length - failed}/${tasks.length} ok`, failed ? 'bad' : 'good'],
+    ['Failed', String(failed), failed ? 'bad' : 'good'],
+    ['Artifacts', String(artifacts.length), artifacts.length ? 'good' : ''],
+    ['OpenClaw', openClawStamp, state === 'DONE' ? 'good' : 'warn'],
+  ];
+  el.className = 'summary-grid visible';
+  el.innerHTML = cards.map(([label, value, cls]) =>
+    `<div class="summary-card">
+      <div class="summary-label">${esc(label)}</div>
+      <div class="summary-value ${cls}" title="${esc(value)}">${esc(value)}</div>
+    </div>`
+  ).join('');
+}
+
+function agentNodeFromActive(active) {
+  if (!active) return null;
+  return {
+    agent: active.agent || 'active',
+    model: active.model,
+    state: active.state,
+    task_id: active.task_id,
+    task_type: active.task_type,
+    started_epoch: active.started_epoch,
+    active: true,
+  };
+}
+
+function renderBuildHealth(d) {
+  const el = document.getElementById('build-health');
+  const tasks = d.tasks || [];
+  if (!tasks.length) { el.style.display = 'none'; return; }
+  el.style.display = '';
+
+  const done    = tasks.filter(t => t.status === 'done').length;
+  const failed  = tasks.filter(t => t.status === 'failed').length;
+  const running = tasks.filter(t => t.status === 'running').length;
+  const pending = tasks.length - done - failed - running;
+  const total   = tasks.length;
+  const pct = n => ((n / total) * 100).toFixed(1) + '%';
+
+  // Heal cycle count from events — state_writer writes "Heal tasks added — N fix task(s) queued"
+  const events = d.events || [];
+  const healCount = events.filter(e => /heal tasks added/i.test(e.msg || e.message || '')).length;
+
+  // Escalation count: work_log entries that mention escalation or nodes at rung > 1
+  const rawNodes = d.agent_nodes || {};
+  const nodeList = Array.isArray(rawNodes) ? rawNodes : Object.values(rawNodes);
+  const escalations = nodeList.filter(n => Number(n.rung || 0) > 1).length;
+
+  const activeModel = d.project?.worker_model || d.project?.orch_model || '—';
+
+  el.innerHTML = `
+    <div class="health-label">
+      <span>Build Health</span>
+      <span>${done}/${total} tasks</span>
+    </div>
+    <div class="health-track">
+      <div class="health-seg done"    style="width:${pct(done)}"></div>
+      <div class="health-seg running" style="width:${pct(running)}"></div>
+      <div class="health-seg failed"  style="width:${pct(failed)}"></div>
+      <div class="health-seg pending" style="width:${pct(pending)}"></div>
+    </div>
+    <div class="health-stats">
+      <div class="health-stat">Heal cycles <span class="${healCount > 0 ? 'warn' : 'good'}">${healCount}</span></div>
+      <div class="health-stat">Escalated <span class="${escalations > 2 ? 'warn' : 'good'}">${escalations}</span></div>
+      <div class="health-stat">Active <span>${esc(shortModel(activeModel))}</span></div>
+    </div>`;
+}
+
+function renderAgentNetwork(d) {
+  const el = document.getElementById('agent-network');
+  const nodes = [];
+  const rawNodes = d.agent_nodes || {};
+  if (Array.isArray(rawNodes)) {
+    rawNodes.forEach(n => nodes.push(n));
+  } else {
+    Object.keys(rawNodes).forEach(name => nodes.push({ agent: name, ...rawNodes[name] }));
+  }
+  const active = agentNodeFromActive(d.active_agent);
+  if (active && !nodes.some(n => (n.agent || n.name) === active.agent)) nodes.unshift(active);
+
+  if (!nodes.length) {
+    el.innerHTML = '<div class="empty">No agent network telemetry.</div>';
+    return;
+  }
+
+  el.innerHTML = nodes.slice(0, 8).map(n => {
+    const name = n.agent || n.name || 'agent';
+    const state = [n.state, n.task_id, n.task_type].filter(Boolean).join(' / ') || '-';
+    const rung = Number(n.rung ?? -1);
+    const model = [n.provider, shortModel(n.model)].filter(v => v && v !== '-').join('/');
+    const activeCls = n.active || n.status === 'running' || n.state === 'EXECUTING' ? ' active' : '';
+    const rungLabel = rung === 0 ? 'R0' : rung === 1 ? 'R1' : rung === 2 ? 'R2' : rung === 3 ? 'R3' : '';
+    const rungCls = rung <= 1 ? 'local' : rung === 2 ? 'sonnet' : 'opus';
+    const badge = rungLabel ? `<span class="rung-badge ${rungCls}" title="Worker ladder rung ${rung}">${rungLabel}</span>` : '';
+    return `<div class="agent-node${activeCls}">
+      <div class="agent-node-header">
+        <div class="agent-node-name" title="${esc(name)}">${esc(name)}</div>
+        ${badge}
+      </div>
+      <div class="agent-node-state" title="${esc(state)}">${esc(state)}</div>
+      <div class="agent-node-model" title="${esc(model)}">${esc(model || '-')}</div>
+    </div>`;
+  }).join('');
+}
+
+function projectBaseUrl(d) {
+  const base = d.project?.output_url;
+  if (!base) return null;
+  const baseNorm = String(base).replace(/^\/+|\/+$/g, '');
+  if (!baseNorm || baseNorm.includes('..')) return null;
+  return '/' + baseNorm.split('/').map(encodeURIComponent).join('/');
+}
+
+function artifactHref(file, d) {
+  const baseUrl = projectBaseUrl(d);
+  if (!baseUrl || !file?.path) return null;
+  let rel = String(file.path).replace(/\\/g, '/');
+  const outputDir = String(d.project?.output_dir || '').replace(/\\/g, '/');
+  if (outputDir && rel.startsWith(outputDir + '/')) rel = rel.slice(outputDir.length + 1);
+  const baseNorm = String(d.project?.output_url || '').replace(/^\/+|\/+$/g, '');
+  const baseIdx = rel.indexOf(baseNorm + '/');
+  if (baseIdx >= 0) rel = rel.slice(baseIdx + baseNorm.length + 1);
+  rel = rel.replace(/^\/+/, '');
+  if (!rel || rel.includes('..')) return null;
+  return baseUrl + '/' + rel.split('/').map(encodeURIComponent).join('/');
+}
+
+function renderFileRow(file, d) {
+  const name = String(file.path || '').replace(/\\/g, '/').split('/').pop();
+  const href = artifactHref(file, d);
+  const label = esc(name || file.path || 'artifact');
+  const title = esc(file.path || name);
+  const fileName = href
+    ? `<a class="file-name" href="${href}" target="_blank" rel="noopener" title="${title}">${label}</a>`
+    : `<span class="file-name" title="${title}">${label}</span>`;
+  const actions = href
+    ? `<span class="file-actions"><a class="file-link" href="${href}" target="_blank" rel="noopener">open</a><a class="file-link" href="${href}" download>download</a></span>`
+    : '';
+  return `<div class="file-row">
+    <span>[file]</span>
+    ${fileName}
+    <span class="file-task">${esc(file.task_id || '')}</span>
+    ${actions}
+  </div>`;
+}
+
+function finalArtifactRows(d) {
+  if (!isTerminalState(d.pipeline_state || 'IDLE') || !d.project?.output_url) return [];
+  const existing = new Set((d.output_files || []).map(f => String(f.path || '').replace(/\\/g, '/').split('/').pop()));
+  return ['REVIEW.md', 'HANDOFF.md'].filter(name => !existing.has(name)).map(name => ({ path: name, task_id: 'final' }));
+}
+
+function selectedTask() {
+  const tasks = _lastData?.tasks || [];
+  return tasks.find(t => t.id === selectedTaskId) || null;
+}
+
+function openTaskDrawer(taskId) {
+  selectedTaskId = taskId;
+  drawerOpen = true;
+  document.getElementById('drawer-backdrop').classList.add('open');
+  const drawer = document.getElementById('task-drawer');
+  drawer.classList.add('open');
+  drawer.setAttribute('aria-hidden', 'false');
+  renderTaskDrawer();
+}
+
+function closeTaskDrawer() {
+  drawerOpen = false;
+  document.getElementById('drawer-backdrop').classList.remove('open');
+  const drawer = document.getElementById('task-drawer');
+  drawer.classList.remove('open');
+  drawer.setAttribute('aria-hidden', 'true');
+}
+
+function renderTaskDrawer() {
+  if (!drawerOpen || !_lastData) return;
+  const task = selectedTask();
+  const title = document.getElementById('drawer-title');
+  const body = document.getElementById('drawer-body');
+  if (!task) {
+    title.textContent = 'Task';
+    body.innerHTML = '<div class="empty">Task is no longer present in the feed.</div>';
+    return;
+  }
+  title.textContent = `${task.id} [${task.status || 'unknown'}]`;
+  const files = (task.files || task.files_written || []).map(f => `<span class="file-pill">${esc(f)}</span>`).join('');
+  const tests = (_lastData.test_results || []).filter(t => t.task_id === task.id);
+  const outputs = (_lastData.output_files || []).filter(f => f.task_id === task.id);
+  body.innerHTML = `
+    <div class="drawer-section">
+      <div class="drawer-label">Objective</div>
+      <div class="drawer-text">${esc(task.objective || '-')}</div>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-label">Details</div>
+      <div class="drawer-kv">
+        <span>Status</span><span>${esc(task.status || '-')}</span>
+        <span>Type</span><span>${esc(task.type || '-')}</span>
+        <span>Model</span><span title="${esc(task.model_used || '')}">${esc(task.model_used || '-')}</span>
+        <span>Retry count</span><span>${esc(task.retry_count ?? 0)}</span>
+        <span>Tests</span><span>${esc(tests.length ? tests.map(t => t.passed ? 'PASS' : 'FAIL').join(', ') : '-')}</span>
+        <span>Outputs</span><span>${esc(outputs.length)}</span>
+      </div>
+      <div class="drawer-actions">
+        ${task.status === 'failed' ? '<button class="copy-btn warn-btn" onclick="runControl(\'retry_failed_task\', selectedTaskId)">Retry This Task</button>' : ''}
+      </div>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-label">Declared Files</div>
+      <div class="task-files">${files || '<span class="empty">No declared files.</span>'}</div>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-label">Output Files</div>
+      <div>${outputs.length ? outputs.map(f => renderFileRow(f, _lastData)).join('') : '<div class="empty">No output files for this task.</div>'}</div>
+    </div>
+    ${task.status === 'failed' ? `<div class="drawer-section">
+      <div class="drawer-label">Error Log</div>
+      <div class="drawer-text error-msg">${esc((task.error_log || 'No error log recorded.').slice(0, 400))}</div>
+    </div>` : ''}
+  `;
+}
+
+// ── Cost & Usage Panel ────────────────────────────────────────────────────────
+
+function toggleCostPanel() {
+  costPanelOpen = !costPanelOpen;
+  document.getElementById('cost-body').classList.toggle('open', costPanelOpen);
+  document.getElementById('cost-toggle-arrow').innerHTML = costPanelOpen ? '&#x25BC;' : '&#x25B6;';
+}
+
+function renderCostPanel(d) {
+  const cost = d.cost || {};
+  const totalUsd = cost.total_usd ?? cost.usd ?? cost.total ?? 0;
+  const hasSpend = Number(totalUsd) > 0;
+
+  // Total cost display
+  const totalEl = document.getElementById('cost-total');
+  if (hasSpend) {
+    totalEl.className = 'cost-total';
+    totalEl.textContent = money(totalUsd);
+  } else {
+    totalEl.className = 'cost-total zero';
+    totalEl.textContent = 'No API spend yet';
+  }
+
+  // Per-model cost breakdown from cost.by_model (values are floats in USD)
+  const workLog = d.work_log || [];
+  const costModels = cost.by_model || cost.models || {};
+  const modelMap = {};
+  Object.keys(costModels).forEach(m => {
+    const rec = costModels[m];
+    // by_model values are plain floats; .models (if ever added) would be objects
+    const costVal = typeof rec === 'number' ? rec : Number(rec.cost_usd || rec.cost || 0);
+    if (costVal > 0) {
+      if (!modelMap[m]) modelMap[m] = { cost: 0 };
+      modelMap[m].cost += costVal;
+    }
+  });
+
+  // Global token totals from cost.tokens
+  const tokens = cost.tokens || {};
+  const tokIn  = (tokens.input || 0) + (tokens.cache_read || 0);
+  const tokOut  = tokens.output || 0;
+
+  const modelRows = Object.entries(modelMap);
+  const tableEl = document.getElementById('cost-model-table');
+  if (modelRows.length) {
+    const tokenRow = (tokIn || tokOut)
+      ? `<tr style="border-top:1px solid var(--border);opacity:.7">
+           <td colspan="2" style="color:var(--muted)">total tokens</td>
+           <td>${tokIn > 0 ? tokIn.toLocaleString() : '-'} in / ${tokOut > 0 ? tokOut.toLocaleString() : '-'} out</td>
+         </tr>` : '';
+    tableEl.innerHTML = `<table class="cost-table">
+      <thead><tr>
+        <th>Model</th><th colspan="2">Cost</th>
+      </tr></thead>
+      <tbody>
+        ${modelRows.map(([m, v]) =>
+          `<tr>
+            <td title="${esc(m)}">${esc(shortModel(m))}</td>
+            <td colspan="2">${v.cost > 0 ? money(v.cost) : '-'}</td>
+          </tr>`
+        ).join('')}
+        ${tokenRow}
+      </tbody>
+    </table>`;
+  } else {
+    tableEl.innerHTML = '';
+  }
+
+  // Escalation counter: agent_nodes where rung > 1
+  const rawNodes = d.agent_nodes || {};
+  const nodeList = Array.isArray(rawNodes)
+    ? rawNodes
+    : Object.values(rawNodes);
+  const escalations = nodeList.filter(n => Number(n.rung || 0) > 1).length;
+
+  // Paid calls: use the authoritative count from cost.paid_calls
+  // (work_log model names are prefixed "anthropic/..." so string matching is unreliable)
+  const paidCalls = cost.paid_calls || 0;
+  const PAID_BUDGET = 15;
+
+  const statsEl = document.getElementById('cost-stats');
+  statsEl.innerHTML = `
+    <div class="cost-stat-row">
+      <span class="cost-stat-label">Escalations</span>
+      <span class="cost-stat-value ${escalations > 3 ? 'warn' : 'good'}">${escalations} escalation${escalations !== 1 ? 's' : ''}</span>
+    </div>
+    <div class="cost-stat-row">
+      <span class="cost-stat-label">Paid calls</span>
+      <span class="cost-stat-value ${paidCalls >= PAID_BUDGET ? 'warn' : 'good'}">${paidCalls} / ${PAID_BUDGET} budget</span>
+    </div>
+  `;
+}
+
 // ── Render ───────────────────────────────────────────────────────────────────
 
 function render(d) {
@@ -668,7 +1446,7 @@ function render(d) {
   const healBadge = document.getElementById('heal-badge');
   if (healVisited || healCount > 0) {
     healBadge.style.display = '';
-    healBadge.textContent = '⟳ Heal ' + healCount + '/2';
+    healBadge.textContent = '⟳ Heal ' + healCount;
   } else {
     healBadge.style.display = 'none';
   }
@@ -703,11 +1481,13 @@ function render(d) {
 
   // Header — elapsed
   document.getElementById('elapsed').textContent = fmt(d.elapsed_s || 0);
+  renderFinalSummary(d);
 
   // Review banner + OpenClaw banner (fetch once on DONE)
   if ((state === 'DONE' || state === 'NEEDS_FOLLOWUP') && d.project?.output_url && !reviewDone) {
     reviewDone = true;
-    const base = '/' + d.project.output_url;
+    const base = projectBaseUrl(d);
+    if (base) {
 
     // REVIEW.md
     fetch(base + '/REVIEW.md?t=' + Date.now())
@@ -747,12 +1527,13 @@ function render(d) {
         }
       })
       .catch(() => { ocBanner.style.display = 'none'; });
+    }
   }
 
   // Active agent
   const agentBox = document.getElementById('agent-box');
   if (d.active_agent) {
-    agentEpoch = d.active_agent.started_epoch;
+    agentEpoch = Number(d.active_agent.started_epoch) || Date.now() / 1000;
     const elapsed = Math.max(0, Date.now() / 1000 - agentEpoch);
     agentBox.className = 'agent-box active';
     const ami = modelInfo(d.active_agent.model);
@@ -762,12 +1543,19 @@ function render(d) {
     agentBox.innerHTML =
       `<div class="agent-name">${esc(d.active_agent.agent)} ${agentModelBadge}</div>` +
       `<div class="agent-model">${esc(d.active_agent.model)} · ${esc(d.active_agent.state)}</div>` +
+      `<div class="agent-meta">
+        <span>${esc(d.active_agent.task_id || 'orchestrator')}</span>
+        <span>${esc(d.active_agent.task_type || d.active_agent.provider || '')}</span>
+        <span>${d.active_agent.rung ? 'rung ' + esc(d.active_agent.rung) : ''}</span>
+      </div>` +
       `<div class="agent-timer" id="agent-timer">${fmt(elapsed)}</div>`;
   } else {
     agentEpoch = null;
     agentBox.className = 'agent-box';
     agentBox.innerHTML = '<div class="empty">No agent running</div>';
   }
+  renderBuildHealth(d);
+  renderAgentNetwork(d);
 
   // Tasks
   const tasks = d.tasks || [];
@@ -795,7 +1583,7 @@ function render(d) {
     const modelBadge = mi
       ? `<span class="model-badge ${mi.type}" title="${esc(t.model_used)}">${mi.tag} ${esc(mi.label)}</span>`
       : '';
-    return `<div class="task-row ${t.status}">
+    return `<div class="task-row ${t.status}" data-task-id="${esc(t.id)}" role="button" tabindex="0">
       <div class="task-header">
         <span class="task-id ${t.status}">${icon} ${esc(t.id)}</span>
         <span class="task-type">[${esc(t.type)}]</span>
@@ -825,25 +1613,8 @@ function render(d) {
     </div>`
   ).join('') || '<div class="empty">No errors.</div>';
 
-  // Test results
-  const testResults = (d.test_results || []).slice().reverse();
-  document.getElementById('test-results').innerHTML = testResults.length
-    ? testResults.map(t => {
-        const cls = t.passed ? 'pass' : 'fail';
-        const verdict = t.passed ? '✓ PASS' : '✗ FAIL';
-        const logHtml = renderTestLog(t.log || '', t.ecosystem);
-        return `<div class="test-card ${cls}">
-          <div class="test-header">
-            <span class="test-verdict">${verdict}</span>
-            <span class="test-method">${esc(t.method.toUpperCase())}</span>
-            <span class="test-eco">${esc(t.ecosystem)}</span>
-            <span class="test-task">${esc(t.task_id)}</span>
-            <span class="test-ts">${esc(t.ts)}</span>
-          </div>
-          ${logHtml ? `<div class="test-log">${logHtml}</div>` : ''}
-        </div>`;
-      }).join('')
-    : '<div class="empty">No tests run yet.</div>';
+  // Test results — grouped by task_id, showing healing progression
+  renderTestResults(d);
 
   // Work log
   const workLog = (d.work_log || []).slice().reverse(); // show newest at top
@@ -853,7 +1624,7 @@ function render(d) {
         const statusClass = e.status && e.status !== 'ok'
           ? ` wl-status-${e.status}` : '';
         const attempt = e.attempt ? `<span class="wl-attempt">(attempt ${e.attempt})</span>` : '';
-        const modelShort = (e.model || '').split('/').pop(); // strip openrouter/ prefix
+        const modelShort = shortModel(e.model || '');
         return `<div class="wl-row">
           <div class="wl-header">
             <span class="wl-ts">${esc(e.ts)}</span>
@@ -868,15 +1639,13 @@ function render(d) {
     : '<div class="empty">No activity yet.</div>';
 
   // Output files
-  const files = d.output_files || [];
-  document.getElementById('file-list').innerHTML = files.slice(0, 40).map(f => {
-    const name = String(f.path).replace(/\\/g, '/').split('/').pop();
-    return `<div class="file-row">
-      <span>📄</span>
-      <span class="file-name" title="${esc(f.path)}">${esc(name)}</span>
-      <span class="file-task">${esc(f.task_id)}</span>
-    </div>`;
-  }).join('') || '<div class="empty">No files written yet.</div>';
+  const linkedFiles = [...(d.output_files || []), ...finalArtifactRows(d)];
+  document.getElementById('file-list').innerHTML = linkedFiles.slice(0, 42).map(f => renderFileRow(f, d)).join('') || '<div class="empty">No files written yet.</div>';
+
+  // Cost & Usage panel
+  renderCostPanel(d);
+
+  renderTaskDrawer();
 }
 
 // ── Restart pipeline ─────────────────────────────────────────────────────────
@@ -912,6 +1681,138 @@ async function restartPipeline() {
 // ── Copy logs to clipboard ────────────────────────────────────────────────────
 
 let _lastData = null; // keep a reference to the latest poll result
+
+function setControlAvailability(allowed, label, statusClass) {
+  controlAllowed = !!allowed;
+  const status = document.getElementById('control-status');
+  status.textContent = label;
+  status.className = 'control-status ' + (statusClass || (allowed ? 'allowed' : 'blocked'));
+  status.title = allowed
+    ? 'Workflow controls are available'
+    : 'Click to enter a dashboard control token';
+  ['restart-btn', 'cancel-btn', 'retry-btn', 'continue-btn'].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = !controlAllowed;
+  });
+}
+
+function controlHeaders(jsonBody = false) {
+  const headers = {};
+  if (jsonBody) headers['Content-Type'] = 'application/json';
+  if (controlToken) headers['X-Mission-Control-Token'] = controlToken;
+  return headers;
+}
+
+async function requestControlToken() {
+  const token = prompt('Dashboard control token:', controlToken);
+  if (token === null) return;
+  controlToken = token.trim();
+  if (controlToken) {
+    sessionStorage.setItem('missionControlToken', controlToken);
+  } else {
+    sessionStorage.removeItem('missionControlToken');
+  }
+  await updateControlStatus();
+}
+
+async function updateControlStatus() {
+  try {
+    const r = await fetch('/api/control-status?t=' + Date.now(), { headers: controlHeaders() });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    if (data.control_allowed) {
+      setControlAvailability(true, data.local_request ? 'CTRL LOCAL' : 'CTRL TOKEN', 'allowed');
+    } else {
+      setControlAvailability(false, data.token_required ? 'CTRL TOKEN REQ' : 'CTRL VIEW ONLY', 'blocked');
+    }
+  } catch (_) {
+    setControlAvailability(false, 'CTRL UNKNOWN', 'error');
+  }
+}
+
+function controlEndpoint(action) {
+  return {
+    restart: '/api/restart',
+    cancel: '/api/cancel',
+    continue: '/api/continue',
+    retry_failed_task: '/api/retry_failed_task',
+  }[action];
+}
+
+function controlButton(action) {
+  return {
+    restart: document.getElementById('restart-btn'),
+    cancel: document.getElementById('cancel-btn'),
+    continue: document.getElementById('continue-btn'),
+    retry_failed_task: document.getElementById('retry-btn'),
+  }[action];
+}
+
+async function runControl(action, taskId) {
+  const endpoint = controlEndpoint(action);
+  if (!endpoint) return;
+  if (!controlAllowed) {
+    if (!controlToken) await requestControlToken();
+    await updateControlStatus();
+    if (!controlAllowed) {
+      showToast('Controls are unavailable from this session.');
+      return;
+    }
+  }
+
+  const payload = {};
+  let confirmText = '';
+  if (action === 'restart') {
+    const intent = _lastData?.project?.intent || _lastData?.project?.goal;
+    if (!intent) { showToast('No previous build to restart.'); return; }
+    confirmText = `Restart build?\n\n"${intent.slice(0, 120)}"`;
+  } else if (action === 'cancel') {
+    confirmText = 'Cancel the currently running pipeline?';
+  } else if (action === 'retry_failed_task') {
+    const failed = (_lastData?.tasks || []).filter(t => t.status === 'failed');
+    const target = taskId || selectedTaskId || (failed[0] && failed[0].id);
+    if (!target) { showToast('No failed task is available to retry.'); return; }
+    payload.task_id = target;
+    confirmText = `Retry failed task ${target}?`;
+  } else if (action === 'continue') {
+    const defaultIntent = 'Continue the current project by addressing remaining review, verification, and completeness issues.';
+    const intent = prompt('Continue project with instruction:', defaultIntent);
+    if (intent === null) return;
+    payload.intent = intent.trim() || defaultIntent;
+    confirmText = 'Continue the current project?';
+  }
+
+  if (confirmText && !confirm(confirmText)) return;
+
+  const btn = controlButton(action);
+  const original = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('restarting');
+    btn.textContent = 'Working...';
+  }
+
+  try {
+    const r = await fetch(endpoint, {
+      method: 'POST',
+      headers: controlHeaders(true),
+      body: Object.keys(payload).length ? JSON.stringify(payload) : undefined,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || data.error) throw new Error(data.error || ('HTTP ' + r.status));
+    const pid = data.pid ? ` (PID ${data.pid})` : '';
+    showToast(`${action.replace(/_/g, ' ')} accepted${pid}`);
+    await updateControlStatus();
+  } catch (e) {
+    showToast((e && e.message) ? e.message : 'Control request failed.');
+  } finally {
+    if (btn) {
+      btn.classList.remove('restarting');
+      btn.textContent = original;
+      btn.disabled = !controlAllowed;
+    }
+  }
+}
 
 function copyLogs() {
   if (!_lastData) { showToast('No data yet — run a pipeline first.'); return; }
@@ -1056,23 +1957,75 @@ async function poll() {
     const data = await r.json();
     _lastData = data;
     lastFetch = Date.now();
-    // restore live indicator
-    const dot = document.getElementById('live-dot');
-    dot.className = 'live-dot';
-    document.getElementById('live-label').textContent = 'LIVE';
+    updateFeedHealth(data);
     render(data);
   } catch (_) {
     const age = Math.floor((Date.now() - lastFetch) / 1000);
-    if (age > 8) {
-      const dot = document.getElementById('live-dot');
-      dot.className = 'live-dot stale';
-      document.getElementById('live-label').textContent = `STALE ${age}s`;
-    }
+    setHealth('UNREACHABLE', `${age}s`);
   }
 }
 
+document.addEventListener('click', event => {
+  const row = event.target.closest('.task-row[data-task-id]');
+  if (!row) return;
+  openTaskDrawer(row.getAttribute('data-task-id'));
+});
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closeTaskDrawer();
+  if ((event.key === 'Enter' || event.key === ' ') && event.target.matches('.task-row[data-task-id]')) {
+    event.preventDefault();
+    openTaskDrawer(event.target.getAttribute('data-task-id'));
+  }
+});
+
+function startMatrixRain() {
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const canvas = document.getElementById('matrix-rain');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const glyphs = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#$%&*+-/<>[]{}';
+  let columns = [];
+  let fontSize = 15;
+
+  function resize() {
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    canvas.width = Math.floor(window.innerWidth * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    fontSize = window.innerWidth < 600 ? 12 : 15;
+    columns = Array.from({ length: Math.ceil(window.innerWidth / fontSize) }, () =>
+      Math.floor(Math.random() * -window.innerHeight / fontSize)
+    );
+  }
+
+  function tick() {
+    ctx.fillStyle = 'rgba(0, 5, 2, 0.13)';
+    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+    ctx.font = fontSize + 'px "Cascadia Code", Consolas, monospace';
+    columns.forEach((y, i) => {
+      const text = glyphs[Math.floor(Math.random() * glyphs.length)];
+      const x = i * fontSize;
+      const py = y * fontSize;
+      ctx.fillStyle = Math.random() > 0.965 ? '#d8ffe4' : '#32ff7e';
+      ctx.fillText(text, x, py);
+      columns[i] = py > window.innerHeight && Math.random() > 0.975 ? 0 : y + 1;
+    });
+    window.requestAnimationFrame(tick);
+  }
+
+  window.addEventListener('resize', resize);
+  resize();
+  tick();
+}
+
+startMatrixRain();
+updateControlStatus();
 poll();
 setInterval(poll, 1000);
+setInterval(updateControlStatus, 5000);
 </script>
 </body>
 </html>

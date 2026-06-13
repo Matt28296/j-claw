@@ -439,9 +439,21 @@ that the harness feeds to ffmpeg to render the final film. Write every file comp
 - README.md: explain how to render locally (bash render.sh) and that the harness runs the
   ffmpeg line automatically; note that ffmpeg must be installed.
 - If (and only if) the task explicitly requires a Python render pipeline instead of a
-  render.sh, name the entry script render.py and write EVERY local module it imports,
-  completely, in the same task — the harness executes `python render.py` and a missing
-  module is an immediate ModuleNotFoundError failure.
+  render.sh, name the entry script render_scene.py (or render.py) and write EVERY local
+  module it imports, completely, in the same task — the harness executes
+  `python render_scene.py` and a missing module is an immediate ModuleNotFoundError failure.
+  CRITICAL: a Python render script MUST call `subprocess.run(CMD, check=True)` — it must
+  EXECUTE ffmpeg, not print the command. `print(cmd)` or `print(shlex.join(cmd))` produces
+  NO output file and causes an immediate harness failure. The output file must exist on disk
+  when the script exits 0.
+- Windows ffmpeg constraints (this host runs Windows + ffmpeg 8.1.1):
+  * fontconfig is NOT installed — omit `drawtext` entirely; use solid `color=` backgrounds.
+  * `geq=` filter inside `filter_complex` fails with "Invalid argument" — use simple
+    `color=c=RRGGBB` instead of gradient expressions.
+  * Font paths with `:` (e.g. `C:/Windows/Fonts/arial.ttf`) break option parsing — skip
+    `fontfile=` entirely.
+  * Safe minimal approach: `-f lavfi -i "color=c=HEX:size=WxH:rate=FPS:duration=N"`
+    paired with `-f lavfi -i "aevalsrc=exprs=EXPR:c=mono:s=44100:d=N"` always works.
 - NEVER emit placeholder ffmpeg flags, NEVER leave the output path unresolved, and NEVER
   produce an index.html — this is a film, not a web page.
 """,

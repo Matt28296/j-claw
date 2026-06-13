@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, wait as _cf_wait, FIRST_EXCEP
 from pathlib import Path
 from rich.console import Console
 
-from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, MAX_PARALLEL_WORKERS, MAX_TASKS, WORKER_TASK_TIMEOUT, WORKER_LADDER, spec_stack
+from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, WORKER_PROVIDER, MAX_PARALLEL_WORKERS, MAX_TASKS, WORKER_TASK_TIMEOUT, WORKER_LADDER, spec_stack
 from experience_log import log_outcome, get_relevant_hints
 from project import ProjectInstance, Task
 from worker import execute_task, routed_rung
@@ -144,15 +144,55 @@ class Scheduler:
                 task.status = "failed"
                 task.error_log = f"Task timed out after {WORKER_TASK_TIMEOUT}s"
                 sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
+                sw.on_agent_done(task_id=task.id, status="failed", summary=task.error_log)
                 console.print(f"  [red]Task {task.id} timed out ({WORKER_TASK_TIMEOUT}s) — retrying.[/red]")
                 fut.cancel()
                 self._handle_error(task)
             for fut in done:
                 exc = fut.exception()
                 if exc:
+                    task = futures[fut]
+                    task.status = "failed"
+                    task.error_log = str(exc)
+                    sw.on_agent_done(task_id=task.id, status="failed", summary=task.error_log[:240])
+                    sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
                     console.print(f"  [red]Worker thread raised: {exc}[/red]")
+                    self._handle_error(task)
 
     # ── task execution ────────────────────────────────────────────────────────
+
+    def _start_worker_telemetry(self, task: Task, agent: str, model: str,
+                                provider: str, rung: int | None = None,
+                                summary: str | None = None) -> None:
+        sw.on_agent_call(
+            agent,
+            model,
+            "EXECUTING",
+            task_id=task.id,
+            task_type=task.type,
+            provider=provider,
+            rung=rung,
+            summary=summary or f"Executing {task.type} task",
+        )
+
+    def _finish_worker_telemetry(self, task: Task, agent: str, status: str,
+                                 summary: str, model: str | None = None) -> None:
+        sw.on_agent_done(
+            agent=agent,
+            task_id=task.id,
+            status=status,
+            summary=summary,
+            model=model,
+        )
+
+    def _record_written_files(self, written, task: Task) -> None:
+        for item in written or []:
+            path = Path(item)
+            try:
+                rel = path.relative_to(self.instance.output_dir) if path.is_absolute() else path
+            except ValueError:
+                rel = path
+            sw.on_file_written(str(rel).replace("\\", "/"), task.id)
 
     def _run_task(self, task: Task) -> None:
         console.print(
@@ -167,9 +207,24 @@ class Scheduler:
         # Asset tasks (declared, or any task that produces only binary image files) route to
         # asset_worker — keeps binary base64-in-JSON generation out of the code worker.
         if _is_asset_task(task):
+            self._start_worker_telemetry(
+                task,
+                "asset_worker",
+                "asset_worker",
+                "asset_worker",
+                summary="Generating image assets",
+            )
             written = generate_assets(task, self.instance.spec, self.instance.output_dir)
-            result = {"files": [], "model_used": "sd-webui" if can_generate() else "placeholder"}
+            self._record_written_files(written, task)
+            result = {"files": [], "model_used": "sd-webui" if can_generate() else "stub:asset"}
             task.status = "done"
+            self._finish_worker_telemetry(
+                task,
+                "asset_worker",
+                "done",
+                f"Wrote {len(written)} asset file(s)",
+                model=result["model_used"],
+            )
             sw.on_task_done(task.id, result["model_used"])
             console.print(f"  [green]✓ asset done[/green]  [dim]({len(written)} file(s) written)[/dim]")
             return
@@ -177,9 +232,24 @@ class Scheduler:
         # Audio tasks: route to audio_worker instead of code worker
         if task.type == "audio":
             from audio_worker import generate_audio, can_generate as audio_can_generate
+            self._start_worker_telemetry(
+                task,
+                "audio_worker",
+                "audio_worker",
+                "audio_worker",
+                summary="Generating audio assets",
+            )
             written = generate_audio(task, self.instance.spec, self.instance.output_dir)
-            result = {"files": [], "model_used": "coqui-tts" if audio_can_generate() else "silent-placeholder"}
+            self._record_written_files(written, task)
+            result = {"files": [], "model_used": "coqui-tts" if audio_can_generate() else "stub:audio"}
             task.status = "done"
+            self._finish_worker_telemetry(
+                task,
+                "audio_worker",
+                "done",
+                f"Wrote {len(written)} audio file(s)",
+                model=result["model_used"],
+            )
             sw.on_task_done(task.id, result["model_used"])
             console.print(f"  [green]✓ audio done[/green]  [dim]({len(written)} file(s) written)[/dim]")
             return
@@ -187,8 +257,16 @@ class Scheduler:
         # Video tasks: route to video_worker (incl. mistyped tasks whose outputs
         # are all video files — the code worker cannot produce binary video).
         if _is_video_task(task):
+            self._start_worker_telemetry(
+                task,
+                "video_worker",
+                "ffmpeg" if video_can_generate() else "stub:video",
+                "video_worker",
+                summary="Rendering video outputs",
+            )
             written, failures = generate_video(task, self.instance.spec, self.instance.output_dir)
             task.binary_outputs = {str(p.relative_to(self.instance.output_dir)): p for p in written}
+            self._record_written_files(written, task)
             # Same declared-files guarantee as the code-worker path: a video
             # task mixing text outputs (render.sh) with its video output cannot
             # have the text half silently skipped.
@@ -201,11 +279,17 @@ class Scheduler:
                 task.error_log = "Video render failed:\n" + "\n".join(
                     f"  - {rel}: {reason}" for rel, reason in failures.items()
                 )
+                self._finish_worker_telemetry(
+                    task,
+                    "video_worker",
+                    "failed",
+                    f"Video render failed for {len(failures)} file(s)",
+                )
                 sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
                 console.print(f"  [red]✗ video render failed ({len(failures)} file(s))[/red]")
                 self._handle_error(task)
                 return
-            model_used = "ffmpeg" if video_can_generate() else "video-stub"
+            model_used = "ffmpeg" if video_can_generate() else "stub:video"
             # Video tasks must pass their declared verification (ffprobe/
             # frame_integrity/sync_check) like any other task — previously they
             # were marked done without ever running it.
@@ -214,23 +298,56 @@ class Scheduler:
             if not passed:
                 task.status = "failed"
                 task.error_log = f"Verification ({task.verification}) failed:\n{log}"
+                self._finish_worker_telemetry(
+                    task,
+                    "video_worker",
+                    "failed",
+                    f"Verification failed: {task.verification}",
+                    model=model_used,
+                )
                 sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
                 self._handle_error(task)
                 return
             task.status = "done"
+            self._finish_worker_telemetry(
+                task,
+                "video_worker",
+                "done",
+                f"Wrote {len(written)} video file(s)",
+                model=model_used,
+            )
             sw.on_task_done(task.id, model_used)
             console.print(f"  [green]✓ video done[/green]  [dim]({len(written)} file(s) written)[/dim]")
             return
 
         # Music tasks: route to music_worker
         if task.type == "music":
-            from music_worker import generate_music
+            from music_worker import generate_music, can_generate as music_can_generate
+            self._start_worker_telemetry(
+                task,
+                "music_worker",
+                "musicgen" if music_can_generate() else "stub:music",
+                "music_worker",
+                summary="Generating music assets",
+            )
             written = generate_music(task, self.instance.spec, self.instance.output_dir)
+            self._record_written_files(written, task)
+            model_used = "musicgen" if music_can_generate() else "stub:music"
             task.status = "done"
-            sw.on_task_done(task.id, "music_worker")
+            self._finish_worker_telemetry(
+                task,
+                "music_worker",
+                "done",
+                f"Wrote {len(written)} music file(s)",
+                model=model_used,
+            )
+            sw.on_task_done(task.id, model_used)
             console.print(f"  [green]✓ music done[/green]  [dim]({len(written)} file(s) written)[/dim]")
             return
 
+        rung = None
+        prov = WORKER_PROVIDER
+        mdl = WORKER_MODEL
         if WORKER_LADDER:
             rung = routed_rung(task)
             prov, mdl = WORKER_LADDER[rung]
@@ -239,6 +356,15 @@ class Scheduler:
                 f"  [dim]routed → rung {rung}: {prov}/{mdl}  "
                 f"(type={task.type}, files={len(task.files)}, deps={len(task.dependencies)})[/dim]{esc}"
             )
+
+        self._start_worker_telemetry(
+            task,
+            "code_worker",
+            mdl,
+            prov,
+            rung=rung,
+            summary="Generating declared files",
+        )
 
         try:
             context = _build_context(task, self.instance.output_dir)
@@ -283,17 +409,36 @@ class Scheduler:
             if passed:
                 model_used = result.get("model_used", WORKER_MODEL)
                 task.status = "done"
+                self._finish_worker_telemetry(
+                    task,
+                    "code_worker",
+                    "done",
+                    f"Wrote {len(task.output_files)} file(s)",
+                    model=model_used,
+                )
                 sw.on_task_done(task.id, model_used)
                 console.print(f"  [green]✓ done[/green]  [dim](worker: {model_used})[/dim]")
             else:
                 task.status = "failed"
                 task.error_log = f"Verification ({task.verification}) failed:\n{log}"
+                self._finish_worker_telemetry(
+                    task,
+                    "code_worker",
+                    "failed",
+                    f"Verification failed: {task.verification}",
+                )
                 sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
                 self._handle_error(task)
 
         except Exception as exc:  # noqa: BLE001
             task.status = "failed"
             task.error_log = str(exc)
+            self._finish_worker_telemetry(
+                task,
+                "code_worker",
+                "failed",
+                str(exc)[:240],
+            )
             console.print(f"  [red]✗ error: {exc}[/red]")
             sw.on_task_failed(task.id, task.error_log, task.retry_count + 1)
             if task.retry_count >= MAX_RETRIES_PER_TASK:
