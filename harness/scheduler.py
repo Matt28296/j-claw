@@ -216,7 +216,7 @@ class Scheduler:
             )
             written = generate_assets(task, self.instance.spec, self.instance.output_dir)
             self._record_written_files(written, task)
-            result = {"files": [], "model_used": "sd-webui" if can_generate() else "placeholder"}
+            result = {"files": [], "model_used": "sd-webui" if can_generate() else "stub:asset"}
             task.status = "done"
             self._finish_worker_telemetry(
                 task,
@@ -241,7 +241,7 @@ class Scheduler:
             )
             written = generate_audio(task, self.instance.spec, self.instance.output_dir)
             self._record_written_files(written, task)
-            result = {"files": [], "model_used": "coqui-tts" if audio_can_generate() else "silent-placeholder"}
+            result = {"files": [], "model_used": "coqui-tts" if audio_can_generate() else "stub:audio"}
             task.status = "done"
             self._finish_worker_telemetry(
                 task,
@@ -260,7 +260,7 @@ class Scheduler:
             self._start_worker_telemetry(
                 task,
                 "video_worker",
-                "ffmpeg" if video_can_generate() else "video-stub",
+                "ffmpeg" if video_can_generate() else "stub:video",
                 "video_worker",
                 summary="Rendering video outputs",
             )
@@ -289,7 +289,7 @@ class Scheduler:
                 console.print(f"  [red]✗ video render failed ({len(failures)} file(s))[/red]")
                 self._handle_error(task)
                 return
-            model_used = "ffmpeg" if video_can_generate() else "video-stub"
+            model_used = "ffmpeg" if video_can_generate() else "stub:video"
             # Video tasks must pass their declared verification (ffprobe/
             # frame_integrity/sync_check) like any other task — previously they
             # were marked done without ever running it.
@@ -326,13 +326,13 @@ class Scheduler:
             self._start_worker_telemetry(
                 task,
                 "music_worker",
-                "musicgen" if music_can_generate() else "silent-placeholder",
+                "musicgen" if music_can_generate() else "stub:music",
                 "music_worker",
                 summary="Generating music assets",
             )
             written = generate_music(task, self.instance.spec, self.instance.output_dir)
             self._record_written_files(written, task)
-            model_used = "musicgen" if music_can_generate() else "silent-placeholder"
+            model_used = "musicgen" if music_can_generate() else "stub:music"
             task.status = "done"
             self._finish_worker_telemetry(
                 task,
