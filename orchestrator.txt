@@ -767,7 +767,16 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
    - Phaser and socket-io game projects that mention sound/music should include one audio task.
 
 21. **Top-level film projects (`stack: "film"`) MUST use FORMAT 5 decomposition.** A film
-   cannot fit within a single 50-task project instance — emit FORMAT 5 from INIT.
+   cannot fit within a single 50-task project instance — emit FORMAT 5 from the top-level
+   INIT only.
+
+   **FORMAT 5 is ONLY valid as a response to a top-level INIT call. It is NEVER valid
+   at any other pipeline state.** In particular:
+   - `SPEC_ACCEPTED` (task DAG) must ALWAYS answer with FORMAT 2 — never FORMAT 5.
+   - Any payload carrying `decomposition_allowed: false` or `sub_project_depth` must
+     NEVER receive FORMAT 5 in ANY state, including INIT.
+   - A `decomposition_rejected` key in the payload means a previous FORMAT 5 response
+     was already rejected — you must emit the requested flat format on this retry.
 
    **EXCEPTION — you may already BE a sub-project.** When the INIT payload contains
    `sub_project_depth` (any value ≥ 1) or `decomposition_allowed: false`, you are planning
