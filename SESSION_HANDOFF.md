@@ -1,12 +1,61 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-12, third session** (previous: 2026-06-12 second session + morning, 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-13, fourth session** (previous: 2026-06-12 third session, second session + morning, 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#41 are MERGED to `main`.**
+**PRs #10–#41 are MERGED to `main`. Two additional dashboard commits are local-only (not yet PR'd): `d419403` + `acb8fd4`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-13 (fourth session) — v7 film validation + dashboard health panel + cost panel
+
+### v7 film validation — ffmpeg render path confirmed for the first time
+
+Build ran against `film_validation_v7/` (root dir, not `harness/projects/` — PROJECTS_DIR=./projects resolved relative to CWD).
+
+**PRs #39 + #40 both validated in production:**
+- PR #39 depth guard: scene sub-projects stayed FORMAT 2, never re-decomposed.
+- PR #40 cross-provider fallback: Gemini hit REVIEW_FAILED schema error 3× → automatic switch to `claude-sonnet-4-6` orchestrator. Console warning confirmed.
+
+**Critical findings (workers consistently generate broken render_scene.py):**
+1. **Workers print instead of run ffmpeg.** deepseek, Sonnet, and Opus all generated `main()` as `print(shlex.join(cmd))` or `print(cmd)` — producing no output.mp4. Harness reads render_scene.py output; printing the command produces nothing. **Fix needed: add rule to orchestrator.txt — render_scene.py must call `subprocess.run(cmd, check=True)`, never print.**
+2. **Fontconfig not on Windows.** `drawtext` ffmpeg filter requires fontconfig; this Windows host has none → exit 0xC0000005 (access violation). Use `fontfile='...'` without `:` in the path is impossible (`C:` breaks option parsing). **Workaround: skip drawtext entirely.**
+3. **geq in filter_complex fails.** Complex `geq=r='...':g='...':b='...'` expressions in filter_complex context return "Invalid argument" on this ffmpeg 8.1.1 build. **Workaround: solid `color=` background instead.**
+4. **Working minimal approach confirmed.** Simple `color=c=0xff6b35` + `aevalsrc=0.1*sin(...)` — no filter_complex, no geq, no drawtext — produces a valid 304 KB output.mp4.
+
+**Working render_scene.py (save as reference):**
+```python
+import subprocess, sys
+CMD = ["ffmpeg", "-y",
+  "-f", "lavfi", "-i", "color=c=0xff6b35:size=1920x1080:rate=24:duration=20",
+  "-f", "lavfi", "-i", "aevalsrc=exprs=0.1*sin(2*PI*440*t):c=mono:s=44100:d=20",
+  "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+  "-pix_fmt", "yuv420p", "-r", "24", "-t", "20", "-c:a", "aac", "-b:a", "128k",
+  "-ar", "44100", "-ac", "2", "-movflags", "+faststart", "output.mp4"]
+def main():
+    try: subprocess.run(CMD, check=True)
+    except subprocess.CalledProcessError as exc: sys.exit(exc.returncode)
+if __name__ == "__main__": main()
+```
+
+**Gemini REVIEW_FAILED bug persists:** `'review_result' is a required property` — Gemini repeatedly omits it. PR #40 fallback catches it automatically, but the root cause should be filed/tracked.
+
+### Dashboard enhancements — local commits d419403 + acb8fd4 (need PR)
+
+Two commits on `main` locally, not yet pushed:
+
+1. **`d419403` — cost & escalation panel** (cherry-picked from worktree agent — only index.html, backend deletions discarded):
+   - 4th column in bottom row. Per-model token table from work_log. Total USD spend. Escalation counter, paid-call budget indicator. Collapsed by default.
+
+2. **`acb8fd4` — rung badges + build health bar**:
+   - Rung badges on agent nodes: R0/R1 green (Ollama local), R2 amber (Sonnet), R3 red (Opus).
+   - Build health bar above agent network: colour-segmented done/running/failed/pending.
+   - Health stats row: heal cycle count (from events), escalation count, active model label.
+
+**Worktree agent hazard confirmed:** the cost-panel worktree agent also deleted ~600 lines from state_writer.py, dashboard.py, scheduler.py (removed `agent_nodes`, `updated_at_epoch`, `sequence`, `_MAX_ERROR_LOG_CHARS`, `_MAX_AGENT_NODES`). Never merge a worktree branch without reviewing ALL changed files, not just index.html.
 
 ---
 
@@ -52,8 +101,8 @@ Also this session:
    - Design: availability failures go sideways (cross-provider, same tier); capability failures go up the worker ladder (Opus, PR #36).
 4. **PR #41 — `harness/test_llm_layers.py`:** 25 mocked tests, all green. Zero API spend. Covers: both orchestrator providers (all retry/fallback/error shapes), `CompositeOrchestrator`, `_parse_retry_delay` (all 4 shapes), `routed_rung` (4-rung Opus ladder), `execute_task` attempt chain (rung walk-up, `ValueError` short-circuit, paid-budget clamp, all-exhausted), final review fail-closed regression guard.
 
-### What's still remaining
-1. **v7 film validation** — pending Gemini quota reset. Must reach the ffmpeg render path for the first time. Run: `PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python harness/main.py --yes "<film prompt>" --output film_validation_v7`
+### What's still remaining after third session
+1. **v7 film validation** — ✅ done in fourth session (see above).
 2. **Factory rehearsal** — 7-item Telegram checklist. All green → "factory" status.
 
 ---
@@ -280,29 +329,19 @@ self-description (it says it routes to `qwen2.5-coder:14b` — actually the 3-ru
 
 ---
 
-## 📋 WHAT'S LEFT TO FINALIZE (priority order, updated 2026-06-12 third session)
+## 📋 WHAT'S LEFT TO FINALIZE (priority order, updated 2026-06-13 fourth session)
 
-*(Items 1–4 of the second-session list are all done: #30 merged, Google key regenerated,
-Anthropic credits topped up, deepseek rung-1 live. Current list — see the third-session
-section above for detail:)*
-
-1. **P2** — DAG-stage decomposition guard (`main.py:361` + orchestrator.txt rule 21).
-2. **P3** — Gemini 429 retry-delay parsing (`orchestrator.py` wait extraction).
-3. **P3.4** — emergency cross-provider orchestrator fallback (Gemini exhausted → Sonnet).
-4. **P3.5** — `harness/test_llm_layers.py` mocked fallback-layer test suite.
-5. **v7 film validation** — Gemini, after fixes + quota reset; UTF-8 env; must reach the
-   render path for the first time.
-6. **Factory rehearsal** (binding acceptance test) — from Telegram only; see README roadmap.
-7. **Carry-overs:** native mobile CI runner; Playwright runner task type in the DAG;
+1. **Dashboard PR** — push local commits `d419403` + `acb8fd4` as a PR (cost panel + health bar). These are on `main` locally but not remote.
+2. **orchestrator.txt rule** — add rule: render_scene.py must call `subprocess.run(cmd, check=True)`, NEVER `print(cmd)`. Workers consistently generate the wrong thing.
+3. **Factory rehearsal** (binding acceptance test) — from Telegram only; see README roadmap.
+4. **Carry-overs:** native mobile CI runner; Playwright runner task type in the DAG;
    IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect prompts.
-8. **Optional hardening / polish:**
-   - ~~Prompt caching gaps (final_review, e2e)~~ — closed (PR #28). Worker-escalation rung
-     already had cache_control. Optional remainder: 1-hour TTL on the orchestrator cache
-     (only relevant when ORCHESTRATOR_PROVIDER=anthropic).
+5. **Optional hardening / polish:**
    - Worker-timeout hard bound: `shutdown(wait=False, cancel_futures=True)` (3.9+) + audit inner
      timeouts.
    - OpenClaw: bot self-description, `OLLAMA_MAX_LOADED_MODELS=1`, prune dangling manifests.
    - Prune the 6 stale `worktree-agent-*` branches (dead — work was salvaged into `056ad67`).
+   - Gemini REVIEW_FAILED bug — file/track that `review_result` is consistently omitted; PR #40 workaround works but root cause is unresolved.
 
 ### Known structural ceilings
 - Worker quality is bounded by 14B-class local models (Ollama-only worker constraint is locked).
