@@ -255,6 +255,30 @@ body::before {
 .agent-node-name { color: var(--green); font-size: 10px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent-node-state { color: var(--text); font-size: 10px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent-node-model { color: var(--muted); font-size: 9px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-node-header { display: flex; align-items: center; gap: 4px; }
+.rung-badge {
+  font-size: 8px; font-weight: bold; border-radius: 2px;
+  padding: 1px 3px; flex-shrink: 0; letter-spacing: .3px;
+}
+.rung-badge.local  { background: rgba(50,255,126,.15); color: var(--green); }
+.rung-badge.sonnet { background: rgba(245,215,110,.15); color: var(--amber); }
+.rung-badge.opus   { background: rgba(255,94,94,.18);  color: var(--red); }
+
+/* Build health bar */
+.build-health { margin-bottom: 6px; }
+.health-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 3px; display: flex; justify-content: space-between; }
+.health-track { width: 100%; height: 5px; background: #0b2211; border-radius: 3px; overflow: hidden; display: flex; gap: 1px; }
+.health-seg { height: 100%; transition: width .4s ease; }
+.health-seg.done    { background: var(--green); }
+.health-seg.failed  { background: var(--red); }
+.health-seg.running { background: var(--amber); }
+.health-seg.pending { background: #1a3a28; }
+.health-stats { display: flex; gap: 8px; margin-top: 3px; font-size: 9px; }
+.health-stat { color: var(--muted); }
+.health-stat span { font-weight: bold; }
+.health-stat span.warn { color: var(--amber); }
+.health-stat span.good { color: var(--green); }
+.health-stat span.bad  { color: var(--red); }
 
 /* Task progress bar */
 .task-count { font-size: 11px; color: #8b949e; margin-bottom: 4px; }
@@ -676,6 +700,7 @@ body::before {
       <div id="agent-box" class="agent-box">
         <div class="empty">No agent running</div>
       </div>
+      <div id="build-health" class="build-health" style="display:none"></div>
       <div id="agent-network" class="agent-network"></div>
     </div>
     <div class="tasks-section">
@@ -951,6 +976,48 @@ function agentNodeFromActive(active) {
   };
 }
 
+function renderBuildHealth(d) {
+  const el = document.getElementById('build-health');
+  const tasks = d.tasks || [];
+  if (!tasks.length) { el.style.display = 'none'; return; }
+  el.style.display = '';
+
+  const done    = tasks.filter(t => t.status === 'done').length;
+  const failed  = tasks.filter(t => t.status === 'failed').length;
+  const running = tasks.filter(t => t.status === 'running').length;
+  const pending = tasks.length - done - failed - running;
+  const total   = tasks.length;
+  const pct = n => ((n / total) * 100).toFixed(1) + '%';
+
+  // Heal cycle count from events
+  const events = d.events || [];
+  const healCount = events.filter(e => /heal cycle|heal loop/i.test(e.message || e.msg || '')).length;
+
+  // Escalation count: work_log entries that mention escalation or nodes at rung > 1
+  const rawNodes = d.agent_nodes || {};
+  const nodeList = Array.isArray(rawNodes) ? rawNodes : Object.values(rawNodes);
+  const escalations = nodeList.filter(n => Number(n.rung || 0) > 1).length;
+
+  const activeModel = d.project?.worker_model || d.project?.orch_model || '—';
+
+  el.innerHTML = `
+    <div class="health-label">
+      <span>Build Health</span>
+      <span>${done}/${total} tasks</span>
+    </div>
+    <div class="health-track">
+      <div class="health-seg done"    style="width:${pct(done)}"></div>
+      <div class="health-seg running" style="width:${pct(running)}"></div>
+      <div class="health-seg failed"  style="width:${pct(failed)}"></div>
+      <div class="health-seg pending" style="width:${pct(pending)}"></div>
+    </div>
+    <div class="health-stats">
+      <div class="health-stat">Heal <span class="${healCount > 0 ? 'warn' : 'good'}">${healCount}</span></div>
+      <div class="health-stat">Escalated <span class="${escalations > 2 ? 'warn' : 'good'}">${escalations}</span></div>
+      <div class="health-stat">Active <span>${esc(shortModel(activeModel))}</span></div>
+    </div>`;
+}
+
 function renderAgentNetwork(d) {
   const el = document.getElementById('agent-network');
   const nodes = [];
@@ -971,10 +1038,17 @@ function renderAgentNetwork(d) {
   el.innerHTML = nodes.slice(0, 8).map(n => {
     const name = n.agent || n.name || 'agent';
     const state = [n.state, n.task_id, n.task_type].filter(Boolean).join(' / ') || '-';
-    const model = [n.provider, shortModel(n.model), n.rung ? 'rung ' + n.rung : ''].filter(v => v && v !== '-').join(' ');
+    const rung = Number(n.rung ?? -1);
+    const model = [n.provider, shortModel(n.model)].filter(v => v && v !== '-').join('/');
     const activeCls = n.active || n.status === 'running' || n.state === 'EXECUTING' ? ' active' : '';
+    const rungLabel = rung === 0 ? 'R0' : rung === 1 ? 'R1' : rung === 2 ? 'R2' : rung === 3 ? 'R3' : '';
+    const rungCls = rung <= 1 ? 'local' : rung === 2 ? 'sonnet' : 'opus';
+    const badge = rungLabel ? `<span class="rung-badge ${rungCls}" title="Worker ladder rung ${rung}">${rungLabel}</span>` : '';
     return `<div class="agent-node${activeCls}">
-      <div class="agent-node-name" title="${esc(name)}">${esc(name)}</div>
+      <div class="agent-node-header">
+        <div class="agent-node-name" title="${esc(name)}">${esc(name)}</div>
+        ${badge}
+      </div>
       <div class="agent-node-state" title="${esc(state)}">${esc(state)}</div>
       <div class="agent-node-model" title="${esc(model)}">${esc(model || '-')}</div>
     </div>`;
@@ -1336,6 +1410,7 @@ function render(d) {
     agentBox.className = 'agent-box';
     agentBox.innerHTML = '<div class="empty">No agent running</div>';
   }
+  renderBuildHealth(d);
   renderAgentNetwork(d);
 
   // Tasks
