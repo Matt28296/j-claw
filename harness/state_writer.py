@@ -36,6 +36,7 @@ class StateWriter:
         self._start_time: float | None = None
         self._last_orch_model: str = "orchestrator"
         self._last_worker_model: str = "worker"
+        self._test_attempt_counts: dict[str, int] = {}  # task_id → attempt number
 
     # ── Public hooks ──────────────────────────────────────────────────────────
 
@@ -56,6 +57,7 @@ class StateWriter:
         self._state["work_log"] = []
         self._state["test_results"] = []
         self._state["started_at"] = _ts()
+        self._test_attempt_counts = {}
         self._event(f"Project started: {intent[:80]}")
         self._write()
 
@@ -218,6 +220,7 @@ class StateWriter:
         if method == "none":
             return  # skip trivial auto-passes — nothing useful to show
         icon = "✓" if passed else "✗"
+        self._test_attempt_counts[task_id] = self._test_attempt_counts.get(task_id, 0) + 1
         self._state.setdefault("test_results", []).append({
             "ts": _ts(),
             "task_id": task_id,
@@ -225,6 +228,7 @@ class StateWriter:
             "ecosystem": ecosystem,
             "passed": passed,
             "log": log[:1200],
+            "attempt": self._test_attempt_counts[task_id],
         })
         self._event(f"{icon} [{method}/{ecosystem}] {task_id}: {'passed' if passed else 'FAILED'}")
         self._write()

@@ -441,23 +441,55 @@ body::before {
 .summary-value.bad { color: var(--red); }
 
 /* ── Test Results ────────────────────────────────────────── */
+.test-summary-bar {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 7px; font-size: 10px;
+}
+.test-summary-rate { color: var(--text); font-weight: bold; }
+.test-summary-rate.all-pass { color: var(--green); }
+.test-summary-rate.some-fail { color: var(--amber); }
+.test-summary-track { flex: 1; height: 3px; background: #0b2211; border-radius: 2px; overflow: hidden; }
+.test-summary-fill { height: 100%; background: var(--green); transition: width .4s; }
+.test-live-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--green); flex-shrink: 0;
+  animation: pulse-dot 1s ease-in-out infinite;
+}
+@keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+.test-group { margin-bottom: 8px; }
+.test-group-title {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 10px; color: var(--muted);
+  padding: 2px 0 4px; border-bottom: 1px solid #0e1a2a; margin-bottom: 4px;
+}
+.test-group-icon { font-size: 11px; }
+.test-group-id { color: var(--text); font-weight: bold; }
+.test-group-eco { font-size: 9px; }
+.test-attempts { display: flex; flex-direction: column; gap: 3px; }
+
 .test-card {
   border: 1px solid var(--border); border-radius: 5px;
-  margin-bottom: 7px; overflow: hidden;
+  overflow: hidden;
 }
 .test-card.pass { border-color: #0e3a14; }
 .test-card.fail { border-color: #3a1414; }
 .test-header {
   display: flex; align-items: center; gap: 6px;
-  padding: 5px 9px; font-size: 11px;
+  padding: 4px 8px; font-size: 11px; cursor: pointer;
 }
+.test-header:hover { opacity: .85; }
 .test-card.pass .test-header { background: #061a0a; }
 .test-card.fail .test-header { background: #180808; }
-.test-verdict { font-weight: bold; font-size: 12px; }
+.test-verdict { font-weight: bold; font-size: 11px; }
 .test-card.pass .test-verdict { color: var(--green); }
 .test-card.fail .test-verdict { color: var(--red); }
+.test-attempt-badge {
+  font-size: 9px; color: var(--muted); background: #0d1520;
+  border: 1px solid var(--border); border-radius: 2px; padding: 1px 4px;
+}
 .test-method {
-  padding: 1px 6px; border-radius: 3px; font-size: 10px;
+  padding: 1px 5px; border-radius: 3px; font-size: 9px;
   font-weight: bold; letter-spacing: .3px;
   background: #0d1520; color: #8b949e; border: 1px solid var(--border);
 }
@@ -470,7 +502,9 @@ body::before {
   max-height: 110px; overflow-y: auto;
   border-top: 1px solid var(--border);
   background: var(--bg);
+  display: none;
 }
+.test-log.open { display: block; }
 .test-line-pass { color: var(--green); }
 .test-line-fail { color: var(--red); }
 .test-line-info { color: #8b949e; }
@@ -722,6 +756,7 @@ body::before {
     </div>
     <div class="tests-section">
       <div class="panel-title">Test Results</div>
+      <div id="test-summary-bar" class="test-summary-bar" style="display:none"></div>
       <div id="test-results"><div class="empty">No tests run yet.</div></div>
     </div>
     <div class="bottom-row">
@@ -926,6 +961,99 @@ function updateFeedHealth(data) {
   } else {
     setHealth('LIVE', data.sequence !== undefined ? `#${data.sequence}` : '');
   }
+}
+
+// ── Test Results (grouped) ────────────────────────────────────────────────────
+
+const ECOSYSTEM_ICON = {
+  film: '🎬', video: '🎬', 'video-editor': '🎬',
+  phaser: '🎮', 'three-js': '🎮', game: '🎮',
+  vanilla: '🌐', 'react-vite': '🌐', web: '🌐',
+  solidity: '⛓', rust: '🦀', python: '🐍',
+};
+
+function _ecoIcon(eco) {
+  return ECOSYSTEM_ICON[eco] || '🔬';
+}
+
+let _testLogOpen = {};  // test card toggle state: key → bool
+
+function toggleTestLog(key) {
+  _testLogOpen[key] = !_testLogOpen[key];
+  const el = document.getElementById('tlog-' + key);
+  if (el) el.classList.toggle('open', !!_testLogOpen[key]);
+}
+
+function renderTestResults(d) {
+  const all = d.test_results || [];
+  const summaryEl = document.getElementById('test-summary-bar');
+  const listEl = document.getElementById('test-results');
+  const pipelineRunning = !isTerminalState(d.pipeline_state || 'IDLE');
+
+  if (!all.length) {
+    summaryEl.style.display = 'none';
+    listEl.innerHTML = '<div class="empty">No tests run yet.</div>';
+    return;
+  }
+
+  // Summary bar
+  const passN = all.filter(t => t.passed).length;
+  const rate = Math.round((passN / all.length) * 100);
+  const allPass = passN === all.length;
+  summaryEl.style.display = 'flex';
+  summaryEl.innerHTML = `
+    ${pipelineRunning ? '<div class="test-live-dot" title="Tests actively running"></div>' : ''}
+    <span class="test-summary-rate ${allPass ? 'all-pass' : 'some-fail'}">${passN}/${all.length} passing</span>
+    <div class="test-summary-track"><div class="test-summary-fill" style="width:${rate}%"></div></div>
+    <span style="font-size:10px;color:var(--muted)">${rate}%</span>`;
+
+  // Group by task_id, preserve chronological order of groups
+  const groups = [];
+  const groupIdx = {};
+  all.forEach(t => {
+    if (!(t.task_id in groupIdx)) {
+      groupIdx[t.task_id] = groups.length;
+      groups.push({ task_id: t.task_id, ecosystem: t.ecosystem, attempts: [] });
+    }
+    groups[groupIdx[t.task_id]].attempts.push(t);
+  });
+
+  // Render newest groups first; within each group show attempts newest-first
+  listEl.innerHTML = groups.slice().reverse().map(g => {
+    const latest = g.attempts[g.attempts.length - 1];
+    const icon = _ecoIcon(g.ecosystem);
+    const attemptsHtml = g.attempts.slice().reverse().map(t => {
+      const cls = t.passed ? 'pass' : 'fail';
+      const verdict = t.passed ? '✓ PASS' : '✗ FAIL';
+      const atNum = t.attempt || g.attempts.indexOf(t) + 1;
+      const badge = g.attempts.length > 1 ? `<span class="test-attempt-badge">#${atNum}</span>` : '';
+      const logHtml = renderTestLog(t.log || '', t.ecosystem);
+      const key = esc(t.task_id + '-' + atNum);
+      const logId = 'tlog-' + key;
+      const openCls = _testLogOpen[key] ? ' open' : '';
+      return `<div class="test-card ${cls}">
+        <div class="test-header" onclick="toggleTestLog('${key}')" title="Click to expand log">
+          <span class="test-verdict">${verdict}</span>
+          ${badge}
+          <span class="test-method">${esc((t.method || '').toUpperCase())}</span>
+          <span class="test-eco">${esc(t.ecosystem)}</span>
+          <span class="test-ts" style="margin-left:auto">${esc(t.ts)}</span>
+        </div>
+        ${logHtml ? `<div class="test-log${openCls}" id="${logId}">${logHtml}</div>` : ''}
+      </div>`;
+    }).join('');
+
+    const latestCls = latest.passed ? 'good' : 'bad';
+    return `<div class="test-group">
+      <div class="test-group-title">
+        <span class="test-group-icon">${icon}</span>
+        <span class="test-group-id">${esc(g.task_id)}</span>
+        <span class="test-group-eco">${esc(g.ecosystem)}</span>
+        ${g.attempts.length > 1 ? `<span style="font-size:9px;color:var(--muted);margin-left:auto">${g.attempts.length} attempts</span>` : ''}
+      </div>
+      <div class="test-attempts">${attemptsHtml}</div>
+    </div>`;
+  }).join('');
 }
 
 function renderFinalSummary(d) {
@@ -1469,25 +1597,8 @@ function render(d) {
     </div>`
   ).join('') || '<div class="empty">No errors.</div>';
 
-  // Test results
-  const testResults = (d.test_results || []).slice().reverse();
-  document.getElementById('test-results').innerHTML = testResults.length
-    ? testResults.map(t => {
-        const cls = t.passed ? 'pass' : 'fail';
-        const verdict = t.passed ? '✓ PASS' : '✗ FAIL';
-        const logHtml = renderTestLog(t.log || '', t.ecosystem);
-        return `<div class="test-card ${cls}">
-          <div class="test-header">
-            <span class="test-verdict">${verdict}</span>
-            <span class="test-method">${esc(t.method.toUpperCase())}</span>
-            <span class="test-eco">${esc(t.ecosystem)}</span>
-            <span class="test-task">${esc(t.task_id)}</span>
-            <span class="test-ts">${esc(t.ts)}</span>
-          </div>
-          ${logHtml ? `<div class="test-log">${logHtml}</div>` : ''}
-        </div>`;
-      }).join('')
-    : '<div class="empty">No tests run yet.</div>';
+  // Test results — grouped by task_id, showing healing progression
+  renderTestResults(d);
 
   // Work log
   const workLog = (d.work_log || []).slice().reverse(); // show newest at top
