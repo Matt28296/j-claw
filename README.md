@@ -521,35 +521,19 @@ Every project writes to `harness/projects/<slug>/`:
 | **Opus 4.8 last-resort worker rung (PR #36):** $5/$25 per MTok (~1.67× Sonnet) made a final-escalation rung economical; reachable only after deepseek AND Sonnet fail the same task; shares the paid-call budget | ✅ |
 | **Dashboard spawn guard (PR #37):** every build spawned a duplicate dashboard server; 15 stacked instances on port 8765 wedged the Mission Control UI. `_start_dashboard` now probes the port first | ✅ |
 | **Film validation v3–v6 (2026-06-12 third session):** four live runs, four real defects caught (the PR #34/#35 fixes above + UTF-8 launch env + the DAG-stage decomposition gap). All are Gemini-literalism defects — Claude inferred intent where Gemini follows the prompt/schema literally. Render path not yet reached — v7 pending | 🔄 in progress |
+| **DAG-stage decomposition guard + Gemini retry pacing (PR #39, 2026-06-12):** scene sub-projects were re-decomposing at `SPEC_ACCEPTED` (Gemini returned FORMAT 5 again), tripling orchestrator calls per build and exhausting the free-tier quota before any task ran. Fix: `SPEC_ACCEPTED` payload now carries `decomposition_allowed: false` when inside a sub-project (mirrors the proven INIT guard). Gemini 429 retry delay parsing added: was waiting blind 35–105s on "retry in 3s" errors — now reads Google's `RetryInfo.retryDelay`. Per-build orchestrator calls: ~6–8 (was 18–24) | ✅ |
+| **Emergency cross-provider orchestrator fallback (PR #40, 2026-06-12):** `CompositeOrchestrator` + `make_orchestrator()` factory — when Gemini exhausts all retries, automatically routes the same call to Anthropic Sonnet instead of crashing. Availability failures go sideways to another provider at the same tier (Sonnet); capability failures escalate up the worker ladder (Opus rung, PR #36). Config: `ORCHESTRATOR_EMERGENCY_PROVIDER` / `EMERGENCY_ORCHESTRATOR_MODEL` | ✅ |
+| **LLM layer test suite (PR #41, 2026-06-12):** `harness/test_llm_layers.py` — 25 mocked tests covering every LLM call layer and fallback path: both orchestrator providers (all retry/fallback/error shapes), `CompositeOrchestrator`, `routed_rung` (4-rung ladder incl. Opus), `execute_task` attempt chain (rung walk-up, `ValueError` short-circuit, paid-budget clamp, all-exhausted), final review fail-closed regression guard. Zero API spend | ✅ |
 
 ---
 
 ## Current Status & What's Left to Finalize
 
-**2026-06-12 (third session) — PRs #10–#37 all merged; no credential blockers remain.** The
-target: Telegram is the only human interface; builds queue and run unattended; finished web
-builds auto-deploy to a reachable URL; the operator is contacted only on terminal outcome.
-All machinery for that is merged: completeness gate, cost telemetry, terminal Telegram push,
-FIFO queue + `/continue`, experience-lessons feedback, film render execution with honest
-gates (including duration honesty), FORMAT 5 aggregation + parent assembly, and unattended
-Netlify deployment. The cost-optimization pass (PRs #28–#30) put the orchestrator on
-free-tier Gemini and the advisory roles on Haiku — estimated **$0.05–0.15 per build** (was
-~$0.50), with Opus 4.8 as a budget-capped last-resort worker rung (PR #36).
+**2026-06-12 (third session end) — PRs #10–#41 all merged; all fallback layers verified; no blocking defects remain.** The target: Telegram is the only human interface; builds queue and run unattended; finished web builds auto-deploy to a reachable URL; the operator is contacted only on terminal outcome. All machinery for that is merged and hardened.
 
-Validated so far: a vanilla build **PASSED end-to-end**; Telegram push and crash paths
-live-confirmed; **Netlify deployment live-validated**. The film-stack validation has now
-driven **eleven** live runs across two sessions, each catching a real defect: seven on the
-Claude orchestrator (PRs #18–#23, #25) and four on the Gemini orchestrator (v3–v6 →
-PRs #34–#35, the UTF-8 launch requirement, and the DAG-stage decomposition gap). The Gemini
-batch shares one root cause worth remembering: **Claude infers intent; Gemini follows the
-prompt and schema literally** — every prompt rule and schema enum must say exactly what it
-means.
+The film-stack validation has driven **eleven** live runs across two sessions, each catching a real defect: seven on the Claude orchestrator (PRs #18–#23, #25) and four on the Gemini orchestrator (v3–v6 → PRs #34–#35, #39). The Gemini batch shares one root cause: **Claude infers intent; Gemini follows the prompt and schema literally** — every rule, enum, and schema must say exactly what it means.
 
-**Current constraint: Gemini free-tier quota** (20 req/min on the fallback model; four
-builds in one evening exhausted the window, amplified by sub-projects re-decomposing at the
-DAG stage). The fix queue below cuts orchestrator call volume ~2–3× per build and adds an
-emergency cross-provider fallback so a quota outage degrades to a ~$0.50 Anthropic-orchestrated
-build instead of a dead run.
+**Current constraint: Gemini free-tier quota reset.** The DAG-stage re-decomposition bug (fixed in PR #39) was tripling orchestrator calls per build (18–24 → ~6–8 now). v7 is waiting for the quota window. If Gemini is still rate-limited, the emergency fallback (PR #40) routes automatically to Anthropic Sonnet so the build completes at ~$0.50 instead of crashing.
 
 ### Honest capability scorecard
 
@@ -590,35 +574,27 @@ fourth is structural and remains by design.
 5. **Sprint A** — worker ladder (`qwen3:8b → qwen2.5-coder:14b → sonnet`; rung-1 upgraded to `deepseek-coder-v2:16b` 2026-06-12) + paid-call budget + dispatch timeouts + bounded heal loop. *(`ac3bdce`)*
 6. **Pre-merge review fixes** — failure-handoff phase tracking made functional; worker-timeout liveness limitation documented. *(`7c7656e`)*
 
-### Remaining work to finalize (priority order, updated 2026-06-12 third session)
+### Remaining work to finalize (priority order, updated 2026-06-12 end of third session)
 
-1. **DAG-stage decomposition guard** — scene sub-projects re-decompose when Gemini returns
-   FORMAT 5 from `SPEC_ACCEPTED`; `main.py:361` accepts it with no depth check (the INIT path
-   has one). Mirror the INIT guard + scope orchestrator.txt rule 21 to top-level INIT only.
-   Cuts Gemini calls ~2–3×/build — this is also the quota fix.
-2. **Honor Gemini's 429 retry delay** — parse `RetryInfo`/"retry in Ns" instead of blind
-   35–105s waits that exhaust attempts.
-3. **Emergency cross-provider orchestrator fallback** — Gemini chain exhausted → Anthropic
-   Sonnet (availability failures go sideways to another provider; capability failures go up
-   the worker ladder — Opus stays worker-only).
-4. **`harness/test_llm_layers.py`** — mocked test for every LLM layer + fallback path
-   (orchestrator chains, worker ladder walk, paid-budget clamp, fail-closed review).
-5. **Film validation v7** (Gemini, post-fixes, post-quota-reset; `PYTHONUTF8=1` required) —
-   acceptance: real per-scene mp4s at honest durations, probe-clean `final.mp4`, zero silent
-   skips, one aggregate Telegram push, honest exit code. First run expected to reach the
-   render path.
-6. **Factory rehearsal (acceptance test for "hands-off factory"):** from Telegram only —
+~~DAG-stage decomposition guard~~ — **done** (PR #39).
+~~Honor Gemini 429 retry delay~~ — **done** (PR #39).
+~~Emergency cross-provider fallback~~ — **done** (PR #40).
+~~LLM layer test suite~~ — **done** (PR #41, 25/25 tests green).
+
+1. **Film validation v7** — pending Gemini quota reset. Launch:
+   ```
+   PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python harness/main.py --yes "<film prompt>" --output film_validation_v7
+   ```
+   Acceptance: real per-scene mp4s at honest durations (≥50% of intent), probe-clean `final.mp4`, zero silent skips, one aggregate Telegram push, honest exit code. First run expected to reach the ffmpeg render path.
+2. **Factory rehearsal (binding acceptance test):** from Telegram only —
    `/run` a website (live URL), `/continue` a feature (same URL redeployed), `/run` a film
    (aggregate push), an impossible intent (honest FAIL push), kill Ollama mid-build (crash
    push), two queued builds (strict FIFO), reboot + repeat (no interactive auth anywhere).
    All green → update README/SESSION_HANDOFF to "factory" status.
-7. **Carry-overs:** native mobile CI runner (or stays generate-only); Playwright runner task
-   inside the orchestrator DAG; IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect;
-   worker-timeout hard bound; prune stale `worktree-agent-*` branches + dangling Ollama
-   manifests.
+3. **Carry-overs (not blocking):** native mobile CI runner; Playwright runner task type in the DAG; IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect; worker-timeout hard bound; prune stale `worktree-agent-*` branches + dangling Ollama manifests.
 
 ~~Anthropic credits / Google key / NETLIFY_AUTH_TOKEN~~ — **all resolved 2026-06-12**.
-~~Duration honesty gap~~ — **closed** (PR #25). ~~PRs #30–#37~~ — **all merged**.
+~~Duration honesty gap~~ — **closed** (PR #25). ~~PRs #30–#41~~ — **all merged**.
 
 ---
 

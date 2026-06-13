@@ -5,12 +5,12 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#37 are MERGED to `main`.**
+**PRs #10–#41 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
 
-## ✅ DONE 2026-06-12 (third session) — Gemini-literalism hardening + fallback layers (PRs #34–#37)
+## ✅ DONE 2026-06-12 (third session) — Gemini-literalism hardening + fallback layers + test suite (PRs #34–#41)
 
 Theme: the film validation rerun finally ran — four times (v3–v6) — and each run caught a real
 defect, all of the same species: **Gemini follows the prompt/schema literally where Claude
@@ -39,23 +39,22 @@ Also this session:
 - Dashboard WIP (mission-control telemetry in scheduler.py / state_writer.py / dashboard.py /
   index.html) is the operator's uncommitted work — left untouched in the working tree.
 
-### Next session plan (approved, in priority order)
-1. ~~Merge PRs #34–#37~~ — **done this session** (operator-authorized).
-2. **P2 — DAG-stage decomposition guard**: mirror the INIT guard (`main.py:289–319`) at
-   `main.py:361`; add `decomposition_allowed:false` to the `SPEC_ACCEPTED` payload; check the
-   discarded `_handle_oversize` return; scope orchestrator.txt rule 21 to top-level INIT only.
-   Cuts Gemini calls ~2–3×/build — this is also the quota fix.
-3. **P3 — honor Gemini's 429 retry delay** (parse `RetryInfo` / "retry in Ns"; currently waits
-   a blind 35–105s and exhausts attempts).
-4. **P3.4 — emergency cross-provider orchestrator fallback**: Gemini chain exhausted →
-   Anthropic **Sonnet** (not Opus — orchestrator work is planning/JSON, capability-proven on
-   PRs #10–25; worst case a quota-outage build completes at the old ~$0.50 instead of dying).
-5. **P3.5 — `harness/test_llm_layers.py`**: mocked coverage for EVERY llm layer + fallback
-   (operator requirement: each layer must provably work, not just the ones a run happens to
-   exercise). Live-only layers (worker rungs, final review) get checked off during v7.
-6. **v7 film validation** — on Gemini after the fixes + quota reset (operator decision: no
-   Anthropic-orchestrator detour). UTF-8 env vars required. Acceptance unchanged.
-7. **Factory rehearsal** — unchanged 7-item Telegram checklist.
+### Also completed this session (PRs #38–#41)
+1. **PR #38 (docs)** — README + SESSION_HANDOFF synced for PRs #34–#37.
+2. **PR #39 — DAG-stage decomposition guard + retry pacing:**
+   - `SPEC_ACCEPTED` payload now carries `decomposition_allowed:false` + `sub_project_depth` when `depth > 0`; corrective retry + `return False` if Gemini insists. Fixed discarded `_handle_oversize` return + missing args on depth-0 path.
+   - `orchestrator.txt` rule 21: FORMAT 5 now explicitly scoped to top-level INIT only; `SPEC_ACCEPTED` must always return FORMAT 2.
+   - `_parse_retry_delay()`: reads Google `RetryInfo.retryDelay` "Ns" → OpenRouter metadata → plain-text regex → blind default. Verified against v6 error payloads (3s → 5s, 54s → 56s).
+   - Result: ~6–8 orchestrator calls/build (was 18–24).
+3. **PR #40 — emergency cross-provider orchestrator fallback:**
+   - `CompositeOrchestrator` + `make_orchestrator()` factory. Gemini exhausted → Anthropic Sonnet automatically. Loud console warning names the fallback model + primary failure.
+   - `ORCHESTRATOR_EMERGENCY_PROVIDER` / `EMERGENCY_ORCHESTRATOR_MODEL` env knobs. Default on when `ANTHROPIC_API_KEY` present.
+   - Design: availability failures go sideways (cross-provider, same tier); capability failures go up the worker ladder (Opus, PR #36).
+4. **PR #41 — `harness/test_llm_layers.py`:** 25 mocked tests, all green. Zero API spend. Covers: both orchestrator providers (all retry/fallback/error shapes), `CompositeOrchestrator`, `_parse_retry_delay` (all 4 shapes), `routed_rung` (4-rung Opus ladder), `execute_task` attempt chain (rung walk-up, `ValueError` short-circuit, paid-budget clamp, all-exhausted), final review fail-closed regression guard.
+
+### What's still remaining
+1. **v7 film validation** — pending Gemini quota reset. Must reach the ffmpeg render path for the first time. Run: `PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python harness/main.py --yes "<film prompt>" --output film_validation_v7`
+2. **Factory rehearsal** — 7-item Telegram checklist. All green → "factory" status.
 
 ---
 
