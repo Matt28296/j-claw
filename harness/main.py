@@ -521,6 +521,7 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
                     )
 
             sw.on_agent_call("orchestrator", ORCHESTRATOR_MODEL, "REVIEW_FAILED")
+            sw.on_review_failed(len(issues), heal_cycle + 1)
             _fix_payload = {
                 "system_state": "REVIEW_FAILED",
                 "accepted_spec": instance.spec,

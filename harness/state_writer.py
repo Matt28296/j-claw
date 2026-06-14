@@ -233,6 +233,11 @@ class StateWriter:
         self._event(f"{icon} [{method}/{ecosystem}] {task_id}: {'passed' if passed else 'FAILED'}")
         self._write()
 
+    def on_review_failed(self, issue_count: int, heal_cycle: int) -> None:
+        """Emit a dedicated REVIEW_FAILED event so the dashboard heal-badge counter works."""
+        self._event(f"REVIEW_FAILED — heal cycle {heal_cycle}, {issue_count} issue(s) to fix")
+        self._write()
+
     def on_project_done(self, result: str, summary: str) -> None:
         self._state["pipeline_state"] = "DONE" if result == "pass" else "NEEDS_FOLLOWUP"
         self._state["active_agent"] = None
@@ -242,7 +247,40 @@ class StateWriter:
         self._write()
 
     def on_cost(self, summary: dict) -> None:
-        self._state["cost"] = summary
+        # Normalize to the exact shape renderCostPanel expects so the
+        # breakdown table and token display are never empty due to key
+        # mismatches or a partially-populated dict.
+        raw_tokens = summary.get("tokens") or {}
+        self._state["cost"] = {
+            "total_usd": float(
+                summary.get("total_usd")
+                or summary.get("usd")
+                or summary.get("total")
+                or 0.0
+            ),
+            "by_model": dict(summary.get("by_model") or {}),
+            "tokens": {
+                "input":      int(raw_tokens.get("input", 0) or 0),
+                "cache_read": int(raw_tokens.get("cache_read", 0) or 0),
+                "output":     int(raw_tokens.get("output", 0) or 0),
+            },
+            "paid_calls": int(summary.get("paid_calls", 0) or 0),
+        }
+        self._write()
+
+    def on_openclaw_stamp(self, verdict: str) -> None:
+        """Record the OpenClaw final-stamp verdict so the dashboard can display it.
+
+        verdict is the full response text; the short stamp stored is either
+        'PASS' (when 'OPENCLAW: APPROVED' is present) or 'ISSUES FOUND'.
+        Both the top-level key and the nested project key are written so the
+        frontend fallback chain (d.openclaw_stamp → d.project.openclaw_stamp)
+        works regardless of which path the dashboard reads.
+        """
+        stamp = "PASS" if "OPENCLAW: APPROVED" in verdict else "ISSUES FOUND"
+        self._state["openclaw_stamp"] = stamp
+        self._state["project"]["openclaw_stamp"] = stamp
+        self._event(f"OpenClaw stamp: {stamp}")
         self._write()
 
     # ── Internals ─────────────────────────────────────────────────────────────

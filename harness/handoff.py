@@ -14,6 +14,7 @@ from rich.console import Console
 from config import ANTHROPIC_API_KEY, ORCHESTRATOR_MODEL, HEAL_MAX_CYCLES
 from verification import SKIP_PREFIX
 import config as cfg
+from state_writer import writer as sw
 
 _STATE_FILE = Path(__file__).parent.parent / "mission_control.json"
 _MAX_HEAL = HEAL_MAX_CYCLES
@@ -449,3 +450,4 @@ def _append_verdict(handoff_path: Path, verdict: str) -> None:
         encoding="utf-8",
     )
     console.print(f"  Verdict appended to: [dim]{handoff_path}[/dim]")
+    sw.on_openclaw_stamp(verdict)
