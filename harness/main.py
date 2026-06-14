@@ -147,6 +147,7 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
 
     if not dag_response.get("tasks"):
         console.print("[yellow]Orchestrator returned no new tasks.[/yellow]")
+        sw.on_no_continuation_tasks("Orchestrator returned no new continuation tasks")
         return False
 
     instance = ProjectInstance(project_dir)
@@ -165,13 +166,18 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
         _json.dumps(instance.tasks_as_list(), indent=2), encoding="utf-8"
     )
 
-    passed = run_final_review(project_dir, spec)
     heal_cycle = 0
+    passed = run_final_review(project_dir, spec)
+    sw.on_final_review_result(passed, heal_cycle=heal_cycle)
     handoff_path = write_handoff(project_dir, spec, passed, heal_cycle)
     try_claude_stamp(handoff_path, project_dir)
     git_commit_project(project_dir, {"goal": f"continuation: {new_intent}"})
     deploy_url, deploy_note = deploy_project(project_dir, spec)
     append_deploy_section(handoff_path, deploy_url, deploy_note)
+    sw.on_deploy(deploy_url, deploy_note)
+    _cost = cost_summary()
+    sw.on_cost(_cost)
+    sw.on_project_done("pass" if passed else "needs_followup", "Continuation final review complete")
     notify_build_outcome(
         project=f"continuation: {new_intent}"[:120],
         passed=passed,
@@ -217,6 +223,7 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
         return _run_project_inner(intent, output_dir, depth, manual, auto_accept, wiring, phase)
     except Exception as exc:
         _write_failure_handoff(output_dir, intent, phase["current"], exc)
+        sw.on_project_failed(f"{type(exc).__name__}: {exc}", phase["current"])
         raise
 
 
@@ -474,7 +481,9 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         escalated = False                        # have we already escalated the fix round?
         for heal_cycle in range(_MAX_HEAL + 1):
             review_passed = run_final_review(output_dir, instance.spec)
+            sw.on_final_review_result(review_passed, heal_cycle=heal_cycle)
             dynamic_passed, dynamic_issues = _run_dynamic_checks()
+            sw.on_dynamic_checks(dynamic_passed, dynamic_issues)
             passed = review_passed and dynamic_passed
             if passed or heal_cycle == _MAX_HEAL:
                 break
@@ -557,8 +566,13 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         git_commit_project(output_dir, instance.spec)
         deploy_url, deploy_note = deploy_project(output_dir, instance.spec)
         append_deploy_section(handoff_path, deploy_url, deploy_note)
+        sw.on_deploy(deploy_url, deploy_note)
         _cost = cost_summary()
         sw.on_cost(_cost)
+        sw.on_project_done(
+            "pass" if passed else "needs_followup",
+            "Final review and dynamic checks passed" if passed else "Review or dynamic checks need follow-up",
+        )
         console.print(f"  [cyan]{format_cost_line()}[/cyan]")
         # Sub-projects (depth > 0) stay quiet — the FORMAT 5 parent sends one
         # aggregate push instead of one per scene.
@@ -577,7 +591,12 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         return passed
     else:
         # Manual mode: surface dynamic checks for the operator (no automated gating).
-        _run_dynamic_checks()
+        dynamic_passed, dynamic_issues = _run_dynamic_checks()
+        sw.on_dynamic_checks(dynamic_passed, dynamic_issues)
+        sw.on_project_done(
+            "pass" if dynamic_passed else "needs_followup",
+            "Manual run complete",
+        )
         return True
 
 
@@ -718,6 +737,16 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
 
     # One aggregate push for the whole decomposition (sub-projects stay quiet).
     if depth == 0:
+        sw.on_cost({
+            "total_usd": total_usd,
+            "paid_calls": total_calls,
+            "by_model": {},
+            "tokens": {},
+        })
+        sw.on_project_done(
+            "pass" if all_passed else "needs_followup",
+            "FORMAT 5 aggregate complete" if all_passed else "One or more sub-projects need follow-up",
+        )
         notify_build_outcome(
             project=(intent or response.get("reason", ""))[:120],
             passed=all_passed,
@@ -759,8 +788,10 @@ def main() -> None:
             cont_ok = run_continuation(intent, cont_dir, auto_accept=args.yes)
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
+            sw.on_project_canceled("Continuation interrupted by user")
             sys.exit(1)
         except Exception as exc:  # noqa: BLE001
+            sw.on_project_failed(f"{type(exc).__name__}: {exc}", "continuation")
             notify_crash(project=intent[:120], error=f"{type(exc).__name__}: {exc}",
                          output_dir=cont_dir)
             raise
@@ -786,6 +817,7 @@ def main() -> None:
             break  # success
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
+            sw.on_project_canceled("Pipeline interrupted by user")
             sys.exit(1)
         except Exception as exc:  # noqa: BLE001
             if attempt < PIPELINE_MAX_RETRIES:
@@ -798,6 +830,7 @@ def main() -> None:
                 console.print(
                     f"\n[bold red]Pipeline failed after {PIPELINE_MAX_RETRIES + 1} attempt(s): {exc}[/bold red]"
                 )
+                sw.on_project_failed(f"{type(exc).__name__}: {exc}", "pipeline")
                 notify_crash(project=intent[:120], error=f"{type(exc).__name__}: {exc}",
                              output_dir=output_dir)
                 raise

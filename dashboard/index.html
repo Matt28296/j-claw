@@ -122,6 +122,8 @@ body::before {
 .s-REVIEW_FAILED { background: #230606; color: var(--red);    border-color: #7a2323; box-shadow: 0 0 12px rgba(255,94,94,0.26); }
 .s-DONE          { background: #021f0b; color: var(--green);  border-color: var(--border-hi); box-shadow: 0 0 12px var(--shadow-green); }
 .s-NEEDS_FOLLOWUP{ background: #201600; color: var(--amber);  border-color: #6d530e; box-shadow: 0 0 10px rgba(245,215,110,0.22); }
+.s-FAILED        { background: #230606; color: var(--red);    border-color: #7a2323; box-shadow: 0 0 12px rgba(255,94,94,0.26); }
+.s-CANCELED      { background: #171b20; color: #a9b4ad;       border-color: #4b5350; box-shadow: 0 0 8px rgba(169,180,173,0.18); }
 
 /* Heal badge */
 #heal-badge {
@@ -177,6 +179,11 @@ body::before {
   color: #ffffff; border-color: var(--amber);
   background: linear-gradient(135deg, #1a1200 0%, #2a1e00 100%);
   box-shadow: 0 0 10px rgba(227,179,65,0.35);
+}
+.stage-pill.stage-failed {
+  color: #fff; border-color: var(--red);
+  background: #230606;
+  box-shadow: 0 0 10px rgba(255,94,94,0.26);
 }
 .stage-arrow {
   color: var(--muted); font-size: 11px; padding: 0 4px;
@@ -837,11 +844,11 @@ function valueOrDash(v) {
 }
 
 function isTerminalState(state) {
-  return state === 'DONE' || state === 'NEEDS_FOLLOWUP';
+  return ['DONE', 'NEEDS_FOLLOWUP', 'FAILED', 'CANCELED'].includes(state);
 }
 
 function isActiveState(state) {
-  return state && !['IDLE', 'DONE', 'NEEDS_FOLLOWUP'].includes(state);
+  return state && state !== 'IDLE' && !isTerminalState(state);
 }
 
 function money(v) {
@@ -890,6 +897,8 @@ const STATE_TO_STAGE = {
   'REVIEW_FAILED':  'HEAL',
   'DONE':           'DONE',
   'NEEDS_FOLLOWUP': 'DONE',
+  'FAILED':         'DONE',
+  'CANCELED':       'DONE',
 };
 
 function updateStageTracker(state) {
@@ -912,9 +921,12 @@ function updateStageTracker(state) {
       if (stage === 'HEAL') {
         el.className += ' stage-active-amber';
         el.textContent = '⟳ HEAL';
+      } else if (stage === 'DONE' && (state === 'FAILED' || state === 'CANCELED')) {
+        el.className += ' stage-failed';
+        el.textContent = state;
       } else {
         el.className += ' stage-active';
-        el.textContent = stage;
+        el.textContent = (stage === 'DONE' && state === 'NEEDS_FOLLOWUP') ? 'FOLLOW-UP' : stage;
       }
     } else if (activeIdx > idx) {
       el.className += ' stage-complete';
@@ -940,6 +952,12 @@ function setHealth(status, detail) {
   } else if (status === 'UNREACHABLE') {
     dot.classList.add('offline');
     label.classList.add('health-unreachable');
+  } else if (status === 'FAILED') {
+    dot.classList.add('stalled');
+    label.classList.add('health-stalled');
+  } else if (status === 'CANCELED') {
+    dot.classList.add('offline');
+    label.classList.add('health-stale');
   } else {
     label.classList.add('health-live');
   }
@@ -968,8 +986,11 @@ function updateFeedHealth(data) {
 
   if (!feedMark) {
     setHealth('LIVE', '');
+  } else if (isTerminalState(state)) {
+    setHealth(state, data.sequence !== undefined ? `#${data.sequence}` : `${feedAge}s`);
+    lastFeedMarkSeenAt = now;
   } else if (isActiveState(state) && activeAgent) {
-    setHealth('LIVE', `active ${fmt(activeAge)}`);
+    setHealth(activeAge >= 300 ? 'STALLED' : 'LIVE', `agent ${fmt(activeAge)}`);
   } else if (isActiveState(state) && unchangedFor >= 30) {
     setHealth('STALLED', `${unchangedFor}s`);
   } else if (feedAge >= 8) {
@@ -1086,8 +1107,8 @@ function renderFinalSummary(d) {
   const artifacts = d.output_files || [];
   const cost = d.cost || {};
   const deployUrl = d.project?.deploy_url || d.deploy_url || d.project?.output_url || '';
-  const openClawStamp = d.openclaw_stamp || d.project?.openclaw_stamp || d.project?.stamp || (state === 'DONE' ? 'handoff ready' : 'needs followup');
-  const verdictClass = state === 'DONE' && failed === 0 ? 'good' : 'warn';
+  const openClawStamp = d.openclaw_stamp || d.project?.openclaw_stamp || d.project?.stamp || (state === 'DONE' ? 'handoff ready' : state.toLowerCase());
+  const verdictClass = state === 'DONE' && failed === 0 ? 'good' : (state === 'FAILED' || state === 'CANCELED' ? 'bad' : 'warn');
   const cards = [
     ['Verdict', state, verdictClass],
     ['Deploy / Output', deployUrl || '-', deployUrl ? 'good' : ''],
@@ -1096,7 +1117,7 @@ function renderFinalSummary(d) {
     ['Tasks', `${tasks.length - failed}/${tasks.length} ok`, failed ? 'bad' : 'good'],
     ['Failed', String(failed), failed ? 'bad' : 'good'],
     ['Artifacts', String(artifacts.length), artifacts.length ? 'good' : ''],
-    ['OpenClaw', openClawStamp, state === 'DONE' ? 'good' : 'warn'],
+    ['OpenClaw', openClawStamp, state === 'DONE' ? 'good' : (state === 'FAILED' ? 'bad' : 'warn')],
   ];
   el.className = 'summary-grid visible';
   el.innerHTML = cards.map(([label, value, cls]) =>
@@ -1171,7 +1192,7 @@ function renderAgentNetwork(d) {
   } else {
     Object.keys(rawNodes).forEach(name => nodes.push({ agent: name, ...rawNodes[name] }));
   }
-  const active = agentNodeFromActive(d.active_agent);
+  const active = isActiveState(d.pipeline_state || 'IDLE') ? agentNodeFromActive(d.active_agent) : null;
   if (active && !nodes.some(n => (n.agent || n.name) === active.agent)) nodes.unshift(active);
 
   if (!nodes.length) {
@@ -1484,7 +1505,7 @@ function render(d) {
   renderFinalSummary(d);
 
   // Review banner + OpenClaw banner (fetch once on DONE)
-  if ((state === 'DONE' || state === 'NEEDS_FOLLOWUP') && d.project?.output_url && !reviewDone) {
+  if (isTerminalState(state) && d.project?.output_url && !reviewDone) {
     reviewDone = true;
     const base = projectBaseUrl(d);
     if (base) {
@@ -1532,7 +1553,7 @@ function render(d) {
 
   // Active agent
   const agentBox = document.getElementById('agent-box');
-  if (d.active_agent) {
+  if (isActiveState(state) && d.active_agent) {
     agentEpoch = Number(d.active_agent.started_epoch) || Date.now() / 1000;
     const elapsed = Math.max(0, Date.now() / 1000 - agentEpoch);
     agentBox.className = 'agent-box active';

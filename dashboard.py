@@ -14,6 +14,7 @@ import threading
 import time
 import webbrowser
 import argparse
+import socket
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -24,12 +25,25 @@ CONTROL_TOKEN = os.getenv("DASHBOARD_CONTROL_TOKEN", "")
 
 _LOCAL_CLIENTS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 _MAX_CONTROL_BODY_BYTES = 16 * 1024
+_REQUEST_TIMEOUT_S = 10
 _STATE_WRITE_LOCK = threading.Lock()
+
+
+class _ThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 32
 
 
 class _Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
+
+    def setup(self):
+        super().setup()
+        try:
+            self.connection.settimeout(_REQUEST_TIMEOUT_S)
+        except (OSError, AttributeError):
+            pass
 
     def log_message(self, *args):
         pass  # suppress per-request noise
@@ -108,6 +122,12 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         _append_audit_event(
             "cancel",
             "Cancel requested from Mission Control",
+            client=self._client_ip(),
+            killed_pids=killed_pids,
+        )
+        _mark_control_terminal(
+            "CANCELED",
+            "Pipeline canceled from Mission Control",
             client=self._client_ip(),
             killed_pids=killed_pids,
         )
@@ -342,6 +362,32 @@ def _append_audit_event(
         pass
 
 
+def _mark_control_terminal(
+    state_name: str,
+    message: str,
+    client: str | None = None,
+    killed_pids: list[int] | None = None,
+) -> None:
+    try:
+        with _STATE_WRITE_LOCK:
+            state = json.loads(MISSION_CONTROL.read_text(encoding="utf-8")) if MISSION_CONTROL.exists() else {}
+            state["pipeline_state"] = state_name
+            state["active_agent"] = None
+            events = state.setdefault("events", [])
+            entry = {"ts": time.strftime("%H:%M:%S"), "msg": f"[control:{state_name.lower()}] {message}"}
+            if client:
+                entry["client"] = client
+            if killed_pids:
+                entry["killed_pids"] = killed_pids
+            events.insert(0, entry)
+            state["events"] = events[:100]
+            state["updated_at_epoch"] = time.time()
+            state["sequence"] = int(state.get("sequence", 0)) + 1
+            _write_state_atomic(state)
+    except Exception:
+        pass
+
+
 def _write_state_atomic(state: dict) -> None:
     tmp = MISSION_CONTROL.with_name(MISSION_CONTROL.name + ".tmp")
     tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -356,7 +402,8 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        server = http.server.HTTPServer((args.host, args.port), _Handler)
+        server = _ThreadingHTTPServer((args.host, args.port), _Handler)
+        server.timeout = _REQUEST_TIMEOUT_S
     except OSError as exc:
         print(f"Cannot bind {args.host}:{args.port}: {exc}")
         print(f"Try: python dashboard.py --port {args.port + 1}")
@@ -365,7 +412,6 @@ def main() -> None:
     local_url = f"http://localhost:{args.port}/dashboard/index.html"
     print(f"J-Claw Mission Control: {local_url}")
     if args.host == "0.0.0.0":
-        import socket
         try:
             lan_ip = socket.gethostbyname(socket.gethostname())
             print(f"Mobile access:          http://{lan_ip}:{args.port}/dashboard/index.html")
