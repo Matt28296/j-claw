@@ -816,6 +816,15 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
      that produces the video when executed, and the entry script PLUS every local module it
      imports must each appear in some task's `files` list — an import with no task writing
      that file guarantees a ModuleNotFoundError at render time.
+   - **Python render scripts MUST call `subprocess.run(cmd, check=True)` to execute ffmpeg —
+     never `print(cmd)` or `print(shlex.join(cmd))`.** Printing the command produces no video
+     file; the harness reads the output path, not stdout. This is a consistent worker failure
+     mode — state it explicitly in every render task's `objective`.
+   - **Windows ffmpeg constraints (this host is Windows):** (a) Do NOT use the `drawtext`
+     filter — fontconfig is not available, causing an access violation (exit 0xC0000005).
+     (b) Do NOT use `geq=` expressions inside `filter_complex` — they return "Invalid
+     argument" on ffmpeg 8.1.1. Use `color=c=0x<hex>` solid backgrounds instead of
+     procedural pixel generators. Keep filter graphs simple: no complex filter_complex chains.
 
 ---
 
