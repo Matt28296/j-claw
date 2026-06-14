@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import os
 import time
 import threading
 from pathlib import Path
@@ -8,6 +9,7 @@ _STATE_FILE = Path(__file__).parent.parent / "mission_control.json"
 _lock = threading.Lock()
 _MAX_ERROR_LOG_CHARS = 3000
 _MAX_AGENT_NODES = 30
+TERMINAL_STATES = {"DONE", "NEEDS_FOLLOWUP", "FAILED", "CANCELED"}
 
 
 def _now() -> float:
@@ -233,16 +235,101 @@ class StateWriter:
         self._event(f"{icon} [{method}/{ecosystem}] {task_id}: {'passed' if passed else 'FAILED'}")
         self._write()
 
+    def on_review_failed(self, issue_count: int, heal_cycle: int) -> None:
+        """Emit a dedicated REVIEW_FAILED event so the dashboard heal-badge counter works."""
+        self._event(f"REVIEW_FAILED — heal cycle {heal_cycle}, {issue_count} issue(s) to fix")
+        self._write()
+
     def on_project_done(self, result: str, summary: str) -> None:
-        self._state["pipeline_state"] = "DONE" if result == "pass" else "NEEDS_FOLLOWUP"
-        self._state["active_agent"] = None
+        state = "DONE" if result == "pass" else "NEEDS_FOLLOWUP"
+        self._set_terminal_state(state, f"Project complete - {result}: {summary[:120]}")
         self._event(f"Project complete — {result}: {summary[:120]}")
         self._work_log("orchestrator", self._orch_model(), "REVIEW",
                        summary[:120], status=result)
         self._write()
 
+    def on_project_failed(self, summary: str, phase: str | None = None) -> None:
+        detail = f"{phase}: {summary}" if phase else summary
+        self._set_terminal_state("FAILED", f"Project failed - {detail[:160]}")
+        self._write()
+
+    def on_project_canceled(self, summary: str = "Pipeline canceled") -> None:
+        self._set_terminal_state("CANCELED", summary[:160])
+        self._write()
+
+    def on_no_continuation_tasks(self, summary: str) -> None:
+        self._set_terminal_state("FAILED", f"Continuation failed - {summary[:160]}")
+        self._write()
+
+    def on_final_review_result(self, passed: bool, summary: str | None = None,
+                               heal_cycle: int | None = None) -> None:
+        self._state["final_review"] = {
+            "passed": bool(passed),
+            "summary": (summary or ("PASS" if passed else "NEEDS_FOLLOWUP"))[:500],
+            "heal_cycle": heal_cycle,
+            "recorded_at": _ts(),
+        }
+        self._event(f"Final review: {'PASS' if passed else 'NEEDS_FOLLOWUP'}")
+        self._write()
+
+    def on_dynamic_checks(self, passed: bool, issues: list[str] | None = None) -> None:
+        self._state["dynamic_checks"] = {
+            "passed": bool(passed),
+            "issues": list(issues or [])[:20],
+            "recorded_at": _ts(),
+        }
+        self._event(f"Dynamic checks: {'PASS' if passed else 'FAILED'}")
+        self._write()
+
+    def on_deploy(self, url: str | None, note: str) -> None:
+        deploy = {
+            "url": url,
+            "note": note,
+            "status": "deployed" if url else "not_deployed",
+            "recorded_at": _ts(),
+        }
+        self._state["deploy"] = deploy
+        self._state["deploy_url"] = url
+        self._state.setdefault("project", {})["deploy_url"] = url
+        self._state["project"]["deploy_note"] = note
+        self._event(f"Deploy: {url or note}")
+        self._write()
+
     def on_cost(self, summary: dict) -> None:
-        self._state["cost"] = summary
+        # Normalize to the exact shape renderCostPanel expects so the
+        # breakdown table and token display are never empty due to key
+        # mismatches or a partially-populated dict.
+        raw_tokens = summary.get("tokens") or {}
+        self._state["cost"] = {
+            "total_usd": float(
+                summary.get("total_usd")
+                or summary.get("usd")
+                or summary.get("total")
+                or 0.0
+            ),
+            "by_model": dict(summary.get("by_model") or {}),
+            "tokens": {
+                "input":      int(raw_tokens.get("input", 0) or 0),
+                "cache_read": int(raw_tokens.get("cache_read", 0) or 0),
+                "output":     int(raw_tokens.get("output", 0) or 0),
+            },
+            "paid_calls": int(summary.get("paid_calls", 0) or 0),
+        }
+        self._write()
+
+    def on_openclaw_stamp(self, verdict: str) -> None:
+        """Record the OpenClaw final-stamp verdict so the dashboard can display it.
+
+        verdict is the full response text; the short stamp stored is either
+        'PASS' (when 'OPENCLAW: APPROVED' is present) or 'ISSUES FOUND'.
+        Both the top-level key and the nested project key are written so the
+        frontend fallback chain (d.openclaw_stamp → d.project.openclaw_stamp)
+        works regardless of which path the dashboard reads.
+        """
+        stamp = "PASS" if "OPENCLAW: APPROVED" in verdict else "ISSUES FOUND"
+        self._state["openclaw_stamp"] = stamp
+        self._state["project"]["openclaw_stamp"] = stamp
+        self._event(f"OpenClaw stamp: {stamp}")
         self._write()
 
     # ── Internals ─────────────────────────────────────────────────────────────
@@ -363,6 +450,24 @@ class StateWriter:
         self._state["events"].insert(0, {"ts": _ts(), "msg": message})
         self._state["events"] = self._state["events"][:100]  # keep last 100
 
+    def _set_terminal_state(self, state: str, message: str) -> None:
+        if state not in TERMINAL_STATES:
+            raise ValueError(f"unknown terminal state: {state}")
+        self._state["pipeline_state"] = state
+        self._state["active_agent"] = None
+        self._state["terminal"] = {
+            "state": state,
+            "message": message,
+            "recorded_at": _ts(),
+        }
+        now = _now()
+        for node in self._state.setdefault("agent_nodes", {}).values():
+            if node.get("status") == "running":
+                node["status"] = state.lower()
+                node["state"] = state
+                node["updated_at_epoch"] = now
+        self._event(message)
+
     def _write(self) -> None:
         with _lock:
             now = _now()
@@ -370,9 +475,24 @@ class StateWriter:
                 self._state["elapsed_s"] = round(now - self._start_time)
             self._state["updated_at_epoch"] = now
             self._state["sequence"] = int(self._state.get("sequence") or 0) + 1
-            _STATE_FILE.write_text(
-                json.dumps(self._state, indent=2), encoding="utf-8"
-            )
+            _write_json_atomic(_STATE_FILE, self._state)
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
 
 # Global singleton used by the harness
