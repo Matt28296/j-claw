@@ -229,7 +229,7 @@ Choose `architecture.stack` based on project requirements:
 
 | Stack        | Use when                                          | Worker tooling                          |
 |--------------|---------------------------------------------------|-----------------------------------------|
-| `vanilla`    | Simple browser apps, no backend, open-as-file     | Tailwind CDN, plain JS, localStorage; **PWA manifest.json + sw.js included** |
+| `vanilla`    | Simple browser apps, no backend, open-as-file     | **Tailwind CDN `<script src="https://cdn.tailwindcss.com">` MUST appear in `<head>`** + `<link>` for every `.css` file in the project; plain JS, localStorage; **PWA manifest.json + sw.js included** |
 | `react-vite` | Complex UI, component hierarchy, modern UX        | npm build, React, Tailwind via PostCSS; **PWA manifest.json + sw.js included** |
 | `fastapi`    | Needs a real backend API or database              | Python, FastAPI, SQLite, uvicorn        |
 | `phaser`     | Browser-based video game                          | Phaser 3 CDN, plain JS, game loop       |
@@ -634,6 +634,17 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
    Never say "keep existing", "preserve current logic", or "add X to the existing file".
    Keep each objective ≤ 60 words. The worker has stack-specific instructions on HOW to
    write code; your job is to say WHAT to write with enough precision that no stub appears.
+
+   **HTML file rule (vanilla / phaser stacks):** The task that writes `index.html` MUST
+   name in its `objective`: (a) every `<link rel="stylesheet">` path for CSS files declared
+   in any task's `files` list; (b) the CDN `<script>` tag for any framework used (Tailwind,
+   Phaser, Three.js, etc.); (c) every page section by its HTML `id` attribute and its
+   visible content (headings, paragraphs, cards, buttons). Without these specifics the
+   worker produces a skeleton with placeholder comments. Example objective fragment:
+   `"index.html: link css/styles.css and css/responsive.css; Tailwind CDN script in <head>;
+   sections #hero (name, tagline, CTA), #about (bio paragraph), #portfolio (3 project cards
+   with title+description), #skills (8 skill badges), #contact (mailto link); load
+   js/main.js, js/mobile-menu.js, js/smooth-scroll.js."`
 
 8. **Never create a manual browser verification task for bare HTML projects.** When the
    spec stack is `vanilla` or `phaser` and there is no `package.json`, do NOT create a
