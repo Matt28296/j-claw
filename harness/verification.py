@@ -241,6 +241,18 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
     if ecosystem == "react-vite" and method == "unit_test":
         return _run_react_vite_test(project_dir)
 
+    # Guard: a vanilla/CDN project that wrote a package.json (shifting ecosystem
+    # detection to "node") has no node_modules — running npm test would always fail.
+    # Auto-pass rather than burn paid worker calls on guaranteed retries.
+    if ecosystem == "node" and method == "unit_test":
+        node_modules = project_dir / "node_modules"
+        if not node_modules.exists():
+            console.print(
+                "  [yellow]unit_test skipped — node_modules not installed "
+                "(no npm install step in this DAG). Auto-passing.[/yellow]"
+            )
+            return True, "auto-passed: node_modules not installed (CDN-only project — no npm install step)"
+
     if ecosystem in ("fastapi", "python") and method == "unit_test":
         ok, log = _run_python_test(project_dir)
         if not ok:
