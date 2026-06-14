@@ -155,7 +155,7 @@ class _OpenAICompatOrchestrator:
         self._system_prompt = ORCHESTRATOR_PROMPT_PATH.read_text(encoding="utf-8")
 
     def call(self, payload: dict, max_retries: int = 3) -> dict:
-        from openai import APIConnectionError, InternalServerError, RateLimitError
+        from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
         state = payload.get("system_state", "INIT")
         user_message = json.dumps(payload)
         last_error: Exception | None = None
@@ -174,6 +174,7 @@ class _OpenAICompatOrchestrator:
                         {"role": "user", "content": user_message},
                     ],
                     response_format={"type": "json_object"},
+                    timeout=ORCHESTRATOR_TIMEOUT,
                 )
                 text = response.choices[0].message.content.strip()
                 text = _strip_fences(text)
@@ -182,11 +183,11 @@ class _OpenAICompatOrchestrator:
                 validate_response(state, parsed)
                 return parsed
 
-            except (RateLimitError, InternalServerError, APIConnectionError) as exc:
-                # 429 rate limits AND transient server-side failures (503 UNAVAILABLE,
-                # 5xx, dropped connections) — all benefit from the same fallback-model
-                # switch + backoff. Gemini free tier in particular throws intermittent
-                # 503s under load that resolve within seconds.
+            except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError) as exc:
+                # 429 rate limits, transient server-side failures (503 UNAVAILABLE,
+                # 5xx, dropped connections), and timeouts all get the same treatment:
+                # try the next fallback model, then back off. Gemini free tier in
+                # particular throws intermittent 503s and can hang past the timeout.
                 last_error = exc
                 # Try next fallback model before waiting
                 model_idx += 1
