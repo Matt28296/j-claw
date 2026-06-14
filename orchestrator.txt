@@ -654,6 +654,19 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
    Claude Code review covers content quality. Reserve `manual` only for genuinely
    un-automatable checks (audio output, device peripheral integration, physical hardware).
 
+   **Unit-test prohibition for CDN-only stacks (`vanilla`, `phaser`, `three-js`):**
+   These stacks have no `package.json` and no `node_modules` by design — all libraries
+   arrive via CDN `<script>` tags with no build step. Do NOT plan any `qa` task with
+   `verification: "unit_test"` or `"smoke"` for these stacks. A task that writes
+   `test/qa.test.js` + `package.json` to run vitest/jest requires a local test runner in
+   `node_modules`, which does not exist and cannot be installed without an `npm install`
+   task — and adding an install task contradicts the "no build step" contract of CDN stacks.
+   This applies even if the project goal mentions "testing" or "quality assurance".
+   The automatic completeness gate and the post-pipeline Claude Code review are the
+   verification mechanism for these stacks. The existing rule (rule 21 §unit_test):
+   "unit_test may ONLY be used if a prior task in the same DAG explicitly installs the
+   required test infrastructure" — for CDN stacks there can be no such prior task.
+
 9. **Full-stack projects (`stack: "full-stack"`)** combine a React+Vite frontend with a FastAPI backend.
    - Tag backend tasks with `type: "backend"`, `"api"`, `"database"`, or `"auth"`.
    - Tag frontend tasks with `type: "frontend"`, `"ui"`, or `"component"`.
