@@ -112,6 +112,94 @@ def get_relevant_hints(
     return hints
 
 
+def log_escalation(
+    task_type: str,
+    stack: str,
+    failed_model: str,
+    succeeded_model: str,
+    error_summary: str,
+    objective_summary: str,
+) -> None:
+    """Append one JSON line recording a within-chain escalation outcome.
+
+    Called when a weaker model fails and a stronger model succeeds on the same
+    task within a single execute_task() call. Used to pre-emptively warn future
+    weak-model attempts about known failure patterns.
+    """
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event": "escalation",
+        "task_type": task_type,
+        "stack": stack,
+        "failed_model": failed_model,
+        "succeeded_model": succeeded_model,
+        "error_summary": error_summary[:200],
+        "objective_summary": objective_summary[:150],
+    }
+    try:
+        with EXPERIENCE_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
+
+
+def get_worker_hints(task_type: str, stack: str, limit: int = 3) -> list[str]:
+    """Return pre-emptive hints for a worker based on past escalation patterns.
+
+    When qwen3 previously failed a task of this type and a stronger model
+    succeeded, this surfaces the common error so the weak model can avoid it
+    on its first attempt. Returns [] if no history exists (safe no-op).
+    """
+    if not EXPERIENCE_FILE.exists():
+        return []
+
+    patterns: dict[frozenset, dict] = {}
+    try:
+        with EXPERIENCE_FILE.open("r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    entry = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+
+                if entry.get("event") != "escalation":
+                    continue
+                if entry.get("task_type") != task_type:
+                    continue
+                entry_stack = entry.get("stack", "")
+                if entry_stack and stack and entry_stack != stack:
+                    continue
+
+                err = entry.get("error_summary", "")
+                obj = entry.get("objective_summary", "")
+                words = frozenset(_word_set(err))
+                if not words:
+                    continue
+                rec = patterns.setdefault(words, {"count": 0, "error": err, "objective": obj})
+                rec["count"] += 1
+                rec["objective"] = obj  # most recent wins
+
+    except OSError:
+        return []
+
+    if not patterns:
+        return []
+
+    sorted_patterns = sorted(patterns.values(), key=lambda r: r["count"], reverse=True)
+    hints: list[str] = []
+    for rec in sorted_patterns[:limit]:
+        hint = (
+            f"Past {task_type} tasks on {stack} commonly fail with: "
+            f'"{rec["error"][:120]}". '
+            f'A successful approach had objective: "{rec["objective"][:120]}".'
+        )
+        hints.append(hint)
+    return hints
+
+
 def get_stack_lessons(stack: str, max_lessons: int = 6, min_count: int = 2) -> list[str]:
     """Aggregate recurring failure patterns into planning-time lessons for the
     orchestrator (INIT / SPEC_ACCEPTED payloads).
@@ -168,5 +256,48 @@ def get_stack_lessons(stack: str, max_lessons: int = 6, min_count: int = 2) -> l
         lessons.append(lesson)
         if len(lessons) >= max_lessons:
             break
+
+    # Second pass: escalation entries — local models that consistently needed a stronger
+    # model signal that the orchestrator should plan these tasks with extra specificity.
+    if len(lessons) < max_lessons:
+        esc_by_type: dict[str, dict] = {}
+        try:
+            with EXPERIENCE_FILE.open("r", encoding="utf-8") as fh:
+                for raw_line in fh:
+                    raw_line = raw_line.strip()
+                    if not raw_line:
+                        continue
+                    try:
+                        entry = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
+                    if entry.get("event") != "escalation":
+                        continue
+                    entry_stack = entry.get("stack", "")
+                    if entry_stack and stack and entry_stack != stack:
+                        continue
+                    t = entry.get("task_type", "unknown")
+                    rec = esc_by_type.setdefault(t, {"count": 0, "error": ""})
+                    rec["count"] += 1
+                    if entry.get("error_summary"):
+                        rec["error"] = entry["error_summary"][:120]
+        except OSError:
+            pass
+
+        remaining = max_lessons - len(lessons)
+        for t, rec in sorted(esc_by_type.items(), key=lambda kv: kv[1]["count"], reverse=True):
+            if remaining <= 0:
+                break
+            if rec["count"] < min_count:
+                continue
+            lesson = (
+                f"[escalation] '{t}' tasks required a stronger model {rec['count']}x on "
+                f"{stack!r} stack — local models struggled. Plan these tasks with maximum "
+                f"specificity (exact selectors, function signatures, file paths)."
+            )
+            if rec["error"]:
+                lesson += f' Common failure: "{rec["error"]}"'
+            lessons.append(lesson)
+            remaining -= 1
 
     return lessons
