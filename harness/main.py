@@ -5,6 +5,7 @@ import sys
 import json
 import re
 import shutil
+import stat
 import argparse
 import time
 from pathlib import Path
@@ -208,7 +209,12 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     # Wipe any output from a previous run so stale files don't contaminate
     # the new run's review or verification steps.
     if output_dir.exists():
-        shutil.rmtree(output_dir)
+        def _force_remove_readonly(func, path, exc):
+            # Windows locks .git object files as read-only; chmod before retry.
+            import os
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        shutil.rmtree(output_dir, onexc=_force_remove_readonly)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Reset the per-project paid (cloud) worker-call budget for this run.
