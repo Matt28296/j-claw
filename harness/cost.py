@@ -52,6 +52,7 @@ _by_label: dict[str, float] = {}
 _by_model: dict[str, float] = {}
 _tokens: dict[str, int] = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
 _calls: int = 0
+_ollama_tokens: dict[str, int] = {"input": 0, "output": 0}
 
 
 def reset_costs() -> None:
@@ -63,6 +64,8 @@ def reset_costs() -> None:
     _by_model.clear()
     for k in _tokens:
         _tokens[k] = 0
+    for k in _ollama_tokens:
+        _ollama_tokens[k] = 0
 
 
 def call_cost(usage, model: str | None) -> float:
@@ -102,6 +105,12 @@ def record_usage(usage, model: str | None, label: str) -> None:
         _tokens["cache_creation"] += getattr(usage, "cache_creation_input_tokens", 0) or 0
 
 
+def record_ollama_usage(prompt_tokens: int, eval_tokens: int) -> None:
+    """Accumulate token counts from a local Ollama call (no cost — free)."""
+    _ollama_tokens["input"] += prompt_tokens or 0
+    _ollama_tokens["output"] += eval_tokens or 0
+
+
 def cost_summary() -> dict:
     """Snapshot of accumulated cost for this run."""
     return {
@@ -110,6 +119,7 @@ def cost_summary() -> dict:
         "by_label": {k: round(v, 4) for k, v in sorted(_by_label.items(), key=lambda kv: -kv[1])},
         "by_model": {k: round(v, 4) for k, v in sorted(_by_model.items(), key=lambda kv: -kv[1])},
         "tokens": dict(_tokens),
+        "ollama_tokens": dict(_ollama_tokens),
     }
 
 

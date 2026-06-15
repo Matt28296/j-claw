@@ -840,6 +840,11 @@ def _call_ollama(model: str, system: str, user: str) -> str:
         format="json",
         options={"temperature": 0.15, "num_predict": 8192},
     )
+    from cost import record_ollama_usage
+    record_ollama_usage(
+        prompt_tokens=getattr(response, "prompt_eval_count", None) or 0,
+        eval_tokens=getattr(response, "eval_count", None) or 0,
+    )
     return response.message.content.strip()
 
 
