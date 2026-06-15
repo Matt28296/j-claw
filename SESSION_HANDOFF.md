@@ -1,12 +1,56 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-14/15, sixth session** (previous: fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-15, seventh session** (previous: sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#54 are MERGED to `main`.**
+**PRs #10–#55 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-15 (seventh session) — factory rehearsal #2 + dashboard smart controls
+
+### PR #55 — Dashboard context-aware control button state
+
+`dashboard/index.html`: replaced blanket `btn.disabled = !controlAllowed` with per-action
+availability checks via `isControlActionAvailable(action)`:
+- **Restart** — only when prior intent exists (`hasPriorIntent`)
+- **Cancel** — only during active pipeline states (`isActiveState`)
+- **Retry** — only when failed tasks exist AND output dir is present
+- **Continue** — only when output dir is present
+
+`updateControlButtons()` called from `render()` on every state tick and from
+`setControlAvailability()` on token entry. Guard in `runControl()` rejects stale clicks
+with a toast. Agent network suppresses `active` CSS pulse once pipeline is terminal.
+
+### Factory rehearsal item #2 ✓ — /continue fix flow end-to-end
+
+Existing portfolio build (`Build_a_personal_portfolio_website_styled_like_a_T`) had two
+issues flagged by the Claude stamp: hero class mismatch + dark mode no-op.
+
+- Sent `/run Build a personal portfolio website styled like Tony Montana retro 80s`
+- Bot hit **idempotency guard** → returned the old completed build instead of a fresh run
+- Bot offered "Want me to fix them?" → operator accepted
+- Bot ran `/continue`: fixed `<section id="hero">` → `<section id="hero" class="hero">`;
+  confirmed `html.light-mode {}` was already defined in `variables.css` (original stamp
+  reviewer had incorrectly flagged dark mode as missing — it was already wired)
+- Redeployed to Netlify; site confirmed working visually by operator ("The website looks great!!")
+
+**Live URL:** https://jclaw-build-a-personal-portfolio-website-styled-like-a-t.netlify.app
+
+**What this validated:**
+- `/continue` fix flow (factory rehearsal #2) ✓
+- Deploy + redeploy idempotency ✓
+- Hero class in deployed HTML ✓ (PR #53 rule held through the fix)
+- Dark mode toggle + `html.light-mode {}` CSS wired ✓
+- Site fully styled: 8 split CSS files, 4 JS modules, sticky nav, scroll animations ✓
+
+**What was NOT validated:**
+- Clean v8 run — idempotency guard prevented a fresh build. True v8 (workers following
+  PR #53 rules from scratch, no post-hoc fix) is still outstanding. Use a distinct intent
+  to bypass the guard: `/run Tony Montana Miami Vice fan site v8`
 
 ---
 
@@ -405,11 +449,10 @@ self-description (it says it routes to `qwen2.5-coder:14b` — actually the 3-ru
 
 ---
 
-## 📋 WHAT'S LEFT TO FINALIZE (priority order, updated 2026-06-15 sixth session end)
+## 📋 WHAT'S LEFT TO FINALIZE (priority order, updated 2026-06-15 seventh session end)
 
-1. **Tony Montana v8 validation** — restart from Telegram; v7 failed before any tasks ran (`.git PermissionError`, fixed in PR #54). Expected: DAG with ~20–24 tasks, CSS split across named files (no `css/style.css`), sections with both `id` and `class`, dark mode toggle depending on a CSS task that defines `html.light-mode {}`, build completes with PASS.
-2. **Factory rehearsal items #2–7** (binding acceptance test) — from Telegram only:
-   - **#2 `/continue` a feature** (dark mode toggle on the portfolio site)
+1. **Tony Montana v8 clean run** — use `/run Tony Montana Miami Vice fan site v8` (unique intent bypasses idempotency guard). Expected: DAG ~20–24 tasks, CSS split across named files (no `css/style.css`), sections with both `id` and `class` from the start (no post-hoc fix needed), dark mode CSS task as a declared dependency. Validates PRs #51–53 rules work for Ollama workers independently.
+2. **Factory rehearsal items #3–7** (binding acceptance test) — from Telegram only:
    - **#3 `/run` a film** — aggregate push, real per-scene mp4s, probe-clean `final.mp4`
    - **#4 impossible intent** — honest FAIL push
    - **#5 kill Ollama mid-build** — crash push, pipeline recovers
