@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import re
 import ollama
+import httpx
 from rich.console import Console
 
 import threading
@@ -804,6 +805,15 @@ def execute_task(
             raise  # Bad output format — let scheduler handle via EXECUTION_ERROR
 
         except Exception as exc:  # noqa: BLE001
+            # Infrastructure failure on Ollama (server unreachable) — do NOT escalate
+            # to cloud. Anthropic escalation is for capability failures only (bad output,
+            # wrong format). A down Ollama server should fail the task, not burn API credits.
+            if provider == "ollama" and _is_ollama_unavailable(exc):
+                raise RuntimeError(
+                    f"Ollama unavailable at {OLLAMA_HOST} — start Ollama before running "
+                    f"builds. Task will fail rather than escalate to paid cloud workers. "
+                    f"({exc})"
+                ) from exc
             last_err = exc
             failed_attempts.append((provider, model, str(exc)[:200]))
             console.print(
@@ -817,6 +827,21 @@ def execute_task(
 
 
 # ── Provider dispatch ─────────────────────────────────────────────────────────
+
+def _is_ollama_unavailable(exc: Exception) -> bool:
+    """True when Ollama server is unreachable (infrastructure failure), not when the
+    model produced bad output (capability failure). Prevents cloud escalation when
+    Ollama is simply not running — Anthropic should only be reached on capability failures."""
+    if isinstance(exc, (ConnectionError, ConnectionRefusedError, OSError)):
+        return True
+    if isinstance(exc, httpx.ConnectError):
+        return True
+    msg = str(exc).lower()
+    return any(k in msg for k in (
+        "connection refused", "connect error", "cannot connect",
+        "connection error", "no route to host", "failed to connect",
+    ))
+
 
 def _call_provider(provider: str, model: str, system: str, user: str) -> str:
     if provider == "ollama":

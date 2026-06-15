@@ -439,14 +439,15 @@ class TestExecuteTask(unittest.TestCase):
     def _good_output(self):
         return json.dumps({"files": [{"path": "index.html", "content": "<html/>"}]})
 
-    def test_rung_walkup_on_infra_error(self):
+    def test_rung_walkup_on_capability_error(self):
+        """A non-connection error (bad model output) on qwen3 walks up to deepseek."""
         w = self._w
 
         call_log = []
         def mock_call(provider, model, sys, user):
             call_log.append((provider, model))
             if provider == "ollama" and model == "qwen3:8b":
-                raise ConnectionError("ollama down")
+                raise RuntimeError("model output truncated")
             return self._good_output()
 
         spec = {"architecture": {"stack": "vanilla"}}
@@ -459,6 +460,29 @@ class TestExecuteTask(unittest.TestCase):
         # First call failed (qwen3:8b), second call succeeded (deepseek)
         self.assertEqual(call_log[0], ("ollama", "qwen3:8b"))
         self.assertEqual(call_log[1], ("ollama", "deepseek-coder-v2:16b"))
+
+    def test_ollama_connection_error_raises_immediately_no_cloud_escalation(self):
+        """ConnectionError on Ollama must raise immediately — never escalate to paid cloud."""
+        w = self._w
+
+        call_log = []
+        def mock_call(provider, model, sys, user):
+            call_log.append((provider, model))
+            if provider == "ollama":
+                raise ConnectionError("connection refused")
+            return self._good_output()  # cloud would succeed but must never be reached
+
+        spec = {"architecture": {"stack": "vanilla"}}
+        with patch.object(w, "_call_provider", side_effect=mock_call), \
+             patch.object(w, "_reserve_paid_call", return_value=True), \
+             patch.object(w, "route_task", return_value=0):
+            with self.assertRaises(RuntimeError) as ctx:
+                w.execute_task(self._task(), spec, {})
+
+        # Must have raised on first Ollama call — cloud rung never touched
+        self.assertEqual(len(call_log), 1)
+        self.assertIn("ollama", call_log[0])
+        self.assertIn("Ollama unavailable", str(ctx.exception))
 
     def test_value_error_raises_immediately_no_retry(self):
         w = self._w
@@ -671,7 +695,7 @@ class TestExperienceLearning(unittest.TestCase):
 
         def mock_call(provider, model, sys_p, user_p):
             if provider == "ollama" and model == "qwen3:8b":
-                raise ConnectionError("ollama down")
+                raise RuntimeError("model output truncated — capability failure")
             return json.dumps({"files": [{"path": "index.html", "content": "<html/>"}]})
 
         task = MagicMock()
