@@ -5,7 +5,7 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#57 are MERGED to `main`.**
+**PRs #10–#58 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
