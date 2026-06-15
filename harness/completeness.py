@@ -78,6 +78,10 @@ _CALL_ALLOWLIST = {
     "array", "object", "string", "number", "boolean", "json", "math", "date",
     "map", "set", "weakmap", "weakset", "promise", "regexp", "symbol", "error",
     "float32array", "uint8array", "image", "audio", "path2d",
+    # CSS functions that appear in string literals (e.g. style.color = 'var(--x)')
+    # and can leak through if string-stripping order is wrong
+    "var", "calc", "env", "min", "max", "clamp", "rgb", "rgba", "hsl", "hsla",
+    "linear-gradient", "radial-gradient", "url",
 }
 
 
@@ -256,12 +260,17 @@ def _duplicate_decls(js: str, fname: str) -> list[str]:
 def _strip_comments_strings(js: str) -> str:
     """Blank out comments and string/template literals so prose inside them can't
     be mistaken for code (e.g. a JSDoc line `world X position (pixels)` must not
-    look like a call to `position(`). Best-effort, regex-based."""
-    js = re.sub(r"/\*.*?\*/", " ", js, flags=re.DOTALL)   # block comments
-    js = re.sub(r"//[^\n]*", " ", js)                       # line comments
-    js = re.sub(r"'(?:\\.|[^'\\])*'", "''", js)             # single-quoted strings
+    look like a call to `position(`). Best-effort, regex-based.
+
+    Strings are stripped BEFORE line comments — otherwise `'// not a comment'`
+    gets its contents stripped by the line-comment pass first, which corrupts the
+    string boundary and leaves later tokens (e.g. `var(--neon-yellow)`) exposed
+    as apparent bare function calls."""
+    js = re.sub(r"'(?:\\.|[^'\\])*'", "''", js)             # single-quoted strings first
     js = re.sub(r'"(?:\\.|[^"\\])*"', '""', js)             # double-quoted strings
     js = re.sub(r"`(?:\\.|[^`\\])*`", "``", js)             # template literals
+    js = re.sub(r"/\*.*?\*/", " ", js, flags=re.DOTALL)     # block comments
+    js = re.sub(r"//[^\n]*", " ", js)                       # line comments last
     return js
 
 
