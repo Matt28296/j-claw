@@ -111,6 +111,43 @@ _state = _BotState()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _write_canceled_state() -> None:
+    """Write CANCELED terminal state to mission_control.json from the bot process.
+
+    The pipeline subprocess is already dead when this is called, so state_writer
+    in that process can't flush the terminal state itself. We patch the file
+    directly, mirroring what StateWriter._set_terminal_state("CANCELED", ...) does.
+    """
+    try:
+        state: dict = {}
+        if _MISSION_CONTROL.exists():
+            state = json.loads(_MISSION_CONTROL.read_text(encoding="utf-8"))
+        now_ts = time.strftime("%H:%M:%S")
+        now_epoch = time.time()
+        state["pipeline_state"] = "CANCELED"
+        state["active_agent"] = None
+        state["terminal"] = {
+            "state": "CANCELED",
+            "message": "Pipeline canceled by user",
+            "recorded_at": now_ts,
+        }
+        events = state.get("events") or []
+        events.insert(0, {"ts": now_ts, "msg": "Pipeline canceled by user"})
+        state["events"] = events[:100]
+        for node in (state.get("agent_nodes") or {}).values():
+            if node.get("status") == "running":
+                node["status"] = "canceled"
+                node["state"] = "CANCELED"
+                node["updated_at_epoch"] = now_epoch
+        state["sequence"] = int(state.get("sequence") or 0) + 1
+        state["updated_at_epoch"] = now_epoch
+        tmp = _MISSION_CONTROL.with_name(f".{_MISSION_CONTROL.name}.cancel.tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        os.replace(tmp, _MISSION_CONTROL)
+    except Exception as exc:
+        logger.warning("Failed to write canceled state: %s", exc)
+
+
 def _guard(update: Update) -> bool:
     """Return True if the chat is allowed to use this bot."""
     if ALLOWED_CHAT_ID is None:
@@ -361,6 +398,8 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             _state.proc.kill()
     except Exception as exc:
         logger.warning("Error killing subprocess: %s", exc)
+
+    _write_canceled_state()
 
     await _send(context.bot, chat_id, "Pipeline cancelled." +
                 (" Next queued job will start." if _state.pending else ""))
