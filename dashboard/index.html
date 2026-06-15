@@ -1377,18 +1377,26 @@ function renderCostPanel(d) {
     }
   });
 
-  // Global token totals from cost.tokens
+  // Global token totals from cost.tokens (cloud) and cost.ollama_tokens (local)
   const tokens = cost.tokens || {};
   const tokIn  = (tokens.input || 0) + (tokens.cache_read || 0);
   const tokOut  = tokens.output || 0;
+  const ollama = cost.ollama_tokens || {};
+  const ollamaIn  = ollama.input  || 0;
+  const ollamaOut = ollama.output || 0;
 
   const modelRows = Object.entries(modelMap);
   const tableEl = document.getElementById('cost-model-table');
-  if (modelRows.length) {
-    const tokenRow = (tokIn || tokOut)
+  if (modelRows.length || ollamaIn || ollamaOut) {
+    const cloudTokenRow = (tokIn || tokOut)
       ? `<tr style="border-top:1px solid var(--border);opacity:.7">
-           <td colspan="2" style="color:var(--muted)">total tokens</td>
+           <td colspan="2" style="color:var(--muted)">cloud tokens</td>
            <td>${tokIn > 0 ? tokIn.toLocaleString() : '-'} in / ${tokOut > 0 ? tokOut.toLocaleString() : '-'} out</td>
+         </tr>` : '';
+    const ollamaTokenRow = (ollamaIn || ollamaOut)
+      ? `<tr style="opacity:.7">
+           <td colspan="2" style="color:var(--muted)">local (ollama)</td>
+           <td>${ollamaIn > 0 ? ollamaIn.toLocaleString() : '-'} in / ${ollamaOut > 0 ? ollamaOut.toLocaleString() : '-'} out</td>
          </tr>` : '';
     tableEl.innerHTML = `<table class="cost-table">
       <thead><tr>
@@ -1401,7 +1409,8 @@ function renderCostPanel(d) {
             <td colspan="2">${v.cost > 0 ? money(v.cost) : '-'}</td>
           </tr>`
         ).join('')}
-        ${tokenRow}
+        ${cloudTokenRow}
+        ${ollamaTokenRow}
       </tbody>
     </table>`;
   } else {

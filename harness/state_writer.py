@@ -300,6 +300,7 @@ class StateWriter:
         # breakdown table and token display are never empty due to key
         # mismatches or a partially-populated dict.
         raw_tokens = summary.get("tokens") or {}
+        raw_ollama = summary.get("ollama_tokens") or {}
         self._state["cost"] = {
             "total_usd": float(
                 summary.get("total_usd")
@@ -312,6 +313,10 @@ class StateWriter:
                 "input":      int(raw_tokens.get("input", 0) or 0),
                 "cache_read": int(raw_tokens.get("cache_read", 0) or 0),
                 "output":     int(raw_tokens.get("output", 0) or 0),
+            },
+            "ollama_tokens": {
+                "input":  int(raw_ollama.get("input", 0) or 0),
+                "output": int(raw_ollama.get("output", 0) or 0),
             },
             "paid_calls": int(summary.get("paid_calls", 0) or 0),
         }
