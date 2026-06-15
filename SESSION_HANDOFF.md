@@ -5,8 +5,54 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#58 are MERGED to `main`.**
+**PRs #10–#61 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-15 (seventh session continued) — Ollama token tracking + connection error guard
+
+### PR #60 — Ollama token tracking in cost panel
+
+`harness/cost.py`: added `_ollama_tokens` accumulator (`input`/`output`), `record_ollama_usage()`, and `ollama_tokens` key in `cost_summary()`. Reset in `reset_costs()`.
+
+`harness/worker.py`: `_call_ollama()` now reads `response.prompt_eval_count` + `response.eval_count` and calls `record_ollama_usage()`.
+
+`harness/state_writer.py`: `on_cost()` normalizes `ollama_tokens.input/output` from the summary dict.
+
+`dashboard/index.html`: "local (ollama)" row added below the cloud token row in the cost panel. Table renders even with zero cloud spend (condition broadened to `modelRows.length || ollamaIn || ollamaOut`).
+
+### PR #61 — Ollama connection errors fail the task immediately (no cloud escalation)
+
+**Root cause (discovered live):** The first Tony Montana v8 build attempt burned $0.50 in ~23 minutes because Ollama was DOWN. Every task started on qwen3 → `ConnectionError` → caught by generic `except Exception` → silently walked up the worker ladder to `claude-sonnet-4-6`. All 23+ completed tasks used Anthropic.
+
+**Fix:** Added `_is_ollama_unavailable(exc)` helper in `worker.py` that distinguishes infrastructure failures (server unreachable) from capability failures (bad output, wrong JSON). Checks `ConnectionError`, `ConnectionRefusedError`, `OSError`, `httpx.ConnectError`, and string patterns ("connection refused", "cannot connect", etc.). When an Ollama rung raises an infrastructure error, the task raises `RuntimeError` immediately — no ladder walk-up, no cloud spend.
+
+**Rule encoded:** Anthropic escalation is for capability failures only. A down Ollama server fails the task loudly; it does not silently bill the API.
+
+`harness/test_llm_layers.py`: **32/32 tests green.**
+- Renamed `test_rung_walkup_on_infra_error` → `test_rung_walkup_on_capability_error` (uses `RuntimeError` not `ConnectionError`)
+- Added `test_ollama_connection_error_raises_immediately_no_cloud_escalation`
+- Updated `test_execute_task_logs_escalation_on_fallback_success` to use `RuntimeError` (simulates a capability failure)
+
+### Factory rehearsal runs (2026-06-15, seventh session)
+
+`deepseek-coder-v2:16b` pulled and confirmed (8.9 GB). Both local rungs live: `qwen3:8b` ✅ + `deepseek-coder-v2:16b` ✅. Codex plugin for Claude Code installed (`/plugin install codex@openai-codex`) — adds `/codex:adversarial-review` for independent second-opinion PR reviews.
+
+Two builds ran with the full local ladder in place:
+
+**NES-style portfolio** — `Build a static, personal portfolio website with a retro 80s NES game aesthetic`
+- 31 tasks · 1 heal cycle · HANDOFF: ISSUES REMAIN (broken contact form JS, missing PWA icons, Tailwind CDN loaded on vanilla stack)
+- Telegram: "Review result: pass / Project complete"
+- Deployed: https://jclaw-build-a-personal-portfolio-website-styled-like-a-r.netlify.app
+
+**Tony Montana v8** — `Tony Montana Miami Vice fan site v8` (distinct intent to bypass idempotency guard)
+- 44 tasks (31 original + 13 heal tasks) · 2 heal cycles · Final state: NEEDS_FOLLOWUP
+- Completeness kept failing: hero `<section id="hero">` without `class="hero"` (PR #53 rule not consistently applied by local workers); dark-mode toggle with no CSS rule for the toggled class
+- Cost: $0.60 — Ollama handled bulk (96k local input tokens vs 82k cloud); 8 paid calls
+- Deployed: https://jclaw-build-a-personal-portfolio-website-styled-like-a-t.netlify.app
+
+**Key result:** PR #61 protection confirmed — no silent cloud escalation on infra failure. Cost profile is local-first. Healer gap identified: the `#hero`/`.hero` class mismatch pattern survives all heal cycles — the healer generates fix tasks but workers don't reliably patch structural HTML selector issues without targeted guidance.
 
 ---
 
