@@ -524,16 +524,23 @@ Every project writes to `harness/projects/<slug>/`:
 | **DAG-stage decomposition guard + Gemini retry pacing (PR #39, 2026-06-12):** scene sub-projects were re-decomposing at `SPEC_ACCEPTED` (Gemini returned FORMAT 5 again), tripling orchestrator calls per build and exhausting the free-tier quota before any task ran. Fix: `SPEC_ACCEPTED` payload now carries `decomposition_allowed: false` when inside a sub-project (mirrors the proven INIT guard). Gemini 429 retry delay parsing added: was waiting blind 35–105s on "retry in 3s" errors — now reads Google's `RetryInfo.retryDelay`. Per-build orchestrator calls: ~6–8 (was 18–24) | ✅ |
 | **Emergency cross-provider orchestrator fallback (PR #40, 2026-06-12):** `CompositeOrchestrator` + `make_orchestrator()` factory — when Gemini exhausts all retries, automatically routes the same call to Anthropic Sonnet instead of crashing. Availability failures go sideways to another provider at the same tier (Sonnet); capability failures escalate up the worker ladder (Opus rung, PR #36). Config: `ORCHESTRATOR_EMERGENCY_PROVIDER` / `EMERGENCY_ORCHESTRATOR_MODEL` | ✅ |
 | **LLM layer test suite (PR #41, 2026-06-12):** `harness/test_llm_layers.py` — 25 mocked tests covering every LLM call layer and fallback path: both orchestrator providers (all retry/fallback/error shapes), `CompositeOrchestrator`, `routed_rung` (4-rung ladder incl. Opus), `execute_task` attempt chain (rung walk-up, `ValueError` short-circuit, paid-budget clamp, all-exhausted), final review fail-closed regression guard. Zero API spend | ✅ |
+| **Mission Control dashboard telemetry (PR #44, 2026-06-13):** all 12 live panels wired end-to-end — agent network, task drawer, cancel/continue/retry controls, cost breakdown, rung badges, health bar, live test results, healing timeline; model display fix; heal badge no longer double-divides count | ✅ |
+| **orchestrator.txt render + HTML rules (PRs #45–#46, 2026-06-13):** render scripts must call `subprocess.run(cmd, check=True)` (never `print(cmd)`); Windows ffmpeg constraints documented (`drawtext` / `geq=` unavailable; use `color=` solid backgrounds); HTML stub prevention — the `index.html` task must name every CSS `<link>`, CDN `<script>`, and page section by `id` + visible content in its `objective` | ✅ |
+| **Dashboard state wiring (PR #47, 2026-06-13):** `on_cost()` normalization (`total_usd`/`by_model`/`tokens`/`paid_calls`); `on_review_failed()` emits event with "REVIEW_FAILED" text so heal badge counter works; `on_openclaw_stamp()` wired from `handoff.py` | ✅ |
+| **Gemini timeout + APITimeoutError fallback (PR #48, 2026-06-13):** `_OpenAICompatOrchestrator` now passes `timeout=ORCHESTRATOR_TIMEOUT` to every `chat.completions.create()` call and catches `APITimeoutError` as an availability failure — triggers the model fallback chain, then `CompositeOrchestrator` Sonnet fallback. Before: indefinite freeze when Gemini stalled. After: 300s timeout → auto-fallback | ✅ |
+| **Factory rehearsal item #1 (2026-06-13):** `/run Build a simple personal portfolio website` — build ran end-to-end, Netlify URL deployed, Telegram notification received ✅. CSS worker quality gap identified → PR #46 addresses root cause for future builds | ✅ |
+| **CDN stack unit-test guard (PR #49, 2026-06-14):** Two-part fix for vitest tasks burning paid call budget on CDN-only projects: (1) `orchestrator.txt` — `vanilla`/`phaser`/`three-js` stacks may NOT plan any `qa` task with `verification: "unit_test"` or `"smoke"` (no `node_modules`, no install step); (2) `verification.py` — `node` ecosystem unit_test auto-passes when `node_modules/` is absent. Root cause: a CDN project's `qa` task writing `package.json` shifted ecosystem detection to `"node"`, causing `npm test` to run and fail all 4 retries, exhausting the paid call budget before `index.html` or JS tasks could complete | ✅ |
+| **One-file-per-task ≤150 line limit (PR #50, 2026-06-14):** `orchestrator.txt` principle 2 extended — each task writes exactly one file, ≤150 lines (a 14B local model's reliable output window). CSS must never be a single monolithic file — split by concern: `variables.css`, `reset.css`, `layout.css`, `components.css`, `animations.css`, `responsive.css`, one task per file. JS must never be a single monolithic file — split by feature (`js/scroll.js`, `js/menu.js`, etc.). Root cause: a single `css/style.css` with all styles exceeded the output token window at every rung — deepseek wrong format, Sonnet/Opus both truncated mid-JSON, all 4 retries failed | ✅ |
 
 ---
 
 ## Current Status & What's Left to Finalize
 
-**2026-06-12 (third session end) — PRs #10–#41 all merged; all fallback layers verified; no blocking defects remain.** The target: Telegram is the only human interface; builds queue and run unattended; finished web builds auto-deploy to a reachable URL; the operator is contacted only on terminal outcome. All machinery for that is merged and hardened.
+**2026-06-14 (fifth session end) — PRs #10–#50 all merged; CDN stack unit-test guard active; one-file-per-task ≤150 line rule enforced; factory rehearsal item #1 complete.** The target: Telegram is the only human interface; builds queue and run unattended; finished web builds auto-deploy to a reachable URL; the operator is contacted only on terminal outcome. All machinery for that is merged and hardened.
 
-The film-stack validation has driven **eleven** live runs across two sessions, each catching a real defect: seven on the Claude orchestrator (PRs #18–#23, #25) and four on the Gemini orchestrator (v3–v6 → PRs #34–#35, #39). The Gemini batch shares one root cause: **Claude infers intent; Gemini follows the prompt and schema literally** — every rule, enum, and schema must say exactly what it means.
+The film-stack validation has driven **eleven** live runs across four sessions, each catching a real defect: seven on the Claude orchestrator (PRs #18–#23, #25) and four on the Gemini orchestrator (v3–v6 → PRs #34–#35, #39). The Gemini batch shares one root cause: **Claude infers intent; Gemini follows the prompt and schema literally** — every rule, enum, and schema must say exactly what it means.
 
-**Current constraint: Gemini free-tier quota reset.** The DAG-stage re-decomposition bug (fixed in PR #39) was tripling orchestrator calls per build (18–24 → ~6–8 now). v7 is waiting for the quota window. If Gemini is still rate-limited, the emergency fallback (PR #40) routes automatically to Anthropic Sonnet so the build completes at ~$0.50 instead of crashing.
+**Gemini timeout fixed (PR #48).** Before: if Gemini stalled on a response, the harness froze indefinitely — no exception raised, CompositeOrchestrator Sonnet fallback never triggered. After: 300s timeout on the HTTP call → `APITimeoutError` treated as an availability failure → model fallback chain → Sonnet emergency fallback. The DAG-stage re-decomposition bug (PR #39) had already reduced orchestrator calls from 18–24 → ~6–8 per build.
 
 ### Honest capability scorecard
 
@@ -574,27 +581,32 @@ fourth is structural and remains by design.
 5. **Sprint A** — worker ladder (`qwen3:8b → qwen2.5-coder:14b → sonnet`; rung-1 upgraded to `deepseek-coder-v2:16b` 2026-06-12) + paid-call budget + dispatch timeouts + bounded heal loop. *(`ac3bdce`)*
 6. **Pre-merge review fixes** — failure-handoff phase tracking made functional; worker-timeout liveness limitation documented. *(`7c7656e`)*
 
-### Remaining work to finalize (priority order, updated 2026-06-12 end of third session)
+### Remaining work to finalize (priority order, updated 2026-06-13/14 end of fifth session)
 
 ~~DAG-stage decomposition guard~~ — **done** (PR #39).
 ~~Honor Gemini 429 retry delay~~ — **done** (PR #39).
 ~~Emergency cross-provider fallback~~ — **done** (PR #40).
 ~~LLM layer test suite~~ — **done** (PR #41, 25/25 tests green).
+~~Dashboard telemetry + state wiring~~ — **done** (PRs #44, #47).
+~~orchestrator.txt render + HTML rules~~ — **done** (PRs #45, #46).
+~~Gemini timeout / APITimeoutError~~ — **done** (PR #48).
+~~CDN stack unit-test guard~~ — **done** (PR #49).
+~~One-file-per-task ≤150 line limit~~ — **done** (PR #50).
 
-1. **Film validation v7** — pending Gemini quota reset. Launch:
-   ```
-   PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python harness/main.py --yes "<film prompt>" --output film_validation_v7
-   ```
-   Acceptance: real per-scene mp4s at honest durations (≥50% of intent), probe-clean `final.mp4`, zero silent skips, one aggregate Telegram push, honest exit code. First run expected to reach the ffmpeg render path.
-2. **Factory rehearsal (binding acceptance test):** from Telegram only —
-   `/run` a website (live URL), `/continue` a feature (same URL redeployed), `/run` a film
-   (aggregate push), an impossible intent (honest FAIL push), kill Ollama mid-build (crash
-   push), two queued builds (strict FIFO), reboot + repeat (no interactive auth anywhere).
-   All green → update README/SESSION_HANDOFF to "factory" status.
+1. **Tony Montana v5 validation** — confirm PRs #49 + #50 end-to-end: resend from Telegram, verify DAG drops to ~20–24 tasks (no vitest qa planned), CSS split across 6 files, build completes without exhausting paid budget.
+2. **Factory rehearsal — items #2–7 (binding acceptance test):** from Telegram only —
+   - ~~#1 website `/run`~~ — **done** (2026-06-13): Netlify URL deployed, Telegram push received ✅
+   - **#2 `/continue` a feature** (dark mode toggle) — 🔄 in progress
+   - **#3 `/run` a film** — aggregate push with per-scene clips + `final.mp4`
+   - **#4 impossible intent** — honest FAIL push (no crash)
+   - **#5 kill Ollama mid-build** — crash push, pipeline recovers
+   - **#6 two queued builds** — strict FIFO, both complete and push
+   - **#7 reboot + repeat** — no interactive auth anywhere
+   All 7 green → "factory" status declared.
 3. **Carry-overs (not blocking):** native mobile CI runner; Playwright runner task type in the DAG; IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect; worker-timeout hard bound; prune stale `worktree-agent-*` branches + dangling Ollama manifests.
 
 ~~Anthropic credits / Google key / NETLIFY_AUTH_TOKEN~~ — **all resolved 2026-06-12**.
-~~Duration honesty gap~~ — **closed** (PR #25). ~~PRs #30–#41~~ — **all merged**.
+~~Duration honesty gap~~ — **closed** (PR #25). ~~PRs #30–#48~~ — **all merged**.
 
 ---
 
@@ -605,6 +617,11 @@ fourth is structural and remains by design.
 - **claude CLI stamp is optional** — OpenClaw verdict in the dashboard only appears if `claude` is installed and on PATH.
 - **SD/Coqui/Ollama must be running** — the pipeline degrades gracefully (SVG/silent/OpenRouter fallbacks) but local services need to be up for full capability.
 - **Full-stack projects split into sub-projects** — when the spec is "React + FastAPI", the orchestrator emits FORMAT 5 and the harness runs a `backend_api/` sub-project then a `frontend_react/` sub-project in sequence. Both land under `harness/projects/<slug>/`.
+- **Windows Defender exclusion required** — Defender locks `.git/objects/` at write time as the harness does `git init` and commits inside `harness/projects/`. Without this exclusion every build crashes at the git commit step with `PermissionError: [WinError 5]`. Run once in admin PowerShell:
+  ```powershell
+  Add-MpPreference -ExclusionPath "C:\Users\Tyler\Desktop\Jarvis-Claw\harness\projects"
+  ```
+- **vitest must be installed globally** — QA tasks for web projects use `vitest run`; if vitest isn't on PATH the task fails all 4 retry attempts and burns heal cycles. Run once: `npm install -g vitest`
 
 ---
 

@@ -1,12 +1,68 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-13, fourth session** (previous: 2026-06-12 third session, second session + morning, 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-13/14, fifth session** (previous: fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#41 are MERGED to `main`. Two additional dashboard commits are local-only (not yet PR'd): `d419403` + `acb8fd4`.**
+**PRs #10–#50 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-13/14 (fifth session) — Dashboard PRs, factory rehearsal item #1, orchestrator hardening
+
+### PRs #44–#48 merged
+
+| PR | Description |
+|----|-------------|
+| **#44** | Dashboard mission-control telemetry — agent network, task drawer, cancel/continue/retry controls, cost panel, rung badges, health bar, live test results, healing timeline, model display, heal badge fix |
+| **#45** | orchestrator.txt: `render_scene.py` must call `subprocess.run(cmd, check=True)`, never `print(cmd)`; Windows ffmpeg constraints (`drawtext` unavailable, `geq=` in filter_complex fails, use `color=` solid backgrounds) |
+| **#46** | orchestrator.txt: HTML stub prevention for vanilla stack — task that writes `index.html` must name every `<link rel="stylesheet">`, CDN `<script>`, and every page section by its HTML `id` + visible content |
+| **#47** | Dashboard state wiring — `on_cost()` normalization (`total_usd`/`by_model`/`tokens`/`paid_calls`), `on_review_failed()` event emission ("REVIEW_FAILED" text for heal badge counter), `on_openclaw_stamp()` method wired from `handoff.py`; deploy URL was already implemented (review agents caught it) |
+| **#48** | Orchestrator timeout fix — `_OpenAICompatOrchestrator` (Gemini) now passes `timeout=ORCHESTRATOR_TIMEOUT` to `chat.completions.create()` and catches `APITimeoutError` as an availability failure (triggers model fallback chain → CompositeOrchestrator Sonnet fallback). Fixes the indefinite hang when Gemini stalls |
+
+### Factory rehearsal — item #1 ✅
+
+`/run Build a simple personal portfolio website` sent via Telegram:
+- Build ran, 3/3 heal cycles used, status ISSUES REMAIN (CSS not linked, Tailwind CDN missing — worker quality gap, not pipeline gap)
+- Netlify URL deployed: https://jclaw-build-a-simple-personal-portfolio-website.netlify.app
+- Telegram notification received with URL ✅
+- Pipeline end-to-end (orchestrator → workers → deploy → Telegram) confirmed working
+
+PR #46 (HTML stub prevention) was added this session to reduce the CSS-orphan failure for future builds.
+
+### PRs #49–#50 merged — CDN stack unit-test guard + task size limit
+
+| PR | Description |
+|----|-------------|
+| **#49** | Two-part fix for vitest QA tasks burning paid call budget on CDN-only projects: (1) `orchestrator.txt` rule 8 extended — `vanilla`, `phaser`, `three-js` stacks may NOT plan any `qa` task with `verification: "unit_test"` or `"smoke"` (no `node_modules`, no install step); (2) `harness/verification.py` — `node` ecosystem unit_test auto-passes when `node_modules/` is absent (defensive guard for builds that slip through) |
+| **#50** | `orchestrator.txt` principle 2 extended — one file per task, ≤150 lines per file (a 14B model's reliable output window); CSS must never be a single monolithic file (split: `variables.css`, `reset.css`, `layout.css`, `components.css`, `animations.css`, `responsive.css`, one task per file); JS must never be a single monolithic file (split by feature: `js/scroll.js`, `js/menu.js`, etc.) |
+
+**Root cause of these fixes — Tony Montana build failures (v1–v4):**
+- v1–v3: QA task planned `test/qa.test.js` + `package.json` → `detect_ecosystem()` returned `"node"` → `npm test` ran → vitest not found → 4 retries burned 3+ paid calls → paid budget exhausted → `index.html` and JS tasks degraded to Ollama-only and failed → build landed as ISSUES REMAIN
+- All builds v1–v3: `css/style.css` was a single monolithic file — deepseek returned wrong output format, Sonnet and Opus both truncated mid-JSON; all 4 retries failed; heal cycles couldn't recover
+- v4: Build cleared old project dir and restarted, but crashed at git commit: `PermissionError: [WinError 5] Access is denied: .git\objects\...` — Windows Defender locking the project git directory at write time
+- **Fix applied:** `Add-MpPreference -ExclusionPath "C:\Users\Tyler\Desktop\Jarvis-Claw\harness\projects"` (must run as admin once)
+- Also installed vitest globally: `npm install -g vitest` (vitest 4.1.8)
+- **v5 pending validation** — DAG expected to drop from 49 tasks → ~20–24 tasks (no vitest qa planned); CSS split across 6 focused files; paid call budget preserved. User needs to resend from Telegram.
+
+### Factory rehearsal — item #2 🔄 in progress / replaced by Tony Montana build
+
+`/continue Add a dark mode toggle` sent via Telegram. First attempt hung for ~24 minutes (Gemini timeout — fixed in PR #48). Second attempt sent; outcome unclear — superseded by a new `/run` before HANDOFF was written.
+
+### Dashboard audit
+
+Full cross-file audit (dashboard.py ↔ dashboard/index.html ↔ state_writer.py) run via Explore agent. Findings:
+- **12 panels confirmed working:** state badge, stage tracker, active agent, agent network, health bar, task list, events, test results, error cards, work log, output files, task drawer
+- **4 orphaned panels fixed in PR #47:** cost breakdown table, token display, heal badge count, openclaw verdict card
+- **1 rejection:** deploy URL fix was already implemented (`on_deploy()` exists in state_writer.py and is called in main.py) — review agent caught the false positive
+
+### Gemini hang root cause
+
+`_OpenAICompatOrchestrator.call()` (used by GeminiOrchestrator) had no `timeout=` on its `chat.completions.create()` call. When Gemini stalled, the process waited indefinitely — the `CompositeOrchestrator` Sonnet fallback never triggered because no exception was raised. Fixed in PR #48: 300s timeout + `APITimeoutError` treated as an availability failure (same fallback path as 429/503).
+
+---
 
 ---
 
@@ -329,19 +385,22 @@ self-description (it says it routes to `qwen2.5-coder:14b` — actually the 3-ru
 
 ---
 
-## 📋 WHAT'S LEFT TO FINALIZE (priority order, updated 2026-06-13 fourth session)
+## 📋 WHAT'S LEFT TO FINALIZE (priority order, updated 2026-06-14 fifth session end)
 
-1. **Dashboard PR** — push local commits `d419403` + `acb8fd4` as a PR (cost panel + health bar). These are on `main` locally but not remote.
-2. **orchestrator.txt rule** — add rule: render_scene.py must call `subprocess.run(cmd, check=True)`, NEVER `print(cmd)`. Workers consistently generate the wrong thing.
-3. **Factory rehearsal** (binding acceptance test) — from Telegram only; see README roadmap.
-4. **Carry-overs:** native mobile CI runner; Playwright runner task type in the DAG;
-   IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect prompts.
-5. **Optional hardening / polish:**
-   - Worker-timeout hard bound: `shutdown(wait=False, cancel_futures=True)` (3.9+) + audit inner
-     timeouts.
+1. **Tony Montana v5 validation** — confirm PRs #49/#50 work end-to-end; resend from Telegram. Expected: ~20–24 task DAG, no vitest qa, CSS split across 6 files, paid budget not exhausted, build completes.
+2. **Factory rehearsal items #2–7** (binding acceptance test) — from Telegram only:
+   - **#2 `/continue` a feature** (dark mode toggle on the portfolio site)
+   - **#3 `/run` a film** — aggregate push, real per-scene mp4s, probe-clean `final.mp4`
+   - **#4 impossible intent** — honest FAIL push
+   - **#5 kill Ollama mid-build** — crash push, pipeline recovers
+   - **#6 two queued builds** — strict FIFO, both complete and push
+   - **#7 reboot + repeat** — no interactive auth anywhere
+3. **Carry-overs (not blocking):** native mobile CI runner; Playwright runner task type in the DAG; IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect prompts.
+4. **Optional hardening / polish:**
+   - Worker-timeout hard bound: `shutdown(wait=False, cancel_futures=True)` (3.9+) + audit inner timeouts.
    - OpenClaw: bot self-description, `OLLAMA_MAX_LOADED_MODELS=1`, prune dangling manifests.
    - Prune the 6 stale `worktree-agent-*` branches (dead — work was salvaged into `056ad67`).
-   - Gemini REVIEW_FAILED bug — file/track that `review_result` is consistently omitted; PR #40 workaround works but root cause is unresolved.
+   - Gemini REVIEW_FAILED bug — `review_result` consistently omitted; PR #40 workaround works but root cause unresolved.
 
 ### Known structural ceilings
 - Worker quality is bounded by 14B-class local models (Ollama-only worker constraint is locked).
