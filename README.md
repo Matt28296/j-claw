@@ -540,6 +540,8 @@ Every project writes to `harness/projects/<slug>/`:
 
 ## Current Status & What's Left to Finalize
 
+**2026-06-15 (seventh session end) — PR #55 merged; factory rehearsal #2 validated.** Dashboard control buttons are now context-aware (Retry only when failed tasks exist, Continue only when output dir exists, Restart only when prior intent exists). Factory rehearsal item #2 (`/continue` fix flow) confirmed end-to-end: bot detected issues in a deployed portfolio build, offered a fix, patched the hero class, and redeployed to Netlify — operator confirmed the site looks great. Remaining: clean v8 validation run + factory rehearsal items #3–7.
+
 **2026-06-15 (sixth session end) — PRs #10–#54 all merged; unique file ownership enforced; completeness.py stripping order fixed; ID/class coordination + JS toggle class rules enforced; .git rmtree PermissionError fixed.** The target: Telegram is the only human interface; builds queue and run unattended; finished web builds auto-deploy to a reachable URL; the operator is contacted only on terminal outcome. All machinery for that is merged and hardened.
 
 The film-stack validation has driven **eleven** live runs across four sessions, each catching a real defect: seven on the Claude orchestrator (PRs #18–#23, #25) and four on the Gemini orchestrator (v3–v6 → PRs #34–#35, #39). The Gemini batch shares one root cause: **Claude infers intent; Gemini follows the prompt and schema literally** — every rule, enum, and schema must say exactly what it means.
