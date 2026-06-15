@@ -1,12 +1,32 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-13/14, fifth session** (previous: fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-14/15, sixth session** (previous: fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#50 are MERGED to `main`.**
+**PRs #10–#54 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-14/15 (sixth session) — Tony Montana validation + .git rmtree fix
+
+### PRs #51–#54 merged — Tony Montana build hardening
+
+| PR | Description |
+|----|-------------|
+| **#51** | orchestrator.txt: unique file ownership per task (second task silently overwrites first — workers always write the complete file); ban on generic monolithic filenames (`css/style.css`, `js/app.js`, `js/main.js`); CSS must split across focused named files (one task per file); JS must split by feature. Also fixed: HTML example in orchestrator.txt referenced banned filenames; `worker.py` vanilla service worker template hardcoded `./app.js` |
+| **#52** | `completeness.py` stripping order fix — `_strip_comments_strings` was stripping line comments (`//`) before strings, so `'// All fields required.'` had its `//` stripped first, corrupting the string boundary and leaving `var(--neon-yellow)` exposed as an apparent bare JS function call. Fixed: strings stripped before comments. Belt-and-suspenders: CSS function names (`var`, `calc`, `env`, `min`, `max`, `clamp`, etc.) added to the bare-call allowlist |
+| **#53** | orchestrator.txt: ID/class coordination rule — every `<section>` must carry BOTH `id` (anchor nav) AND `class` matching the CSS selector; a section with only `id` silently breaks all `.hero { }` rules. JS toggle class rule — any task that toggles a CSS class must name the class in its objective and depend on a CSS task defining rules for that class (a toggle with no matching CSS rule is a no-op). HTML example updated to show `<section id="hero" class="hero">` pattern. Direct fixes applied to v6 Tony Montana project: `index.html` missing `class="hero"`, and `css/variables.css` missing `html.light-mode { }` rules |
+| **#54** | `main.py`: `shutil.rmtree` fails with `PermissionError: [WinError 5]` on the second run of any project because `git_commit_project` leaves a `.git` folder with read-only object files (Windows git behavior). Added `onexc=_force_remove_readonly` handler that `chmod`s files to `S_IWRITE` before retrying — same pattern git-for-windows uses internally |
+
+**Tony Montana build timeline:**
+- v1–v4: Failed (vitest qa burning paid calls, CSS monolith truncation, .git PermissionError on project cleanup)
+- v5: Cancelled — 9 tasks all writing `css/style.css`, 3 writing `js/app.js` → PR #51 added unique file ownership rule
+- v6: Completed (REVIEW: PASS). Two post-hoc rendering issues found by code review: hero section had no `class="hero"` (all `.hero {}` CSS rules silently broken) and dark mode toggle was a no-op (no `html.light-mode {}` CSS defined). Fixed directly in v6 project files + encoded as permanent orchestrator rules in PR #53
+- v7: Failed immediately with `PermissionError: [WinError 5]` on `.git/objects/` during `shutil.rmtree` — PR #54 fixes this
+- v8: Pending restart — will confirm PR #53 rules make the agent network handle hero class + dark mode correctly on its own
 
 ---
 
@@ -385,9 +405,9 @@ self-description (it says it routes to `qwen2.5-coder:14b` — actually the 3-ru
 
 ---
 
-## 📋 WHAT'S LEFT TO FINALIZE (priority order, updated 2026-06-14 fifth session end)
+## 📋 WHAT'S LEFT TO FINALIZE (priority order, updated 2026-06-15 sixth session end)
 
-1. **Tony Montana v5 validation** — confirm PRs #49/#50 work end-to-end; resend from Telegram. Expected: ~20–24 task DAG, no vitest qa, CSS split across 6 files, paid budget not exhausted, build completes.
+1. **Tony Montana v8 validation** — restart from Telegram; v7 failed before any tasks ran (`.git PermissionError`, fixed in PR #54). Expected: DAG with ~20–24 tasks, CSS split across named files (no `css/style.css`), sections with both `id` and `class`, dark mode toggle depending on a CSS task that defines `html.light-mode {}`, build completes with PASS.
 2. **Factory rehearsal items #2–7** (binding acceptance test) — from Telegram only:
    - **#2 `/continue` a feature** (dark mode toggle on the portfolio site)
    - **#3 `/run` a film** — aggregate push, real per-scene mp4s, probe-clean `final.mp4`
