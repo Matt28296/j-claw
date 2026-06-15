@@ -552,6 +552,160 @@ class TestFinalReviewFailsClosed(unittest.TestCase):
         self.assertFalse(result, "Final review must return False on API error (fail closed)")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 8. Experience learning loop — escalation logging + worker hint injection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestExperienceLearning(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile, experience_log as el
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
+        self._tmp.close()
+        self._orig_path = el.EXPERIENCE_FILE
+        el.EXPERIENCE_FILE = Path(self._tmp.name)
+        self._el = el
+
+    def tearDown(self):
+        import os
+        self._el.EXPERIENCE_FILE = self._orig_path
+        try:
+            os.unlink(self._tmp.name)
+        except OSError:
+            pass
+
+    def _read_entries(self):
+        return [json.loads(l) for l in Path(self._tmp.name).read_text().splitlines() if l.strip()]
+
+    # ── log_escalation writes correct shape ───────────────────────────────────
+    def test_log_escalation_writes_event_field(self):
+        self._el.log_escalation(
+            task_type="frontend",
+            stack="vanilla",
+            failed_model="ollama/qwen3:8b",
+            succeeded_model="anthropic/claude-sonnet-4-6",
+            error_summary="Worker output missing 'files' list",
+            objective_summary="Build the hero section with class hero",
+        )
+        entries = self._read_entries()
+        self.assertEqual(len(entries), 1)
+        e = entries[0]
+        self.assertEqual(e["event"], "escalation")
+        self.assertEqual(e["task_type"], "frontend")
+        self.assertEqual(e["failed_model"], "ollama/qwen3:8b")
+        self.assertEqual(e["succeeded_model"], "anthropic/claude-sonnet-4-6")
+        self.assertIn("files", e["error_summary"])
+
+    # ── get_worker_hints returns [] when no history ───────────────────────────
+    def test_get_worker_hints_empty_when_no_entries(self):
+        hints = self._el.get_worker_hints("frontend", "vanilla")
+        self.assertEqual(hints, [])
+
+    # ── get_worker_hints returns hint after matching escalation logged ─────────
+    def test_get_worker_hints_returns_hint_after_escalation(self):
+        self._el.log_escalation(
+            task_type="frontend", stack="vanilla",
+            failed_model="ollama/qwen3:8b", succeeded_model="anthropic/claude-sonnet-4-6",
+            error_summary="missing class attribute on section tag",
+            objective_summary="Add class=hero to section id=hero",
+        )
+        hints = self._el.get_worker_hints("frontend", "vanilla")
+        self.assertEqual(len(hints), 1)
+        self.assertIn("frontend", hints[0])
+        self.assertIn("vanilla", hints[0])
+
+    # ── get_stack_lessons includes escalation-derived lesson ──────────────────
+    def test_get_stack_lessons_includes_escalation_lesson(self):
+        for _ in range(3):
+            self._el.log_escalation(
+                task_type="style", stack="vanilla",
+                failed_model="ollama/qwen3:8b", succeeded_model="anthropic/claude-sonnet-4-6",
+                error_summary="CSS truncated mid-rule",
+                objective_summary="Write complete hero.css",
+            )
+        lessons = self._el.get_stack_lessons("vanilla", min_count=2)
+        self.assertTrue(any("[escalation]" in l for l in lessons),
+                        f"Expected escalation lesson in: {lessons}")
+
+    # ── execute_task hint injection: hint appears in user_message ─────────────
+    def test_execute_task_injects_worker_hints(self):
+        import worker as w
+        captured_user_msgs = []
+
+        def mock_call(provider, model, sys_p, user_p):
+            captured_user_msgs.append(user_p)
+            return json.dumps({"files": [{"path": "index.html", "content": "<html/>"}]})
+
+        # Pre-load one escalation entry so get_worker_hints returns a hint
+        self._el.log_escalation(
+            task_type="frontend", stack="vanilla",
+            failed_model="ollama/qwen3:8b", succeeded_model="anthropic/claude-sonnet-4-6",
+            error_summary="missing class attribute", objective_summary="add class=hero",
+        )
+
+        task = MagicMock()
+        task.type = "frontend"
+        task.objective = "build hero"
+        task.files = ["index.html"]
+        task.dependencies = []
+        task.acceptance_criteria = []
+        task.verification = "none"
+        task.retry_count = 0
+        spec = {"architecture": {"stack": "vanilla"}}
+
+        with patch.object(w, "_build_user_message", return_value="task prompt"), \
+             patch.object(w, "_call_provider", side_effect=mock_call), \
+             patch.object(w, "_reserve_paid_call", return_value=True), \
+             patch.object(w, "route_task", return_value=0), \
+             patch.object(w, "_parse_and_validate", return_value={"files": []}), \
+             patch.object(w, "get_worker_hints", return_value=["Hint: avoid missing class"]) as mock_hints:
+            w.execute_task(task, spec, {})
+
+        mock_hints.assert_called_once_with("frontend", "vanilla")
+        self.assertTrue(any("PAST FAILURE PATTERNS" in m for m in captured_user_msgs),
+                        "Expected hint block in worker user_message")
+
+    # ── execute_task logs escalation when fallback succeeds ───────────────────
+    def test_execute_task_logs_escalation_on_fallback_success(self):
+        import worker as w
+
+        def mock_call(provider, model, sys_p, user_p):
+            if provider == "ollama" and model == "qwen3:8b":
+                raise ConnectionError("ollama down")
+            return json.dumps({"files": [{"path": "index.html", "content": "<html/>"}]})
+
+        task = MagicMock()
+        task.type = "frontend"
+        task.objective = "build hero"
+        task.files = ["index.html"]
+        task.dependencies = []
+        task.acceptance_criteria = []
+        task.verification = "none"
+        task.retry_count = 0
+        spec = {"architecture": {"stack": "vanilla"}}
+
+        orig_ladder = w.WORKER_LADDER
+        w.WORKER_LADDER = [("ollama", "qwen3:8b"), ("anthropic", "claude-sonnet-4-6")]
+        try:
+            with patch.object(w, "_build_user_message", return_value="task prompt"), \
+                 patch.object(w, "_call_provider", side_effect=mock_call), \
+                 patch.object(w, "_reserve_paid_call", return_value=True), \
+                 patch.object(w, "route_task", return_value=0), \
+                 patch.object(w, "_parse_and_validate", return_value={"files": []}), \
+                 patch.object(w, "get_worker_hints", return_value=[]), \
+                 patch.object(w, "log_escalation") as mock_log:
+                w.execute_task(task, spec, {})
+
+            mock_log.assert_called_once()
+            call_kwargs = mock_log.call_args
+            self.assertEqual(call_kwargs.kwargs.get("failed_model") or call_kwargs[1].get("failed_model"),
+                             "ollama/qwen3:8b")
+            self.assertEqual(call_kwargs.kwargs.get("succeeded_model") or call_kwargs[1].get("succeeded_model"),
+                             "anthropic/claude-sonnet-4-6")
+        finally:
+            w.WORKER_LADDER = orig_ladder
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Runner
 # ══════════════════════════════════════════════════════════════════════════════
@@ -567,6 +721,7 @@ if __name__ == "__main__":
         TestRoutedRung,
         TestExecuteTask,
         TestFinalReviewFailsClosed,
+        TestExperienceLearning,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 

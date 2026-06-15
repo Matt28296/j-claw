@@ -12,6 +12,7 @@ from config import (
     WORKER_LADDER, LOCAL_FIRST_TASK_TYPES, MAX_PAID_WORKER_CALLS,
     WORKER_TASK_TIMEOUT,
 )
+from experience_log import get_worker_hints, log_escalation
 
 console = Console()
 
@@ -747,6 +748,14 @@ def execute_task(
     system_prompt = _SYSTEM_PROMPT + "\n" + _STACK_PROMPTS.get(effective_stack, _STACK_PROMPTS["vanilla"])
     user_message = _build_user_message(task, spec, dependency_files, context)
 
+    # Prepend pre-emptive hints from past escalation patterns for this task type + stack.
+    # Gives the weakest model a chance to avoid known failure modes before its first attempt.
+    _hints = get_worker_hints(getattr(task, "type", ""), effective_stack)
+    if _hints:
+        user_message += "\n\nPAST FAILURE PATTERNS FOR THIS TASK TYPE:\n" + "\n".join(
+            f"- {h}" for h in _hints
+        )
+
     # Build attempt chain. With a ladder configured: start at the routed rung and walk UP to
     # the strongest rung (escalation). If the chain is all-cloud, append the strongest LOCAL
     # rung as a last-ditch attempt so a host without an API key (or one over its paid budget)
@@ -763,6 +772,7 @@ def execute_task(
         attempts = [(WORKER_PROVIDER, WORKER_MODEL)] + list(WORKER_FALLBACKS)
 
     last_err: Exception | None = None
+    failed_attempts: list[tuple[str, str, str]] = []  # (provider, model, error)
     for provider, model in attempts:
         # Gate paid (non-local) calls on the per-project budget. When exhausted, skip the
         # cloud rung and fall through to the local last-ditch instead of spending more.
@@ -777,6 +787,17 @@ def execute_task(
             parsed = _parse_and_validate(raw, task)
             label = model if provider == "ollama" else f"{provider}/{model}"
             parsed["model_used"] = label
+            # Record escalation outcomes so future weak-model attempts can learn from them.
+            if failed_attempts:
+                for fail_prov, fail_model, fail_err in failed_attempts:
+                    log_escalation(
+                        task_type=getattr(task, "type", "unknown"),
+                        stack=effective_stack,
+                        failed_model=f"{fail_prov}/{fail_model}",
+                        succeeded_model=f"{provider}/{model}",
+                        error_summary=fail_err,
+                        objective_summary=getattr(task, "objective", "")[:150],
+                    )
             return parsed
 
         except ValueError:
@@ -784,6 +805,7 @@ def execute_task(
 
         except Exception as exc:  # noqa: BLE001
             last_err = exc
+            failed_attempts.append((provider, model, str(exc)[:200]))
             console.print(
                 f"  [yellow]Worker {provider}/{model} error: {exc!r} — trying fallback…[/yellow]"
             )
