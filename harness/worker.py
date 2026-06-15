@@ -45,7 +45,7 @@ Stack: vanilla HTML/CSS/JS (no build step)
 - Inputs must have visible borders, padding, focus ring (focus:ring-2 focus:ring-indigo-500).
 PWA support (include in every vanilla project that has a UI):
 - Create manifest.json at the project root with: name, short_name, start_url ("/"), display ("standalone"), background_color ("#ffffff"), theme_color ("#4f46e5"), and an icons array with two entries — { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" } and { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }.
-- Create sw.js at the project root implementing a cache-first service worker: on "install" event, open a cache named "app-shell-v1" and cache ["./", "./index.html", "./app.js"] (adjust paths to match actual JS file names); on "fetch" event, respond from cache if found, otherwise fetch from network.
+- Create sw.js at the project root implementing a cache-first service worker: on "install" event, open a cache named "app-shell-v1" and cache ["./", "./index.html"] plus every JS file declared in the project's js/ directory (e.g. "./js/scroll.js", "./js/nav.js", "./js/form.js" — use the actual filenames from the task DAG, never the placeholder "./app.js"); on "fetch" event, respond from cache if found, otherwise fetch from network.
 - In index.html <head>: add <link rel="manifest" href="manifest.json"> and <meta name="theme-color" content="#4f46e5">.
 - In index.html before </body>: add a <script> block that registers the service worker — check "serviceWorker" in navigator, then call navigator.serviceWorker.register("./sw.js") inside a DOMContentLoaded listener.
 """,

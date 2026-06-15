@@ -622,20 +622,41 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
    not fit even in Opus's output window. Split large files by concern and create one
    task per file.
 
-   **CSS must never be a single monolithic file.** Split CSS across multiple focused
-   files: `variables.css` (custom properties), `reset.css` (box model / global reset),
-   `layout.css` (nav, grid, flexbox structure), `components.css` (cards, buttons,
-   badges), `animations.css` (keyframes, transitions), `responsive.css` (media
-   queries). One task per file. Each file stays well under 150 lines.
+   **Each file must be owned by exactly one task.** Workers always write the COMPLETE
+   file from scratch — there is no append, patch, or merge. If two tasks both declare
+   `css/style.css` in their `files` array, the second task's output REPLACES the first
+   task's output entirely and all of the first task's work is silently lost. The DAG
+   will show both tasks DONE but only the last writer's content survives on disk.
+   Plan tasks so every file path appears in AT MOST ONE task's `files` array.
 
-   **JavaScript must never be a single monolithic file.** Split into focused modules:
-   one file per feature (e.g. `js/scroll.js`, `js/menu.js`, `js/form.js`,
-   `js/animations.js`). One task per file.
+   **CSS must never be a single monolithic file, and never use `css/style.css` as a
+   task output file.** `css/style.css` is a generic name that invites the fatal
+   multi-task collision above. Split CSS across focused files with descriptive names,
+   one task per file:
+   - `css/variables.css` — all CSS custom properties (colors, spacing, fonts)
+   - `css/reset.css` — box-model reset, global defaults
+   - `css/typography.css` — font imports, heading/body sizes, line heights
+   - `css/layout.css` — nav, page grid, section scaffolding, flexbox/grid containers
+   - `css/hero.css` — hero section styles
+   - `css/components.css` — cards, buttons, badges, reusable UI elements
+   - `css/animations.css` — @keyframes, transitions, scroll effects
+   - `css/responsive.css` — all media queries
+   Add more named files for additional sections (e.g. `css/portfolio.css`,
+   `css/contact.css`). Each file stays well under 150 lines.
+
+   **JavaScript must never be a single monolithic file, and never use `js/app.js` or
+   `js/main.js` as a task output file.** Split into focused feature modules, one file
+   per concern: `js/scroll.js` (smooth scroll), `js/nav.js` (sticky nav / active
+   highlight), `js/form.js` (contact form submit), `js/animations.js` (scroll-reveal
+   effects). Each module stays under 150 lines. The HTML `<script>` tags load each
+   module separately.
 
    If a design genuinely requires more styling or logic than this breakdown allows,
-   add more split files — never inflate a single file past the limit.
+   add more named split files — never reuse the same filename across tasks.
 3. **No over-engineering.** Flat beats clever.
-4. **Strict isolation.** No overlapping file writes without an explicit dependency edge.
+4. **Strict isolation.** No two tasks may declare the same file in their `files` array,
+   even with a dependency edge between them. A dependency edge does NOT allow two tasks
+   to write the same file — the second task always overwrites the first completely.
 5. **Verifiable by default.** Prefer automated verification; set up tooling before relying
    on it; keep `manual` gates off the core path.
 6. **Acyclic and complete.** Every dependency resolves; no cycles; the loop closes via FORMAT 4.
@@ -660,10 +681,11 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
    Phaser, Three.js, etc.); (c) every page section by its HTML `id` attribute and its
    visible content (headings, paragraphs, cards, buttons). Without these specifics the
    worker produces a skeleton with placeholder comments. Example objective fragment:
-   `"index.html: link css/styles.css and css/responsive.css; Tailwind CDN script in <head>;
-   sections #hero (name, tagline, CTA), #about (bio paragraph), #portfolio (3 project cards
-   with title+description), #skills (8 skill badges), #contact (mailto link); load
-   js/main.js, js/mobile-menu.js, js/smooth-scroll.js."`
+   `"index.html: link css/variables.css, css/reset.css, css/layout.css, css/hero.css,
+   css/components.css, css/animations.css, css/responsive.css; Tailwind CDN script in
+   <head>; sections #hero (name, tagline, CTA), #about (bio paragraph), #portfolio
+   (3 project cards with title+description), #skills (8 skill badges), #contact
+   (mailto link); load js/scroll.js, js/nav.js, js/form.js."`
 
 8. **Never create a manual browser verification task for bare HTML projects.** When the
    spec stack is `vanilla` or `phaser` and there is no `package.json`, do NOT create a
