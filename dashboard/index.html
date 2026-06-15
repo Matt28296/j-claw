@@ -1185,6 +1185,7 @@ function renderBuildHealth(d) {
 
 function renderAgentNetwork(d) {
   const el = document.getElementById('agent-network');
+  const terminal = isTerminalState(d.pipeline_state || 'IDLE');
   const nodes = [];
   const rawNodes = d.agent_nodes || {};
   if (Array.isArray(rawNodes)) {
@@ -1205,7 +1206,7 @@ function renderAgentNetwork(d) {
     const state = [n.state, n.task_id, n.task_type].filter(Boolean).join(' / ') || '-';
     const rung = Number(n.rung ?? -1);
     const model = [n.provider, shortModel(n.model)].filter(v => v && v !== '-').join('/');
-    const activeCls = n.active || n.status === 'running' || n.state === 'EXECUTING' ? ' active' : '';
+    const activeCls = !terminal && (n.active || n.status === 'running' || n.state === 'EXECUTING') ? ' active' : '';
     const rungLabel = rung === 0 ? 'R0' : rung === 1 ? 'R1' : rung === 2 ? 'R2' : rung === 3 ? 'R3' : '';
     const rungCls = rung <= 1 ? 'local' : rung === 2 ? 'sonnet' : 'opus';
     const badge = rungLabel ? `<span class="rung-badge ${rungCls}" title="Worker ladder rung ${rung}">${rungLabel}</span>` : '';
@@ -1304,6 +1305,7 @@ function renderTaskDrawer() {
   const files = (task.files || task.files_written || []).map(f => `<span class="file-pill">${esc(f)}</span>`).join('');
   const tests = (_lastData.test_results || []).filter(t => t.task_id === task.id);
   const outputs = (_lastData.output_files || []).filter(f => f.task_id === task.id);
+  const retryDisabled = isControlActionAvailable('retry_failed_task') ? '' : ' disabled';
   body.innerHTML = `
     <div class="drawer-section">
       <div class="drawer-label">Objective</div>
@@ -1320,7 +1322,7 @@ function renderTaskDrawer() {
         <span>Outputs</span><span>${esc(outputs.length)}</span>
       </div>
       <div class="drawer-actions">
-        ${task.status === 'failed' ? '<button class="copy-btn warn-btn" onclick="runControl(\'retry_failed_task\', selectedTaskId)">Retry This Task</button>' : ''}
+        ${task.status === 'failed' ? `<button class="copy-btn warn-btn" onclick="runControl('retry_failed_task', selectedTaskId)"${retryDisabled}>Retry This Task</button>` : ''}
       </div>
     </div>
     <div class="drawer-section">
@@ -1435,6 +1437,7 @@ function renderCostPanel(d) {
 
 function render(d) {
   const state = d.pipeline_state || 'IDLE';
+  updateControlButtons();
 
   // Reset review banners when a new pipeline run starts
   if (state === 'INIT' && lastState !== 'INIT') {
@@ -1711,9 +1714,41 @@ function setControlAvailability(allowed, label, statusClass) {
   status.title = allowed
     ? 'Workflow controls are available'
     : 'Click to enter a dashboard control token';
-  ['restart-btn', 'cancel-btn', 'retry-btn', 'continue-btn'].forEach(id => {
+  updateControlButtons();
+}
+
+function failedTasks(data) {
+  return (data?.tasks || []).filter(t => t.status === 'failed');
+}
+
+function hasPriorIntent(data) {
+  return !!(data?.project?.intent || data?.project?.goal);
+}
+
+function hasOutputDir(data) {
+  return !!data?.project?.output_dir;
+}
+
+function isControlActionAvailable(action, data = _lastData) {
+  if (!controlAllowed) return false;
+  const state = data?.pipeline_state || 'IDLE';
+  if (action === 'restart') return hasPriorIntent(data);
+  if (action === 'cancel') return isActiveState(state);
+  if (action === 'retry_failed_task') return failedTasks(data).length > 0 && hasOutputDir(data);
+  if (action === 'continue') return hasOutputDir(data);
+  return false;
+}
+
+function updateControlButtons() {
+  const actions = {
+    'restart-btn': 'restart',
+    'cancel-btn': 'cancel',
+    'retry-btn': 'retry_failed_task',
+    'continue-btn': 'continue',
+  };
+  Object.entries(actions).forEach(([id, action]) => {
     const btn = document.getElementById(id);
-    if (btn) btn.disabled = !controlAllowed;
+    if (btn) btn.disabled = !isControlActionAvailable(action);
   });
 }
 
@@ -1780,6 +1815,11 @@ async function runControl(action, taskId) {
       return;
     }
   }
+  if (!isControlActionAvailable(action)) {
+    showToast('That control is not available for the current run state.');
+    updateControlButtons();
+    return;
+  }
 
   const payload = {};
   let confirmText = '';
@@ -1790,7 +1830,7 @@ async function runControl(action, taskId) {
   } else if (action === 'cancel') {
     confirmText = 'Cancel the currently running pipeline?';
   } else if (action === 'retry_failed_task') {
-    const failed = (_lastData?.tasks || []).filter(t => t.status === 'failed');
+    const failed = failedTasks(_lastData);
     const target = taskId || selectedTaskId || (failed[0] && failed[0].id);
     if (!target) { showToast('No failed task is available to retry.'); return; }
     payload.task_id = target;
@@ -1830,7 +1870,7 @@ async function runControl(action, taskId) {
     if (btn) {
       btn.classList.remove('restarting');
       btn.textContent = original;
-      btn.disabled = !controlAllowed;
+      btn.disabled = !isControlActionAvailable(action);
     }
   }
 }
