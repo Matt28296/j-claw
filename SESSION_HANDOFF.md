@@ -5,8 +5,25 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#61 are MERGED to `main`.**
+**PRs #10–#63 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-15 (seventh session continued) — worker quality rules (PR #63)
+
+### PR #63 — Tailwind CDN conditional, event binding rule, manifest icon check, contact form guard
+
+**Root cause (NES portfolio build, factory rehearsal #3):** Three systematic gaps in worker guidance were exposed:
+1. `orchestrator.txt` line 232 explicitly *mandated* Tailwind CDN for the vanilla stack — workers followed the rule, but the rule was wrong for pixel-art / retro / custom-aesthetic projects where Tailwind is unused overhead.
+2. No rule existed preventing the `element.addEventListener('submit', this.handleSubmit)` pattern — passing an unbound method reference loses `this` inside the handler, causing `TypeError: this.validateEmail is not a function`.
+3. `completeness.py` parsed HTML `src=`/`href=` and JS string literals for missing asset references but did NOT parse `manifest.json` icon paths (JSON format, not HTML/JS).
+
+**`orchestrator.txt`:** Tailwind CDN changed from MANDATORY to CONDITIONAL — only add it when the brief explicitly calls for utility-first or modern UI styling; never for pixel-art, retro, hand-drawn, or custom-aesthetic projects. Two new rules added: (1) DOM event listener binding rule — class methods registered as listeners MUST use an arrow function wrapper or bind in the constructor to preserve `this` context; (2) contact form rule — static vanilla projects must use `action="mailto:..."` or a descriptive placeholder comment, never `action="your-form-id"` or `formspree.io/f/REPLACE_ME` which silently 404.
+
+**`harness/completeness.py`:** Added `_missing_manifest_icons()` — parses `manifest.json`, enumerates `icons[].src` entries, flags any declared paths that don't exist on disk. Wired into `check_completeness()` alongside the existing HTML/JS asset checks.
+
+**32/32 tests green.** Branch: `fix/pr63-worker-quality-rules`.
 
 ---
 
