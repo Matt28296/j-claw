@@ -5,7 +5,7 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#55 are MERGED to `main`.**
+**PRs #10–#57 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
@@ -464,6 +464,8 @@ self-description (it says it routes to `qwen2.5-coder:14b` — actually the 3-ru
    - OpenClaw: bot self-description, `OLLAMA_MAX_LOADED_MODELS=1`, prune dangling manifests.
    - Prune the 6 stale `worktree-agent-*` branches (dead — work was salvaged into `056ad67`).
    - Gemini REVIEW_FAILED bug — `review_result` consistently omitted; PR #40 workaround works but root cause unresolved.
+   - **`experience.jsonl` recency cap** (PR #57 follow-up) — `get_worker_hints()` currently does a full file scan with no TTL; stale escalation patterns from old model versions carry equal weight to recent ones. Fix: only read entries from the last N days (e.g. 30) or cap at the most recent M entries. Prevents misleading hints as models and orchestrator rules improve over time.
+   - **`experience.jsonl` file size guard** (PR #57 follow-up) — file grows unboundedly; `get_worker_hints()` is called once per worker task (20× per build), so a large file creates O(tasks × entries) I/O per build. Fix: if file exceeds ~500 entries, truncate oldest on write (rolling window). Keeps scan time bounded regardless of build history length.
 
 ### Known structural ceilings
 - Worker quality is bounded by 14B-class local models (Ollama-only worker constraint is locked).
