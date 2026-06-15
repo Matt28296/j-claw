@@ -5,8 +5,20 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#63 are MERGED to `main`.**
+**PRs #10–#65 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-15 (seventh session continued) — CANCELED state on /cancel (PR #65)
+
+### PR #65 — Write CANCELED state to mission_control.json on /cancel
+
+**Root cause (factory rehearsal test #5):** When `/cancel` was sent mid-build, `telegram_bot.py` terminated/killed the pipeline subprocess but never wrote a terminal state to `mission_control.json`. The killed process can't flush state itself — so the dashboard was left indefinitely showing the last `EXECUTING` snapshot (stale task counts, running agent, etc.).
+
+**Fix:** Added `_write_canceled_state()` to `telegram_bot.py`, called immediately after the subprocess is killed. It patches `mission_control.json` directly from the bot process, mirroring what `StateWriter._set_terminal_state("CANCELED")` does: sets `pipeline_state` to `"CANCELED"`, clears `active_agent`, writes the `terminal` block, marks any running `agent_nodes` as canceled, appends a cancel event, and bumps `sequence`.
+
+**Also discovered:** The pipeline has no impossible-intent detection — it generated a full 33-task DAG for the BCI/hologram request and began executing before the user cancelled. Factory rehearsal test #5 will need a revised definition (honest FAIL at review, not early rejection).
 
 ---
 
