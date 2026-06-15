@@ -229,7 +229,7 @@ Choose `architecture.stack` based on project requirements:
 
 | Stack        | Use when                                          | Worker tooling                          |
 |--------------|---------------------------------------------------|-----------------------------------------|
-| `vanilla`    | Simple browser apps, no backend, open-as-file     | **Tailwind CDN `<script src="https://cdn.tailwindcss.com">` MUST appear in `<head>`** + `<link>` for every `.css` file in the project; plain JS, localStorage; **PWA manifest.json + sw.js included** |
+| `vanilla`    | Simple browser apps, no backend, open-as-file     | Raw CSS files (`<link>` for every `.css` file); plain JS, localStorage; **PWA manifest.json + sw.js included**. Tailwind CDN (`<script src="https://cdn.tailwindcss.com">`) ONLY when the creative brief explicitly calls for utility-first or modern UI styling — never for pixel-art, retro, hand-drawn, or custom-aesthetic projects where it would be unused overhead. |
 | `react-vite` | Complex UI, component hierarchy, modern UX        | npm build, React, Tailwind via PostCSS; **PWA manifest.json + sw.js included** |
 | `fastapi`    | Needs a real backend API or database              | Python, FastAPI, SQLite, uvicorn        |
 | `phaser`     | Browser-based video game                          | Phaser 3 CDN, plain JS, game loop       |
@@ -704,6 +704,20 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
    that defines `html.light-mode { --dark-bg: ...; ... }` in `css/variables.css` or a
    dedicated `css/light-mode.css`. A toggle that adds a class with no matching CSS rule
    is a no-op — the button does nothing visible.
+
+   **DOM event listener binding rule:** When registering a class method as a DOM event
+   listener, ALWAYS use an arrow function wrapper — never pass the method reference directly.
+   `element.addEventListener('submit', this.handleSubmit)` loses `this` context inside
+   the handler; every method call on `this` (e.g. `this.validateEmail()`) will throw
+   `TypeError: this.X is not a function`. Use instead:
+   `element.addEventListener('submit', (e) => this.handleSubmit(e))`.
+   Alternatively, bind in the constructor: `this.handleSubmit = this.handleSubmit.bind(this)`.
+
+   **Contact form rule (vanilla stack):** Static vanilla projects have no server-side
+   processing. Contact forms MUST use `action="mailto:placeholder@example.com"` (user's
+   email client opens) or a descriptive comment marking where to insert a real endpoint.
+   NEVER use `action="https://formspree.io/f/REPLACE_ME"` or `action="your-form-id"` —
+   these produce a form that silently submits to a 404 with no user feedback.
 
 8. **Never create a manual browser verification task for bare HTML projects.** When the
    spec stack is `vanilla` or `phaser` and there is no `package.json`, do NOT create a

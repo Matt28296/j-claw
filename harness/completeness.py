@@ -17,6 +17,7 @@ not understand return a clean pass.
 from __future__ import annotations
 
 import ast
+import json
 import re
 import sys
 from pathlib import Path
@@ -122,6 +123,9 @@ def check_completeness(
         for p in project_dir.rglob("*"):
             if p.is_file():
                 existing_rel.add(p.relative_to(project_dir).as_posix().lower())
+
+    if project_dir is not None:
+        issues += _missing_manifest_icons(project_dir, existing_rel)
 
     for fname, content in sources.items():
         suffix = Path(fname).suffix.lower()
@@ -358,6 +362,35 @@ def _missing_js_assets(
         seen.add(ref)
         if _ref_is_local(ref) and not _asset_exists(ref, existing_rel):
             issues.append(f"{fname}: references missing local file '{ref}'")
+    return issues
+
+
+def _missing_manifest_icons(project_dir: Path, existing_rel: set[str]) -> list[str]:
+    """Flag icon paths declared in manifest.json that don't exist on disk.
+
+    PWA manifests reference icon files that must be generated as separate tasks.
+    Workers often write the manifest before the icon task runs, leaving dangling
+    references that cause the PWA install prompt to fail silently.
+    """
+    manifest = project_dir / "manifest.json"
+    if not manifest.exists():
+        manifest = project_dir / "public" / "manifest.json"
+    if not manifest.exists():
+        return []
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8", errors="replace"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    icons = data.get("icons", [])
+    if not isinstance(icons, list):
+        return []
+    issues: list[str] = []
+    for entry in icons:
+        src = entry.get("src", "") if isinstance(entry, dict) else ""
+        if not src or not _ref_is_local(src):
+            continue
+        if not _asset_exists(src, existing_rel):
+            issues.append(f"manifest.json: icon '{src}' is declared but the file does not exist")
     return issues
 
 
