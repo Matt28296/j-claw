@@ -615,6 +615,25 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
 2. **Local-first.** Assume a 4-bit worker up to ~14B on 16 GB VRAM — one resident by
    default, with up to two small (7–8B) workers concurrently for independent branches —
    and size every task to that.
+
+   **One file per task, ≤ 150 lines per file.** A local 14B model's reliable output
+   window is ~150 lines of code. Tasks that require more than this in a single file
+   fail at rung-1, burn paid escalation budget on every retry attempt, and still may
+   not fit even in Opus's output window. Split large files by concern and create one
+   task per file.
+
+   **CSS must never be a single monolithic file.** Split CSS across multiple focused
+   files: `variables.css` (custom properties), `reset.css` (box model / global reset),
+   `layout.css` (nav, grid, flexbox structure), `components.css` (cards, buttons,
+   badges), `animations.css` (keyframes, transitions), `responsive.css` (media
+   queries). One task per file. Each file stays well under 150 lines.
+
+   **JavaScript must never be a single monolithic file.** Split into focused modules:
+   one file per feature (e.g. `js/scroll.js`, `js/menu.js`, `js/form.js`,
+   `js/animations.js`). One task per file.
+
+   If a design genuinely requires more styling or logic than this breakdown allows,
+   add more split files — never inflate a single file past the limit.
 3. **No over-engineering.** Flat beats clever.
 4. **Strict isolation.** No overlapping file writes without an explicit dependency edge.
 5. **Verifiable by default.** Prefer automated verification; set up tooling before relying
