@@ -57,7 +57,7 @@ WORKER_FALLBACKS: list[tuple[str, str]] = _parse_fallbacks(
 WORKER_LADDER: list[tuple[str, str]] = _parse_fallbacks(
     os.getenv(
         "WORKER_LADDER",
-        "ollama::qwen3:8b,ollama::qwen2.5-coder:14b,codex::gpt-5.5,anthropic::claude-sonnet-4-6",
+        "ollama::qwen3:8b,ollama::qwen2.5-coder:14b,grok::grok-build,codex::gpt-5.5,anthropic::claude-sonnet-4-6",
     )
 )
 
@@ -81,12 +81,27 @@ CODEX_EFFORT: str = os.getenv("CODEX_EFFORT", "")      # empty = don't override 
 CODEX_CLI_MAX_CALLS: int = int(os.getenv("CODEX_CLI_MAX_CALLS", "20"))
 CODEX_TIMEOUT: int = int(os.getenv("CODEX_TIMEOUT", "300"))  # seconds per codex exec subprocess
 
+# Grok Build CLI worker rung — a second flat-rate OAuth (SuperGrok / X Premium+) escalation tier
+# that sits in WORKER_LADDER ABOVE local Ollama and BELOW Codex. Grok-first ordering: grok-build
+# is the abundant, weaker, $0 first-line rescue, so Codex's scarcer per-run capacity is preserved
+# for the harder tasks Grok fails. Headless `grok -p` authenticates via the cached OAuth token in
+# ~/.grok/auth.json — NO metered xAI API key — so calls are $0 marginal (live-probe confirmed).
+# Shelled out in non-interactive mode (see worker._call_grok).
+GROK_CLI_ENABLED: bool = os.getenv("GROK_CLI_ENABLED", "false").lower() == "true"
+GROK_HOME: str = os.getenv("GROK_HOME", "")            # empty = use grok's own default (~/.grok)
+GROK_MODEL: str = os.getenv("GROK_MODEL", "grok-build")  # agentic coding model (vs default grok-composer)
+# Per-run capacity cap (build-safety bound), NOT a dollar budget — Grok is flat-rate. The plan's
+# true rolling DAILY quota (survives process restarts) is deferred; this in-memory counter resets
+# each run via reset_paid_budget(), sized conservatively below the subscription's daily quota.
+GROK_MAX_CALLS: int = int(os.getenv("GROK_MAX_CALLS", "40"))
+GROK_TIMEOUT: int = int(os.getenv("GROK_TIMEOUT", "300"))  # seconds per grok -p subprocess
+
 # Provider-class sets that make the worker's budget logic declarative. METERED providers bill
 # per token and consume the dollar budget MAX_PAID_WORKER_CALLS; OAUTH providers are flat-rate
 # subscriptions that consume a SEPARATE per-run capacity counter (CODEX_CLI_MAX_CALLS) instead,
 # so they never draw down the dollar budget but are still bounded against quota exhaustion.
 METERED_PROVIDERS: set[str] = {"anthropic", "openrouter", "groq"}
-OAUTH_PROVIDERS: set[str] = {"codex"}
+OAUTH_PROVIDERS: set[str] = {"codex", "grok"}
 
 # Maximum tasks to run in parallel (1 = sequential, 2-4 = parallel)
 MAX_PARALLEL_WORKERS: int = int(os.getenv("MAX_PARALLEL_WORKERS", "4"))

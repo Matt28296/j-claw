@@ -19,6 +19,7 @@ from config import (
     WORKER_TASK_TIMEOUT,
     CODEX_CLI_ENABLED, CODEX_HOME, CODEX_MODEL, CODEX_EFFORT,
     CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT, OAUTH_PROVIDERS, METERED_PROVIDERS,
+    GROK_CLI_ENABLED, GROK_HOME, GROK_MODEL, GROK_MAX_CALLS, GROK_TIMEOUT,
 )
 from experience_log import get_worker_hints, log_escalation
 
@@ -687,16 +688,23 @@ _paid_lock = threading.Lock()
 _oauth_calls_made: dict[str, int] = {}
 _oauth_lock = threading.Lock()
 _codex_disabled = False
+_grok_disabled = False
+
+# Single-flight lock for Grok: xAI rotates the OAuth refresh token on each use, so concurrent
+# `grok -p` subprocesses would race and invalidate the cached ~/.grok/auth.json session. Serialize
+# Grok CLI calls behind this lock so only one runs at a time (Codex needs no such lock).
+_grok_call_lock = threading.Lock()
 
 
 def reset_paid_budget() -> None:
     """Reset the per-project paid (cloud) worker-call counter. Call at project start."""
-    global _paid_calls_made, _codex_disabled
+    global _paid_calls_made, _codex_disabled, _grok_disabled
     with _paid_lock:
         _paid_calls_made = 0
     with _oauth_lock:
         _oauth_calls_made.clear()
         _codex_disabled = False
+        _grok_disabled = False
 
 
 def _reserve_paid_call() -> bool:
@@ -716,15 +724,32 @@ def _reserve_oauth_call(provider: str) -> bool:
     the SAME lock is what makes the latch hold under parallel workers — otherwise one worker
     could read _codex_disabled==False, another could latch it True, and the first would still
     reserve and launch `codex exec`. Does NOT touch the dollar budget."""
-    cap = CODEX_CLI_MAX_CALLS if provider == "codex" else 0
+    if provider == "codex":
+        cap = CODEX_CLI_MAX_CALLS
+    elif provider == "grok":
+        cap = GROK_MAX_CALLS
+    else:
+        cap = 0
     with _oauth_lock:
         if provider == "codex" and _codex_disabled:
+            return False
+        if provider == "grok" and _grok_disabled:
             return False
         made = _oauth_calls_made.get(provider, 0)
         if made >= cap:
             return False
         _oauth_calls_made[provider] = made + 1
         return True
+
+
+def _oauth_enabled(provider: str) -> bool:
+    """Per-provider global enable flag (config constant, no race). An OAuth rung that's globally
+    off is skipped without touching capacity — mirrors how the codex rung ships inert until opted in."""
+    if provider == "codex":
+        return CODEX_CLI_ENABLED
+    if provider == "grok":
+        return GROK_CLI_ENABLED
+    return False
 
 
 def _strongest_local_rung() -> int:
@@ -779,7 +804,7 @@ def execute_task(
     the legacy WORKER_PROVIDER + WORKER_FALLBACKS chain if WORKER_LADDER is unset.
     Raises ValueError immediately on bad JSON format so the scheduler can send EXECUTION_ERROR.
     """
-    global _codex_disabled  # latched off when an OAuth rung hits auth/quota mid-run
+    global _codex_disabled, _grok_disabled  # latched off when an OAuth rung hits auth/quota mid-run
     arch  = spec.get("architecture", {})
     stack = arch.get("stack", "vanilla")
     # For full-stack projects, pick the sub-stack based on task type
@@ -846,15 +871,15 @@ def execute_task(
                 continue
         elif provider in OAUTH_PROVIDERS:
             # Globally off? skip without touching capacity (config constant, no race).
-            if not CODEX_CLI_ENABLED:
+            if not _oauth_enabled(provider):
                 continue
             # The disable-latch check AND the capacity reservation happen atomically inside
-            # _reserve_oauth_call, so a parallel worker can't launch `codex exec` after the
-            # latch flips. A False here means "disabled or capacity exhausted" — either way skip.
+            # _reserve_oauth_call, so a parallel worker can't launch the CLI after the latch
+            # flips. A False here means "disabled or capacity exhausted" — either way skip.
             if not _reserve_oauth_call(provider):
                 console.print(
-                    f"  [yellow]Codex unavailable (auth/quota latch) or capacity "
-                    f"(CODEX_CLI_MAX_CALLS) exhausted — skipping, escalating to next rung.[/yellow]"
+                    f"  [yellow]{provider} unavailable (auth/quota latch) or per-run capacity "
+                    f"exhausted — skipping, escalating to next rung.[/yellow]"
                 )
                 continue
         try:
@@ -891,12 +916,15 @@ def execute_task(
             # An OAuth rung that's unavailable (not logged in / quota / exe missing / timeout)
             # must NOT hard-raise like ollama — it skips cleanly to the next rung so the build
             # still completes. Latch the rung off for the rest of the run to avoid re-probing.
-            if provider in OAUTH_PROVIDERS and _is_codex_unavailable(exc):
+            if provider in OAUTH_PROVIDERS and _oauth_unavailable(provider, exc):
                 with _oauth_lock:
-                    _codex_disabled = True
+                    if provider == "codex":
+                        _codex_disabled = True
+                    elif provider == "grok":
+                        _grok_disabled = True
                 console.print(
-                    "  [yellow]Codex unavailable (auth/quota) — disabling Codex rung for this "
-                    "run, escalating to next rung.[/yellow]"
+                    f"  [yellow]{provider} unavailable (auth/quota) — disabling {provider} rung "
+                    f"for this run, escalating to next rung.[/yellow]"
                 )
                 failed_attempts.append((provider, model, str(exc)[:200]))
                 continue
@@ -946,6 +974,41 @@ def _is_codex_unavailable(exc: Exception) -> bool:
     ))
 
 
+def _is_grok_unavailable(exc: Exception) -> bool:
+    """True when the Grok OAuth rung is PERMANENTLY unavailable for this run (exe missing, not
+    logged in, auth expired, subscription/daily quota exhausted, or the subprocess timed out) —
+    these latch the rung off and skip to the next rung.
+
+    Deliberately does NOT match a transient throttle (429 / "rate limit" / "too many requests" /
+    "throttled"): SuperGrok enforces a shorter-window rate limit under burst, and a transient
+    throttle must NOT trip the permanent disable-latch — it falls through to the generic handler
+    which just escalates that one attempt to the next rung (a later task/retry can use Grok again).
+    A bad-output ValueError is handled elsewhere and returns False here.
+    (NB: differs from _is_codex_unavailable, which DOES treat 429/rate-limit as unavailable.)"""
+    if isinstance(exc, (FileNotFoundError, subprocess.TimeoutExpired)):
+        return True
+    msg = str(exc).lower()
+    # Transient throttle → NOT permanent-unavailable; let it escalate without latching.
+    if any(k in msg for k in ("429", "rate limit", "too many requests", "throttl", "try again")):
+        return False
+    return any(k in msg for k in (
+        "not logged in", "not signed in", "unauthorized", "401", "403",
+        "please run grok login", "run grok login", "login required", "sign in to grok",
+        "quota exhausted", "quota exceeded", "daily limit", "out of credits",
+        "subscription required", "no auth",
+    ))
+
+
+def _oauth_unavailable(provider: str, exc: Exception) -> bool:
+    """Dispatch an OAuth-rung failure to the provider's availability classifier. True → latch the
+    rung off + skip to next rung; False → treat as a normal capability failure (escalate)."""
+    if provider == "codex":
+        return _is_codex_unavailable(exc)
+    if provider == "grok":
+        return _is_grok_unavailable(exc)
+    return False
+
+
 def _call_provider(provider: str, model: str, system: str, user: str) -> str:
     if provider == "ollama":
         return _call_ollama(model, system, user)
@@ -955,6 +1018,8 @@ def _call_provider(provider: str, model: str, system: str, user: str) -> str:
         return _call_openrouter(model, system, user)
     if provider == "codex":
         return _call_codex(model, system, user)
+    if provider == "grok":
+        return _call_grok(model, system, user)
     raise ValueError(f"Unknown worker provider: {provider!r}")
 
 
@@ -1087,6 +1152,84 @@ def _call_codex(model: str, system: str, user: str) -> str:
             os.remove(tmpfile)
         except OSError:
             pass
+
+
+def _extract_grok_text(stdout: str) -> str:
+    """Pull the final assistant message out of `grok -p --output-format json` output.
+
+    The confirmed envelope is a single JSON object with the message in "text"
+    (e.g. {"text": "...", "stopReason": "EndTurn", ...}). Falls back defensively: other dict
+    shapes, a streaming-json event list, or — if it isn't JSON at all — the raw stdout, since the
+    downstream _parse_and_validate hunts for the {"files":[...]} contract inside whatever it gets."""
+    s = (stdout or "").strip()
+    if not s:
+        return ""
+    try:
+        obj = json.loads(s)
+    except (json.JSONDecodeError, ValueError):
+        return s  # plain text / streaming lines — let _parse_and_validate find the contract
+    if isinstance(obj, dict):
+        for key in ("text", "result", "response", "message", "output", "final"):
+            v = obj.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    if isinstance(obj, list):
+        for ev in reversed(obj):  # streaming events: last message-bearing event wins
+            if isinstance(ev, dict):
+                for key in ("text", "content", "message"):
+                    v = ev.get(key)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+    return s
+
+
+def _call_grok(model: str, system: str, user: str) -> str:
+    """Run a one-shot headless `grok -p` under the operator's SuperGrok OAuth subscription ($0).
+
+    Mirrors _call_ollama's (model, system, user) -> str contract. The combined prompt is passed via
+    -p and the final message is read from the JSON envelope's "text" field. Authenticates purely
+    via the cached ~/.grok/auth.json OAuth token (NO xAI API key) — flat-rate, $0 marginal. Runs in
+    an isolated scratch cwd so the agentic CLI never touches the project tree, and holds the
+    single-flight _grok_call_lock for the whole subprocess: xAI rotates the OAuth refresh token on
+    each use, so concurrent calls would race the cached session. GROK_TIMEOUT bounds the call so a
+    hang can't stall the build. UTF-8 is forced for the same reason as Codex (non-cp1252 glyphs)."""
+    exe = (shutil.which("grok") or shutil.which("grok.exe")
+           or os.path.join(os.path.expanduser(GROK_HOME or "~/.grok"), "bin", "grok.exe"))
+    scratch = tempfile.mkdtemp(prefix="grok_cwd_")
+    cmd = [exe, "-p", system + "\n\n" + user, "--output-format", "json", "--cwd", scratch]
+    if model or GROK_MODEL:
+        cmd.extend(["-m", (model or GROK_MODEL)])
+    env = {**os.environ}
+    if GROK_HOME:
+        env["GROK_HOME"] = GROK_HOME
+
+    from cost import record_oauth_usage
+    start = time.monotonic()
+    try:
+        with _grok_call_lock:  # serialize: xAI rotates the OAuth refresh token per use
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=GROK_TIMEOUT,
+                env=env,
+                cwd=scratch,
+            )
+        if result.returncode != 0:
+            tail = ((result.stderr or "") + (result.stdout or ""))[-300:]
+            raise RuntimeError(f"grok -p exited {result.returncode}: ...{tail}")
+        text = _extract_grok_text(result.stdout or "")
+        record_oauth_usage("grok", success=True, latency_s=time.monotonic() - start, tokens=0)
+        return text
+    except BaseException:
+        # Count attempted invocations too — a failed call (exe missing, timeout, nonzero exit,
+        # auth/quota) is what trips the disable-latch, so it must be visible in cost telemetry.
+        record_oauth_usage("grok", success=False, latency_s=time.monotonic() - start, tokens=0)
+        raise
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
