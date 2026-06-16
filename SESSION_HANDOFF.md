@@ -5,8 +5,54 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#82 are MERGED to `main`.**
+**PRs #10–#82 are MERGED to `main`.** PR #71 (film-pipeline robustness) merged after reconcile.
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-16 (eighth session continued) — film-pipeline robustness fixes (PR #71, MERGED)
+
+Factory rehearsal test #4 (the noir film run) failed three times; root-caused and fixed the
+harness-side pipeline. All fixes verified on real ffmpeg / real data; **53 tests green.**
+
+### Pipeline fixes (4 commits, Codex-reviewed)
+- **`scheduler.py` — RAM OOM fix** (`663878b`): mixed DAG waves now run asset (ComfyUI) and
+  code (Ollama/deepseek) tasks in **sequential sub-batches**; ComfyUI's resident checkpoint is
+  freed (`asset_worker.free_comfyui_models()` → ComfyUI `/free`) before the ~8 GB code model
+  loads. Warns if ComfyUI is up but won't free. Was: deepseek OOM ("requires 8.2 GiB") mid-heal.
+- **`video_worker.py` — ffmpeg cwd + binding** (`4f31841`): ffmpeg now runs with
+  `cwd=output_dir` (absolute), so render scripts' relative inputs (`frames/%05d.png`) resolve.
+  This — not deepseek's script quality — was why scenes kept failing. Also: bind each declared
+  output to the ffmpeg line that names it (fail closed when ambiguous), join `\`-continued
+  multi-line commands, and only overwrite the output token when it's actually the output path.
+- **`video_worker.py` — synthetic-render guard** (`b93f837`, hardened in `51370d1`): a film
+  render that sources video from a synthetic `lavfi`/`color=`/`testsrc`/`smptebars` generator
+  while real ComfyUI frames exist is now **failed** (so the heal loop rewrites it to encode the
+  frames) instead of passing grey placeholder video. Detection tokenizes `-i` inputs (catches
+  `color=black`/`color=gray`, not just `color=c`); synthetic `aevalsrc` audio beds still allowed.
+- **`worker.py` + `orchestrator.txt` — frame contract** (`51370d1`): the code-worker film prompt
+  previously told the worker to use synthetic `color=`/`testsrc` sources and NOT reference frame
+  files — directly contradicting the guard and preventing heal convergence. Rewritten to mandate
+  encoding the real ComfyUI frames (`-framerate <fps> -i frames/<pattern>.png`); synthetic video
+  only when no frames exist. Added the working-directory contract + one-ffmpeg-per-output rule.
+
+### Image-gen blocker — observed earlier, NOT reproducing on the current config (reconciled 2026-06-16)
+When this PR was authored, ComfyUI frames came back as **RGB noise/static** and the cause was
+attributed to `torch-directml` computing SDXL incorrectly on the RX 9070 XT (RDNA4/gfx1201), with
+a planned ROCm migration. **A later same-session verification contradicts that for the current
+setup:** after restarting ComfyUI on a clean `--directml` with the `RealVisXL_V5.0_fp16` checkpoint,
+a fresh `_comfyui_txt2img` render produced a **clean, coherent noir frame** (verified by viewing the
+PNG — see the backend smoke-test section). So:
+- The image backend is **working on the current config** — ROCm migration is a **contingency, not a
+  confirmed requirement**.
+- The earlier noise may have been checkpoint-specific (the noir scene at one point resolved to the
+  `animagine-xl-3.1` **anime** model) or a transient `torch-directml`/state issue.
+- If noise recurs in a real build, the documented fix path remains ROCm (native Windows ROCm 7.2.1
+  PyTorch in ComfyUI's env, or WSL2+ROCm fallback) + a photoreal checkpoint.
+
+The **harness fixes above stand regardless** of the backend question — they're why the pipeline now
+**completes** (cwd/RAM/guard) instead of failing on relative frame paths or passing grey placeholder
+video. Test #4 is now gated only on a real end-to-end run, not a known harness bug.
 
 ---
 

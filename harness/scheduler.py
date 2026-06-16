@@ -125,6 +125,10 @@ class Scheduler:
     def _dispatch_batch(self, ready: list[Task]) -> None:
         """Run a batch of ready tasks under a per-batch timeout.
 
+        Asset tasks (ComfyUI) and code tasks (Ollama) are split into sequential
+        sub-batches when both are present in the same wave — they compete for the
+        same system RAM and cause OOM when run concurrently.
+
         ALL batches go through the timeout path — including single-task batches — so one hung
         worker cannot stall the pipeline indefinitely (the previous serial path had no timeout).
 
@@ -135,6 +139,30 @@ class Scheduler:
         own internal timeout — which they currently do (WORKER_TASK_TIMEOUT / request timeouts).
         Do not remove those inner timeouts assuming this wait alone bounds wall-clock.
         """
+        asset_tasks = [t for t in ready if _is_asset_task(t)]
+        other_tasks = [t for t in ready if not _is_asset_task(t)]
+        if asset_tasks and other_tasks:
+            # Run ComfyUI (asset) and Ollama (code) tasks in separate sub-batches to
+            # prevent concurrent RAM exhaustion on machines with limited system memory.
+            self._dispatch_sub_batch(asset_tasks)
+            # ComfyUI keeps its checkpoint resident between requests; free it before
+            # the local code model loads so the ~8 GB model isn't denied for RAM.
+            from asset_worker import free_comfyui_models, can_generate as asset_can_generate
+            freed = free_comfyui_models()
+            if not freed and asset_can_generate():
+                # ComfyUI is up but would not release memory (no /free endpoint,
+                # timeout, or refusal) — the code worker may now hit the OOM this
+                # is meant to prevent. Surface it instead of failing silently.
+                console.print(
+                    "  [yellow]warning: ComfyUI did not free its model before the code "
+                    "worker — local code tasks may OOM on constrained hosts.[/yellow]"
+                )
+            self._dispatch_sub_batch(other_tasks)
+        else:
+            self._dispatch_sub_batch(ready)
+
+    def _dispatch_sub_batch(self, ready: list[Task]) -> None:
+        """Execute one concurrent sub-batch with a shared timeout."""
         workers = max(1, min(MAX_PARALLEL_WORKERS, len(ready)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(self._run_task, task): task for task in ready}

@@ -78,8 +78,8 @@ def generate_video(task, spec: dict, output_dir: Path) -> tuple[list[Path], dict
                 written.append(out)
             continue
 
-        # It's a video file — try to find an ffmpeg command to render it.
-        cmd_line = _find_ffmpeg_command(inline.get(rel_path), disk_scripts)
+        # It's a video file — find the ffmpeg command that renders THIS output.
+        cmd_line = _find_ffmpeg_command(inline.get(rel_path), disk_scripts, rel_path)
 
         success = False
         reason = ""
@@ -90,18 +90,49 @@ def generate_video(task, spec: dict, output_dir: Path) -> tuple[list[Path], dict
                 "no executable 'ffmpeg …' line found in task output or any edit "
                 "script on disk — the director task must emit one (e.g. in render.sh)"
             )
+        elif (
+            video_is_deliverable
+            and _scene_has_real_frames(output_dir)
+            and _cmd_uses_synthetic_video(cmd_line)
+            and not _cmd_uses_frames(cmd_line)
+        ):
+            # The scene generated real ComfyUI frames but this render command
+            # synthesises a blank `lavfi`/`color=` source and ignores them — the
+            # result passes ffprobe but is a grey placeholder, not the scene. Fail
+            # so the heal loop rewrites the command to encode the actual frames.
+            reason = (
+                "render command uses a synthetic 'lavfi'/'color=' video source and "
+                "ignores the generated frames in frames/ — encode the real frames "
+                "instead (e.g. `-framerate <fps> -i frames/<pattern>.png`); do NOT "
+                "substitute a solid color/lavfi background for the scene visuals"
+            )
         else:
-            # Replace the last token (output path) with the real destination.
             try:
                 parts = shlex.split(cmd_line)
             except ValueError:
                 parts = cmd_line.split()
             if parts:
-                parts[-1] = str(out)
+                # Point the command at the real destination. Only overwrite the
+                # last token when it is actually the output path (matches the
+                # declared basename or looks like a video file); otherwise the
+                # script put the output elsewhere — append rather than clobber a
+                # trailing flag/value.
+                # Absolute output + absolute cwd so a relative output_dir can't
+                # double-resolve (cwd/output_dir/cwd/output_dir/…).
+                abs_out = out.resolve()
+                abs_cwd = output_dir.resolve()
+                if _is_output_token(parts[-1], rel_path):
+                    parts[-1] = str(abs_out)
+                else:
+                    parts.append(str(abs_out))
                 console.print(f"  [dim]video: running ffmpeg for {rel_path}[/dim]")
                 try:
+                    # Run from output_dir so the script's relative input paths
+                    # (frames/%05d.png, audio/x.wav) resolve correctly. Running
+                    # from the harness cwd was silently breaking every render.
                     result = subprocess.run(
                         parts,
+                        cwd=str(abs_cwd),
                         timeout=180,
                         capture_output=True,
                         text=True,
@@ -190,18 +221,145 @@ def _collect_disk_scripts(output_dir: Path) -> list[str]:
     return scripts
 
 
-def _find_ffmpeg_command(inline_content: str | None, disk_scripts: list[str]) -> str | None:
-    """Extract the first 'ffmpeg ...' command line from any available source."""
+def _scene_has_real_frames(output_dir: Path) -> bool:
+    """True when the scene produced PNG frames meant to be encoded into the clip
+    (ComfyUI output). Looks for pngs under a 'frames' dir or named like a frame."""
+    if not output_dir.exists():
+        return False
+    for p in output_dir.rglob("*.png"):
+        parts = {part.lower() for part in p.parts}
+        if "frames" in parts or "frame" in p.stem.lower():
+            return True
+    return False
+
+
+# lavfi VIDEO generators (any of these as an `-i` source means synthetic visuals).
+# Audio generators (aevalsrc/anullsrc/sine) are deliberately excluded — a synthetic
+# audio bed over real frames is fine.
+_SYNTHETIC_VIDEO_SOURCES = (
+    "color=", "color:", "testsrc", "smptebars", "smptehdbars",
+    "nullsrc", "rgbtestsrc", "yuvtestsrc", "mandelbrot", "life=", "cellauto",
+)
+_SYNTHETIC_AUDIO_SOURCES = ("aevalsrc", "anullsrc", "sine")
+
+
+def _cmd_uses_synthetic_video(cmd_line: str) -> bool:
+    """True when the ffmpeg command sources its VIDEO from a synthetic lavfi
+    generator (color=black, color=c=0x…, testsrc, smptebars, …) rather than real
+    frames. Inspects each `-i <source>` argument so `color=black:s=…` and
+    `color=gray:size=…` are caught, while audio-only sources are ignored."""
+    try:
+        parts = shlex.split(cmd_line)
+    except ValueError:
+        parts = cmd_line.split()
+    for i, tok in enumerate(parts):
+        if tok == "-i" and i + 1 < len(parts):
+            src = parts[i + 1].strip().strip('"\'').lower()
+            if any(src.startswith(s) or s in src for s in _SYNTHETIC_AUDIO_SOURCES):
+                continue  # audio bed — fine
+            if any(s in src for s in _SYNTHETIC_VIDEO_SOURCES):
+                return True
+    return False
+
+
+def _cmd_uses_frames(cmd_line: str) -> bool:
+    """True when the ffmpeg command takes a frame-image sequence as input
+    (a frames/ path, a printf glob like %04d, or an image2 glob)."""
+    low = cmd_line.lower()
+    return (
+        "frames/" in low
+        or "frame_" in low
+        or "%0" in cmd_line  # printf sequence e.g. %04d / %05d
+        or "-pattern_type glob" in low
+        or "image2" in low
+    )
+
+
+def _is_output_token(token: str, rel_path: str) -> bool:
+    """True when `token` looks like the render's output path for rel_path —
+    either it ends with the declared basename, or it has a video extension (so a
+    bare `out.mp4` still counts). Used to avoid clobbering a trailing flag."""
+    base = Path(rel_path).name.lower()
+    tok = token.strip().strip('"\'').replace("\\", "/").lower()
+    if not tok or tok.startswith("-"):
+        return False
+    return tok.endswith(base) or Path(tok).suffix in _VIDEO_EXTS
+
+
+def _join_continued_lines(content: str) -> list[str]:
+    """Collapse shell/.cmd line continuations so a multi-line ffmpeg invocation
+    is returned as one logical line. Handles POSIX `\\` and Windows `^`."""
+    logical: list[str] = []
+    buf = ""
+    for raw in content.splitlines():
+        line = raw.rstrip()
+        if line.endswith("\\") or line.endswith("^"):
+            buf += line[:-1] + " "
+            continue
+        buf += line
+        logical.append(buf)
+        buf = ""
+    if buf:
+        logical.append(buf)
+    return logical
+
+
+def _ffmpeg_lines(sources: list[str]) -> list[str]:
+    """All 'ffmpeg …' logical command lines across the given sources, in order."""
+    cmds: list[str] = []
+    for content in sources:
+        for line in _join_continued_lines(content):
+            stripped = line.strip()
+            if stripped.startswith("ffmpeg "):
+                cmds.append(stripped)
+    return cmds
+
+
+def _find_ffmpeg_command(
+    inline_content: str | None,
+    disk_scripts: list[str],
+    rel_path: str | None = None,
+) -> str | None:
+    """Return the ffmpeg command that renders `rel_path`.
+
+    When a scene has multiple ffmpeg invocations (multiple outputs / a render +
+    an edit script), prefer the one whose final token matches the declared
+    output's basename. Only when nothing matches do we fall back to the first
+    ffmpeg line — preserving the original single-output behaviour.
+    """
     sources: list[str] = []
     if inline_content:
         sources.append(inline_content)
     sources.extend(disk_scripts)
-    for content in sources:
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("ffmpeg "):
-                return stripped
-    return None
+
+    cmds = _ffmpeg_lines(sources)
+    if not cmds:
+        return None
+
+    # Single command: it renders the only declared output.
+    if len(cmds) == 1:
+        return cmds[0]
+
+    # Multiple commands: bind to the one that names this output. Scan ALL
+    # path-like (non-option) tokens, not just the last — a command may write its
+    # output before a trailing flag. Fail closed (None) when none unambiguously
+    # targets rel_path, rather than silently running the first command (which
+    # could render this clip from another scene's inputs).
+    if not rel_path:
+        return cmds[0]
+    base = Path(rel_path).name.lower()
+    matches = []
+    for cmd in cmds:
+        try:
+            parts = shlex.split(cmd)
+        except ValueError:
+            parts = cmd.split()
+        for tok in parts:
+            t = tok.strip().strip('"\'').replace("\\", "/").lower()
+            if not t.startswith("-") and t.endswith(base):
+                matches.append(cmd)
+                break
+    return matches[0] if len(matches) == 1 else None
 
 
 def _write_placeholder(path: Path) -> None:

@@ -432,10 +432,20 @@ that the harness feeds to ffmpeg to render the final film. Write every file comp
   scans for the first "ffmpeg " line and substitutes the real output path for that last
   token, so the output path MUST be the final argument and nothing may follow it.
 - Put the ffmpeg command(s) in a render script named render.sh (or build_film.sh). One
-  command per line. Use only ffmpeg built-in sources/filters that need no external assets:
-  lavfi sources (color=, testsrc=, sine=), drawtext, concat filter, xfade transitions,
-  and overlay. Do NOT reference image/audio files that are not also produced by an
-  upstream task — a self-contained synthetic render must always succeed.
+  command per line.
+- FRAME CONTRACT (most important visual rule): when the task's inputs/dependencies
+  include image frames produced by an upstream asset task (PNG files under frames/,
+  e.g. frames/scene1_frame_%04d.png), the render MUST ENCODE THOSE REAL FRAMES as the
+  video source — `-framerate <fps> -i frames/<pattern>.png` (or an image2/concat input).
+  These frames are the scene's actual visuals. It is a HARD ERROR to substitute a
+  synthetic lavfi VIDEO source (color=, testsrc=, smptebars, nullsrc) for the frames —
+  the harness will REJECT such a render and the task will fail. Only when NO real frames
+  exist as a dependency may you fall back to a synthetic lavfi background.
+- A synthetic AUDIO bed is always fine: pair the frame video with `-f lavfi -i
+  aevalsrc=...` (or use the upstream audio WAV) for sound.
+- All input/output paths are relative to the scene dir (the harness runs the script
+  there): `frames/...`, `audio/...`, `video/...`. Do NOT reference files that no task
+  produces.
 - Always set: -y (overwrite), -pix_fmt yuv420p (broad compatibility), -movflags +faststart
   for mp4, and an explicit -t <seconds> or duration on every lavfi input so the render
   terminates. Encode video with libx264 and audio with aac.
@@ -461,8 +471,10 @@ that the harness feeds to ffmpeg to render the final film. Write every file comp
     `color=c=RRGGBB` instead of gradient expressions.
   * Font paths with `:` (e.g. `C:/Windows/Fonts/arial.ttf`) break option parsing — skip
     `fontfile=` entirely.
-  * Safe minimal approach: `-f lavfi -i "color=c=HEX:size=WxH:rate=FPS:duration=N"`
-    paired with `-f lavfi -i "aevalsrc=exprs=EXPR:c=mono:s=44100:d=N"` always works.
+  * Encode the real frames: `-framerate FPS -i "frames/<pattern>.png"` paired with
+    `-f lavfi -i "aevalsrc=exprs=EXPR:c=mono:s=44100:d=N"` (or the upstream audio WAV).
+    Use `-pix_fmt yuv420p` and `-shortest`. A synthetic `color=` video source is ONLY
+    acceptable as a last resort when the task has no frame dependency.
 - NEVER emit placeholder ffmpeg flags, NEVER leave the output path unresolved, and NEVER
   produce an index.html — this is a film, not a web page.
 """,

@@ -387,6 +387,16 @@ Image assets (sprites, icons, backgrounds) are generated locally via ComfyUI or 
 
 Configure: `ASSET_PROVIDER`, `COMFYUI_API_URL`, `COMFYUI_WIDTH`, `COMFYUI_HEIGHT`, `COMFYUI_CHECKPOINT` in `.env`.
 
+> ℹ️ **DirectML / RDNA4 note (RX 9070 XT, updated 2026-06-16):** an earlier run this session
+> produced **RGB noise** under `torch-directml` and the fix was assumed to be a ROCm migration.
+> A later same-session verification **contradicts that on the current config** — ComfyUI on a clean
+> `--directml` with the `RealVisXL_V5.0_fp16` checkpoint produced a **clean, coherent noir frame**
+> (verified by viewing the PNG). So image gen is **working on this card** as configured; the noise
+> was likely checkpoint-specific (an anime model on a noir scene) or transient. If noise recurs,
+> the contingency is **ROCm** (native Windows ROCm 7.2.1 or WSL2) + a photoreal checkpoint. The
+> harness fixes (RAM scheduling, ffmpeg cwd, frame guard) are independent and verified. See
+> `SESSION_HANDOFF.md` (PR #71) for the full history.
+
 ---
 
 ## Audio Generation
