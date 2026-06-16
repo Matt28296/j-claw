@@ -77,6 +77,17 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
                     "/api/retry_failed_task",
                 ],
             })
+        elif path == "/mission_control.json":
+            # Serve via MISSION_CONTROL so test patches propagate correctly.
+            try:
+                content = MISSION_CONTROL.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+            except FileNotFoundError:
+                self.send_error(404, "File not found")
         else:
             super().do_GET()
 

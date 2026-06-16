@@ -239,7 +239,7 @@ Choose `architecture.stack` based on project requirements:
 | `three-js`     | 3D browser scenes, visualizations, 3D games       | Three.js CDN, WebGL, OrbitControls      |
 | `electron`     | Cross-platform desktop app (Windows/Mac/Linux)    | Electron, Node.js IPC, contextBridge    |
 | `asset`        | Generate image assets (sprites, icons, backgrounds) | Local Stable Diffusion WebUI or SVG placeholders |
-| `film`         | Narrative film or animated explainer                | ffmpeg + SD frames + Coqui TTS. **FORMAT 5 required.** |
+| `film`         | Narrative film or animated explainer                | ffmpeg + ComfyUI frames + Piper TTS narration + FluidSynth MIDI music. **FORMAT 5 required.** |
 | `video-editor` | Browser-based clip editor                           | ffmpeg WASM + Canvas API                        |
 | `tauri`        | Rust + WebView desktop app (lighter than Electron)  | Rust toolchain, Tauri v2, WebView2              |
 | `godot`        | GDScript game, Godot 4 headless export              | Godot 4 CLI headless, GDScript                  |
@@ -887,9 +887,9 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
    - Every scene sub-project MUST include all four of the following task types. Omitting any
      one is a spec error:
      - At least one `type: "asset"` task — visual frames or image assets for the scene,
-       generated via Stable Diffusion WebUI.
+       generated via ComfyUI (local DirectML/CUDA). Falls back to PNG placeholders if ComfyUI is offline.
      - At least one `type: "audio"` task — narration, dialogue, or sound effects for the
-       scene, generated via Coqui TTS.
+       scene, generated via Piper TTS binary (local, no GPU). Falls back to silent WAV placeholder.
      - At least one `type: "video"` task — encode/assemble the scene's frames into a video
        clip using ffmpeg. Use `verification: "ffprobe"`.
      - At least one `type: "editing"` task — cut, trim, and layer audio onto the video clip
