@@ -61,6 +61,18 @@ class DetectImageStyleTests(unittest.TestCase):
         }
         self.assertEqual(asset_worker._detect_image_style(_task(), spec), "realistic")
 
+    def test_anime_film_is_not_outvoted_by_medium_words(self) -> None:
+        """Regression: 'film'/'cinematic' are domain noise in a film pipeline and
+        must not outvote an explicit anime cue."""
+        self.assertEqual(
+            asset_worker._detect_image_style(_task("Make an anime film about a robot"), {}),
+            "anime",
+        )
+        self.assertEqual(
+            asset_worker._detect_image_style(_task("an anime cinematic short"), {}),
+            "anime",
+        )
+
     def test_tie_falls_back_to_realistic(self) -> None:
         # One anime cue ("anime") vs one realistic cue ("photo ") → tie → realistic.
         spec = {"creative_brief": {"visual_style": "anime photo "}}

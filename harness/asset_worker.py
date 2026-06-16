@@ -41,13 +41,18 @@ _COMFYUI_POLL_INTERVAL = 4    # seconds between history polls
 _COMFYUI_TIMEOUT_STEPS = 150  # 150 × 4s = 600s max per image
 
 # Keywords that route image generation to the realistic vs anime checkpoint.
+# Keep these lists free of words that appear in nearly every brief this (film)
+# pipeline handles — e.g. "film"/"cinematic" describe the medium and shot
+# framing, not the render style, so they must not outvote an explicit "anime"
+# cue. Also avoid keywords that are substrings of another in the same list
+# ("toon" ⊂ "cartoon"), which would double-count a single match.
 _ANIME_KEYWORDS = (
     "anime", "cartoon", "manga", "cel shaded", "cel-shaded", "comic",
-    "pixel art", "chibi", "toon", "illustrat", "drawn", "stylized sketch",
+    "pixel art", "chibi", "illustrat", "hand-drawn", "stylized sketch",
 )
 _REALISTIC_KEYWORDS = (
-    "realistic", "photoreal", "photo-real", "photograph", "photo ", "cinematic",
-    "live action", "live-action", "documentary", "noir", "film", "lifelike",
+    "realistic", "photoreal", "photo-real", "photograph", "photo ",
+    "live action", "live-action", "documentary", "noir", "lifelike",
     "hyperreal", "8k", "4k", "dslr", "portrait photo",
 )
 

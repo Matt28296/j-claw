@@ -32,7 +32,7 @@ Two new test files, **14 tests green** under `harness/.venv`:
 - PR #72 — reconcile orphaned runs so a killed/restarted bot can't freeze `EXECUTING` (the long-standing restart-orphan trap).
 - PR #70 — remove `'orchestrat'` from goal-text assembly detection.
 
-**Full suite: 26 tests green (14 media/mission-control + 12 asset worker).**
+**New tests this session: 26 green (14 media/mission-control + 12 asset worker); full suite 38 green.**
 
 ---
 
