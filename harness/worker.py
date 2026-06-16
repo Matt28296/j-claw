@@ -879,7 +879,10 @@ def _call_anthropic(model: str, system: str, user: str) -> str:
     import anthropic
     from cache_telemetry import log_cache_usage
     from cost import record_usage
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # Bound the request like the ollama client (worker.py:_call_ollama) so a hung
+    # escalation call can't stall the pipeline indefinitely; on timeout the SDK
+    # raises and main.py's handler writes a terminal FAILED state.
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=WORKER_TASK_TIMEOUT)
     response = client.messages.create(
         model=model,
         max_tokens=8192,

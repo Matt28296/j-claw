@@ -8,6 +8,7 @@ orchestrator_input.json
 orchestrator_response.json
 harness/experience.jsonl
 harness/run_fix.ps1
+harness/.pipeline.pid
 
 # Python
 __pycache__/
