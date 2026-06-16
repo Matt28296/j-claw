@@ -11,6 +11,9 @@ harness/experience.jsonl
 harness/run_fix.ps1
 harness/.pipeline.pid
 
+# Scratch / proof artifacts (underscore-prefixed dirs & files under harness/)
+/harness/_*
+
 # Bot runtime logs — may contain the Telegram token in API request URLs
 *.log
 
