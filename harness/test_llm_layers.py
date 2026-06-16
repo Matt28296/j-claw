@@ -730,6 +730,295 @@ class TestExperienceLearning(unittest.TestCase):
             w.WORKER_LADDER = orig_ladder
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9. Codex CLI OAuth worker rung — routing, unavailability, capacity, budget split
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Contract under test (implemented concurrently in config.py / worker.py / cost.py):
+#   - WORKER_LADDER default gains a ("codex","gpt-5.5") rung between the strongest
+#     local rung and the anthropic rung.
+#   - config: CODEX_CLI_ENABLED, CODEX_MODEL, CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT,
+#     OAUTH_PROVIDERS={"codex"}, METERED_PROVIDERS={"anthropic","openrouter","groq"}.
+#   - worker: _call_codex(model, system, user) -> str (shells to `codex exec`),
+#     _is_codex_unavailable(exc) -> bool, _reserve_oauth_call(provider) -> bool
+#     (capacity counter capped at CODEX_CLI_MAX_CALLS), module flag _codex_disabled,
+#     reset_paid_budget() also resets oauth counters + _codex_disabled,
+#     _call_provider routes provider "codex" -> _call_codex.
+#   - OAuth rungs consume the capacity counter, NOT the dollar budget
+#     (_paid_calls_made); an _is_codex_unavailable error sets _codex_disabled and
+#     escalates; capacity exhaustion skips codex and escalates.
+#   - cost: record_oauth_usage(provider, *, success, latency_s, tokens);
+#     cost_summary() has an "oauth" key.
+#
+# All mocked — monkeypatch _call_codex / _call_provider so NO real subprocess or
+# API runs. reset_paid_budget() is invoked in setUp.
+
+class TestCodexWorkerRung(unittest.TestCase):
+
+    def setUp(self):
+        import worker as w
+        self._w = w
+        self._orig_ladder = w.WORKER_LADDER
+        # Pin CODEX_CLI_ENABLED so the rung is exercised deterministically — otherwise these
+        # tests silently depend on the operator's untracked harness/.env (a clean checkout/CI
+        # has it default False, which would skip the rung and make routing assertions vacuous).
+        self._orig_codex_enabled = w.CODEX_CLI_ENABLED
+        w.CODEX_CLI_ENABLED = True
+        # Codex rung between strongest-local and anthropic.
+        w.WORKER_LADDER = [
+            ("ollama", "qwen3:8b"),
+            ("ollama", "deepseek-coder-v2:16b"),
+            ("codex", "gpt-5.5"),
+            ("anthropic", "claude-sonnet-4-6"),
+        ]
+        # Reset both the dollar budget and the oauth/capacity counters + flag.
+        if hasattr(w, "reset_paid_budget"):
+            w.reset_paid_budget()
+        else:  # defensive fallback if the helper name drifts
+            w._paid_calls_made = 0
+
+    def tearDown(self):
+        self._w.WORKER_LADDER = self._orig_ladder
+        self._w.CODEX_CLI_ENABLED = self._orig_codex_enabled
+        if hasattr(self._w, "reset_paid_budget"):
+            self._w.reset_paid_budget()
+
+    def _task(self, retry=0):
+        t = MagicMock()
+        t.id = "task-1"
+        t.type = "frontend"
+        t.objective = "build a page"
+        t.files = ["index.html"]
+        t.dependencies = []
+        t.acceptance_criteria = []
+        t.verification = "none"
+        t.retry_count = retry
+        return t
+
+    def _good_output(self):
+        return json.dumps({"files": [{"path": "index.html", "content": "<html/>"}]})
+
+    # ── 1. _call_provider routes provider "codex" → _call_codex ────────────────
+    def test_call_provider_routes_codex_to_call_codex(self):
+        w = self._w
+        sentinel = json.dumps({"files": [{"path": "x.txt", "content": "ok"}]})
+        with patch.object(w, "_call_codex", return_value=sentinel) as mock_codex:
+            out = w._call_provider("codex", "gpt-5.5", "sys prompt", "user prompt")
+        mock_codex.assert_called_once()
+        # The model + prompts must be forwarded to _call_codex.
+        args, kwargs = mock_codex.call_args
+        forwarded = list(args) + list(kwargs.values())
+        self.assertIn("gpt-5.5", forwarded)
+        self.assertEqual(out, sentinel)
+
+    # ── 2. _is_codex_unavailable failure classification ────────────────────────
+    def test_is_codex_unavailable_classification(self):
+        w = self._w
+        fn = w._is_codex_unavailable
+
+        # Unavailable (skip-to-next-rung) cases.
+        self.assertTrue(fn(FileNotFoundError("codex.cmd not found")),
+                        "exe missing must be unavailable")
+        self.assertTrue(fn(RuntimeError("401 unauthorized")),
+                        "401 must be unavailable")
+        self.assertTrue(fn(RuntimeError("429 rate limit")),
+                        "429 must be unavailable")
+        self.assertTrue(fn(RuntimeError("not logged in")),
+                        "not-logged-in must be unavailable")
+        self.assertTrue(fn(RuntimeError("Please run codex login to continue")),
+                        "explicit 'please run codex login' must be unavailable")
+
+        # NOT unavailable — a real capability/output failure must NOT skip the rung.
+        self.assertFalse(fn(ValueError("bad output")),
+                         "bad output is a capability error, not unavailability")
+        self.assertFalse(fn(RuntimeError("model refused the task — capability gap")),
+                         "generic capability error is not unavailability")
+        # Bare "login" must NOT trip the unavailable classifier — a genuine capability failure
+        # in a task that writes login/auth code can echo the word on a nonzero exit.
+        self.assertFalse(fn(RuntimeError("TypeError in generated LoginForm.handleLogin")),
+                         "a capability error merely containing 'login' must not skip the rung")
+
+    # ── 3. OAuth call does NOT consume the dollar budget ───────────────────────
+    def test_oauth_call_does_not_consume_dollar_budget(self):
+        w = self._w
+        # Route directly to the codex rung so the first attempt is an oauth call.
+        reserved = {"oauth": 0}
+        orig_reserve = w._reserve_oauth_call
+
+        def counting_reserve(provider):
+            ok = orig_reserve(provider)
+            if ok:
+                reserved["oauth"] += 1
+            return ok
+
+        def mock_call(provider, model, sys, user):
+            self.assertEqual(provider, "codex")
+            return self._good_output()
+
+        spec = {"architecture": {"stack": "vanilla"}}
+        with patch.object(w, "_call_provider", side_effect=mock_call), \
+             patch.object(w, "_call_codex", return_value=self._good_output()), \
+             patch.object(w, "_reserve_oauth_call", side_effect=counting_reserve), \
+             patch.object(w, "route_task", return_value=2), \
+             patch.object(w, "_parse_and_validate", return_value={"files": []}):
+            before = w._paid_calls_made
+            w.execute_task(self._task(), spec, {})
+            after = w._paid_calls_made
+
+        # An oauth call WAS reserved, but the dollar counter is untouched.
+        self.assertGreaterEqual(reserved["oauth"], 1,
+                                "expected an oauth capacity reservation on the codex rung")
+        self.assertEqual(before, after,
+                         "oauth call must NOT decrement/increment the dollar budget")
+
+    # ── 4. Capacity exhaustion skips codex → escalates to anthropic ────────────
+    def test_capacity_exhaustion_skips_codex_escalates_to_anthropic(self):
+        w = self._w
+        # Clamp the capacity cap to zero so no oauth call may be reserved.
+        # Exhaust the counter directly too, to be robust to either gating path.
+        with patch.object(w, "CODEX_CLI_MAX_CALLS", 0):
+            # Drain any remaining capacity.
+            for _ in range(5):
+                w._reserve_oauth_call("codex")
+
+            call_log = []
+
+            def mock_call(provider, model, sys, user):
+                call_log.append((provider, model))
+                if provider == "ollama":
+                    raise RuntimeError("model output truncated — capability failure")
+                return self._good_output()
+
+            anthropic_sentinel = MagicMock(return_value=self._good_output())
+
+            spec = {"architecture": {"stack": "vanilla"}}
+            with patch.object(w, "_call_provider", side_effect=mock_call), \
+                 patch.object(w, "_call_codex") as mock_codex, \
+                 patch.object(w, "_call_anthropic", anthropic_sentinel), \
+                 patch.object(w, "_reserve_paid_call", return_value=True), \
+                 patch.object(w, "route_task", return_value=0), \
+                 patch.object(w, "_parse_and_validate", return_value={"files": []}):
+                w.execute_task(self._task(retry=2), spec, {})
+
+        # Codex was skipped (capacity exhausted) and anthropic rung was reached.
+        self.assertFalse(any(p == "codex" for p, _ in call_log),
+                         f"codex rung must be skipped when capacity exhausted: {call_log}")
+        mock_codex.assert_not_called()
+        self.assertTrue(any(p == "anthropic" for p, _ in call_log),
+                        f"execution must escalate to anthropic rung: {call_log}")
+
+    # ── 5. _codex_disabled short-circuit after an unavailable error ────────────
+    def test_codex_disabled_short_circuits_subsequent_tasks(self):
+        w = self._w
+
+        codex_calls = {"n": 0}
+
+        def codex_unavailable(model, system, user):
+            codex_calls["n"] += 1
+            raise RuntimeError("not logged in")
+
+        def mock_call(provider, model, sys, user):
+            if provider == "ollama":
+                raise RuntimeError("model output truncated — capability failure")
+            if provider == "codex":
+                return w._call_codex(model, sys, user)  # routes to our unavailable stub
+            return self._good_output()
+
+        spec = {"architecture": {"stack": "vanilla"}}
+        with patch.object(w, "_call_provider", side_effect=mock_call), \
+             patch.object(w, "_call_codex", side_effect=codex_unavailable), \
+             patch.object(w, "_reserve_paid_call", return_value=True), \
+             patch.object(w, "route_task", return_value=0), \
+             patch.object(w, "_parse_and_validate", return_value={"files": []}):
+            # First task: codex raises unavailable → flag flips, escalates to anthropic.
+            w.execute_task(self._task(retry=2), spec, {})
+            self.assertTrue(w._codex_disabled,
+                            "_codex_disabled must flip True after an unavailable error")
+            calls_after_first = codex_calls["n"]
+
+            # Second task: codex must be skipped cheaply (no second _call_codex),
+            # and execution still reaches the anthropic rung.
+            second_log = []
+
+            def mock_call2(provider, model, sys, user):
+                second_log.append((provider, model))
+                if provider == "ollama":
+                    raise RuntimeError("model output truncated — capability failure")
+                if provider == "codex":
+                    return w._call_codex(model, sys, user)
+                return self._good_output()
+
+            with patch.object(w, "_call_provider", side_effect=mock_call2):
+                w.execute_task(self._task(retry=2), spec, {})
+
+        self.assertEqual(codex_calls["n"], calls_after_first,
+                         "_call_codex must NOT be invoked again once _codex_disabled is set")
+        self.assertTrue(any(p == "anthropic" for p, _ in second_log),
+                        f"second task must still reach anthropic rung: {second_log}")
+
+    # ── 6. _call_codex parse path → execute_task yields valid result ───────────
+    def test_call_codex_parse_path_yields_codex_result(self):
+        w = self._w
+        codex_json = json.dumps({"files": [{"path": "x.txt", "content": "ok"}]})
+
+        # _call_codex returns the JSON string (mirroring the `-o` temp-file mechanism);
+        # the real subprocess is mocked away entirely.
+        def mock_call(provider, model, sys, user):
+            if provider == "codex":
+                return w._call_codex(model, sys, user)
+            raise AssertionError(f"only the codex rung should be exercised here: {provider}")
+
+        spec = {"architecture": {"stack": "vanilla"}}
+        with patch.object(w, "_call_codex", return_value=codex_json) as mock_codex, \
+             patch.object(w, "_call_provider", side_effect=mock_call), \
+             patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "route_task", return_value=2):
+            result = w.execute_task(self._task(), spec, {})
+
+        mock_codex.assert_called()
+        # Parsed result reflects the codex output + model_used == the codex rung.
+        files = result.get("files") if isinstance(result, dict) else None
+        self.assertTrue(files, f"expected parsed files from codex output: {result}")
+        self.assertEqual(files[0]["path"], "x.txt")
+        model_used = (result.get("model_used") or result.get("model") or "") \
+            if isinstance(result, dict) else ""
+        self.assertIn("codex", str(model_used).lower(),
+                      f"model_used must reflect codex rung: {result}")
+
+    # ── 7. cost.record_oauth_usage surfaces in cost_summary()["oauth"] ─────────
+    def test_record_oauth_usage_surfaces_in_cost_summary(self):
+        import cost
+        cost.record_oauth_usage("codex", success=True, latency_s=1.2, tokens=100)
+        summary = cost.cost_summary()
+        self.assertIn("oauth", summary,
+                      "cost_summary() must expose an 'oauth' key for OAuth-rung telemetry")
+
+    # ── 8. A FAILED _call_codex still records an attempted oauth call ($0) ──────
+    def test_failed_call_codex_records_failed_oauth_attempt(self):
+        w = self._w
+        import cost
+        cost.reset_costs()
+
+        # Real _call_codex body runs; only the subprocess is mocked to fail (nonzero exit),
+        # exercising the failure-telemetry path. record_oauth_usage is imported inside
+        # _call_codex from the cost module, so patch it there.
+        fake_proc = MagicMock()
+        fake_proc.returncode = 1
+        fake_proc.stderr = "429 usage limit reached"
+        fake_proc.stdout = ""
+
+        with patch.object(w.subprocess, "run", return_value=fake_proc), \
+             patch.object(w.shutil, "which", return_value="codex"):
+            with self.assertRaises(RuntimeError):
+                w._call_codex("gpt-5.5", "sys", "user")
+
+        oauth = cost.cost_summary().get("oauth", {}).get("codex", {})
+        self.assertEqual(oauth.get("calls", 0), 1,
+                         "a failed codex invocation must still count as an attempted call")
+        self.assertEqual(oauth.get("success", -1), 0,
+                         "a failed codex invocation must NOT count as a success")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Runner
 # ══════════════════════════════════════════════════════════════════════════════
@@ -746,6 +1035,7 @@ if __name__ == "__main__":
         TestExecuteTask,
         TestFinalReviewFailsClosed,
         TestExperienceLearning,
+        TestCodexWorkerRung,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 

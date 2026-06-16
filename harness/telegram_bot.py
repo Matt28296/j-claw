@@ -49,6 +49,12 @@ ALLOWED_CHAT_ID: int | None = (
 _HARNESS_DIR = Path(__file__).parent
 _PROJECTS_DIR = Path(os.getenv("PROJECTS_DIR", str(_HARNESS_DIR / "projects")))
 _MISSION_CONTROL = _HARNESS_DIR.parent / "mission_control.json"
+# PID of the in-flight pipeline subprocess. Written on spawn, removed on exit.
+# Lets a freshly-restarted bot tell whether a prior run is still alive.
+_PIPELINE_PIDFILE = _HARNESS_DIR / ".pipeline.pid"
+
+# Terminal pipeline states (mirrors state_writer.TERMINAL_STATES).
+_TERMINAL_STATES = {"DONE", "NEEDS_FOLLOWUP", "FAILED", "CANCELED"}
 
 # Telegram message size limit
 _MAX_MSG = 4096
@@ -111,12 +117,12 @@ _state = _BotState()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _write_canceled_state() -> None:
-    """Write CANCELED terminal state to mission_control.json from the bot process.
+def _write_terminal_state(state_name: str, message: str) -> None:
+    """Patch mission_control.json to a terminal state from the bot process.
 
-    The pipeline subprocess is already dead when this is called, so state_writer
-    in that process can't flush the terminal state itself. We patch the file
-    directly, mirroring what StateWriter._set_terminal_state("CANCELED", ...) does.
+    The pipeline subprocess can't flush its own terminal state when it has been
+    killed (cancel) or died with the bot (restart orphan). We patch the file
+    directly, mirroring StateWriter._set_terminal_state(state_name, message).
     """
     try:
         state: dict = {}
@@ -124,28 +130,129 @@ def _write_canceled_state() -> None:
             state = json.loads(_MISSION_CONTROL.read_text(encoding="utf-8"))
         now_ts = time.strftime("%H:%M:%S")
         now_epoch = time.time()
-        state["pipeline_state"] = "CANCELED"
+        state["pipeline_state"] = state_name
         state["active_agent"] = None
         state["terminal"] = {
-            "state": "CANCELED",
-            "message": "Pipeline canceled by user",
+            "state": state_name,
+            "message": message,
             "recorded_at": now_ts,
         }
         events = state.get("events") or []
-        events.insert(0, {"ts": now_ts, "msg": "Pipeline canceled by user"})
+        events.insert(0, {"ts": now_ts, "msg": message})
         state["events"] = events[:100]
         for node in (state.get("agent_nodes") or {}).values():
             if node.get("status") == "running":
-                node["status"] = "canceled"
-                node["state"] = "CANCELED"
+                node["status"] = state_name.lower()
+                node["state"] = state_name
                 node["updated_at_epoch"] = now_epoch
         state["sequence"] = int(state.get("sequence") or 0) + 1
         state["updated_at_epoch"] = now_epoch
-        tmp = _MISSION_CONTROL.with_name(f".{_MISSION_CONTROL.name}.cancel.tmp")
+        tmp = _MISSION_CONTROL.with_name(f".{_MISSION_CONTROL.name}.bot.tmp")
         tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
         os.replace(tmp, _MISSION_CONTROL)
     except Exception as exc:
-        logger.warning("Failed to write canceled state: %s", exc)
+        logger.warning("Failed to write %s state: %s", state_name, exc)
+
+
+def _write_canceled_state() -> None:
+    """Write a CANCELED terminal state (user cancel via /cancel)."""
+    _write_terminal_state("CANCELED", "Pipeline canceled by user")
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if a process with the given PID is currently running.
+
+    Dependency-free: ctypes/OpenProcess on Windows (alive iff exit code is
+    STILL_ACTIVE), os.kill(pid, 0) elsewhere.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        STILL_ACTIVE = 259
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OSError):
+        return False
+    return True
+
+
+def _read_pipeline_pid() -> int | None:
+    """Read the recorded pipeline PID, or None if absent/unreadable."""
+    try:
+        return int(_PIPELINE_PIDFILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _reconcile_exited_child(returncode: int | None) -> None:
+    """Fail a run whose child exited without writing its own terminal state.
+
+    Called after the pipeline subprocess exits while the bot is alive. A clean
+    run already wrote DONE/NEEDS_FOLLOWUP and a user cancel wrote CANCELED; in
+    those cases the state is already terminal and we leave it. Only a crash or
+    external kill leaves it non-terminal — patch it FAILED.
+    """
+    try:
+        if not _MISSION_CONTROL.exists():
+            return
+        state = json.loads(_MISSION_CONTROL.read_text(encoding="utf-8"))
+        if state.get("pipeline_state") in _TERMINAL_STATES:
+            return
+        logger.warning(
+            "Pipeline exited (code=%s) without a terminal state — marking FAILED.",
+            returncode,
+        )
+        _write_terminal_state("FAILED", "Pipeline exited without a terminal state")
+    except Exception as exc:
+        logger.warning("Exited-child reconciliation failed: %s", exc)
+
+
+def _reconcile_orphaned_run() -> None:
+    """On bot startup, fail any run left mid-flight by a previous bot instance.
+
+    If mission_control.json shows a non-terminal run but its pipeline process is
+    gone (pidfile missing or PID dead), the previous bot was killed mid-run and
+    no terminal state was ever written — the dashboard would show EXECUTING
+    forever. Mark it FAILED so it converges. If the PID is still alive, a real
+    run survived the restart; leave it untouched.
+    """
+    try:
+        if not _MISSION_CONTROL.exists():
+            return
+        state = json.loads(_MISSION_CONTROL.read_text(encoding="utf-8"))
+        pipeline_state = state.get("pipeline_state")
+        if pipeline_state in _TERMINAL_STATES or pipeline_state in (None, "IDLE"):
+            return
+        pid = _read_pipeline_pid()
+        if pid is not None and _pid_alive(pid):
+            logger.warning(
+                "Startup: run still in %s with live pipeline PID %d — leaving as-is.",
+                pipeline_state, pid,
+            )
+            return
+        logger.warning(
+            "Startup: orphaned run in %s (pid=%s, not alive) — marking FAILED.",
+            pipeline_state, pid,
+        )
+        _write_terminal_state("FAILED", "Pipeline orphaned by bot restart")
+        _PIPELINE_PIDFILE.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.warning("Startup reconciliation failed: %s", exc)
 
 
 def _guard(update: Update) -> bool:
@@ -271,6 +378,10 @@ async def _queue_worker(bot) -> None:
                 _state.current = None
                 continue
             _state.proc = proc
+            try:
+                _PIPELINE_PIDFILE.write_text(str(proc.pid), encoding="utf-8")
+            except OSError as exc:
+                logger.warning("Could not write pidfile: %s", exc)
             await _send(
                 bot, job.chat_id,
                 f"Pipeline started:\n{job.label}\n\nStreaming output below...",
@@ -282,6 +393,17 @@ async def _queue_worker(bot) -> None:
             except Exception as exc:  # noqa: BLE001 — one bad job must not kill the worker
                 logger.error("Job stream failed: %s", exc)
             finally:
+                # If the child actually exited (returncode set) without writing its
+                # own terminal state (crash / external kill), patch it FAILED so the
+                # dashboard converges. Skip when returncode is None — the child is
+                # still alive (e.g. worker cancelled on shutdown, or proc.wait timed
+                # out); marking a live run FAILED would be wrong. /cancel already
+                # wrote CANCELED and a clean run wrote DONE/NEEDS_FOLLOWUP, both of
+                # which are skipped by the terminal-state check inside.
+                if proc.returncode is not None:
+                    _PIPELINE_PIDFILE.unlink(missing_ok=True)
+                    if not (_state.current and _state.current.cancelled):
+                        _reconcile_exited_child(proc.returncode)
                 _state.proc = None
                 _state.current = None
             if _state.pending:
@@ -572,6 +694,10 @@ def main() -> None:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("projects", cmd_projects))
+
+    # A prior bot instance may have been killed mid-run, leaving mission_control
+    # stuck in a non-terminal state. Converge it before we start serving.
+    _reconcile_orphaned_run()
 
     if ALLOWED_CHAT_ID:
         logger.info("Bot started — restricted to chat ID %d", ALLOWED_CHAT_ID)

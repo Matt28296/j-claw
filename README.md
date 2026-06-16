@@ -6,7 +6,7 @@ Four layers of intelligence (each with a verified fallback path):
 - **Creative Director** (Claude Haiku) — interprets intent, determines output type, produces a creative brief *(WHAT)*
 - **Technical Architect** (Claude Haiku) — chooses stack, file structure, ADRs, seeds persistent project memory *(HOW)*
 - **Orchestrator** (Gemini 2.5 Flash, free tier — falls back flash→flash-lite with backoff; Anthropic Sonnet available as provider) — translates spec into a task DAG, drives the pipeline, self-heals
-- **Worker** (local Ollama ladder: `qwen3:8b → deepseek-coder-v2:16b`, escalating to `claude-sonnet-4-6` then `claude-opus-4-8` as a budget-capped last resort) — writes all code and runs all generation tasks, local-first
+- **Worker** (local Ollama ladder: `qwen3:8b → deepseek-coder-v2:16b`, escalating to `claude-sonnet-4-6` then `claude-opus-4-8` as a budget-capped last resort; an optional flat-rate `codex::gpt-5.5` OAuth rung can sit between local and Anthropic) — writes all code and runs all generation tasks, local-first
 
 ---
 
@@ -238,8 +238,14 @@ copy harness\.env.example harness\.env
 | `OPENROUTER_API_KEY` | — | Alternative orchestrator — set `ORCHESTRATOR_PROVIDER=openrouter` |
 | `CREATIVE_DIRECTOR_MODEL` / `TECHNICAL_ARCHITECT_MODEL` / `FINAL_REVIEW_MODEL` / `EXECUTION_ERROR_MODEL` | Haiku | Per-role model overrides — bump to Sonnet for higher quality at higher cost |
 | `WORKER_MODEL` | `qwen2.5-coder:14b` | Legacy single Ollama worker model (never Claude); superseded by `WORKER_LADDER` |
-| `WORKER_LADDER` | `qwen3:8b → deepseek-coder-v2:16b → claude-sonnet-4-6 → claude-opus-4-8` | Weakest→strongest worker ladder. Base routing is always local; a task escalates one rung per retry; Opus is the last-resort rung. |
-| `MAX_PAID_WORKER_CALLS` | `15` | Hard cap on paid (non-Ollama) worker escalations per project run; once spent, tasks clamp to the strongest local rung |
+| `WORKER_LADDER` | `qwen3:8b → deepseek-coder-v2:16b → codex::gpt-5.5 → claude-sonnet-4-6 → claude-opus-4-8` | Weakest→strongest worker ladder. Base routing is always local; a task escalates one rung per retry; Opus is the last-resort rung. The `codex::` rung is inert unless `CODEX_CLI_ENABLED=true`. |
+| `MAX_PAID_WORKER_CALLS` | `15` | Hard cap on paid (non-Ollama, *metered*) worker escalations per project run; once spent, tasks clamp to the strongest local rung. The Codex OAuth rung does NOT count against this budget |
+| `CODEX_CLI_ENABLED` | `false` | Master switch for the flat-rate `codex::` OAuth worker rung (ChatGPT Plus/Pro subscription, billed per-subscription not per-token) |
+| `CODEX_MODEL` | `gpt-5.5` | Model passed to `codex exec` for the OAuth rung |
+| `CODEX_EFFORT` | — | Reasoning effort override (`low`/`medium`/`high`); empty leaves Codex's configured default |
+| `CODEX_CLI_MAX_CALLS` | `20` | Per-run capacity cap for Codex OAuth calls (separate from the dollar budget — protects the subscription's rate-limit window) |
+| `CODEX_TIMEOUT` | `300` | Seconds before a single `codex exec` subprocess is killed (fail-fast → skip rung) |
+| `CODEX_HOME` | — | Path to the Codex profile/auth dir passed into the worker subprocess (set if the worker can't see your interactive ChatGPT login) |
 | `ORCHESTRATOR_MODEL` | `claude-sonnet-4-6` | Claude model for architect, planning, and review |
 | `TECHNICAL_ARCHITECT_ENABLED` | `true` | Set `false` to skip architect pass (legacy mode) |
 | `DASHBOARD_AUTOOPEN` | `true` | Auto-open browser to dashboard when pipeline starts |
@@ -381,13 +387,15 @@ Image assets (sprites, icons, backgrounds) are generated locally via ComfyUI or 
 
 Configure: `ASSET_PROVIDER`, `COMFYUI_API_URL`, `COMFYUI_WIDTH`, `COMFYUI_HEIGHT`, `COMFYUI_CHECKPOINT` in `.env`.
 
-> ⚠️ **Known issue (RDNA4 / RX 9070 XT, 2026-06-16):** `torch-directml` computes SDXL
-> **incorrectly** on gfx1201 — generated images come out as RGB noise/static regardless of
-> precision (`--fp32-vae` and `--force-fp32` both fail). DirectML is in maintenance mode and
-> `torch-directml` is alpha; AMD points RX 9070 XT users to **ROCm** (native Windows ROCm 7.2.1
-> or WSL2). Until the backend is migrated to ROCm, local image frames on this card are not
-> usable — the rest of the pipeline (RAM scheduling, ffmpeg render, frame guard) is fixed and
-> verified. See `SESSION_HANDOFF.md` (PR #71) for the full diagnosis and plan.
+> ℹ️ **DirectML / RDNA4 note (RX 9070 XT, updated 2026-06-16):** an earlier run this session
+> produced **RGB noise** under `torch-directml` and the fix was assumed to be a ROCm migration.
+> A later same-session verification **contradicts that on the current config** — ComfyUI on a clean
+> `--directml` with the `RealVisXL_V5.0_fp16` checkpoint produced a **clean, coherent noir frame**
+> (verified by viewing the PNG). So image gen is **working on this card** as configured; the noise
+> was likely checkpoint-specific (an anime model on a noir scene) or transient. If noise recurs,
+> the contingency is **ROCm** (native Windows ROCm 7.2.1 or WSL2) + a photoreal checkpoint. The
+> harness fixes (RAM scheduling, ffmpeg cwd, frame guard) are independent and verified. See
+> `SESSION_HANDOFF.md` (PR #71) for the full history.
 
 ---
 
@@ -571,10 +579,18 @@ Every project writes to `harness/projects/<slug>/`:
 | **CANCELED state on /cancel (PR #65, 2026-06-15):** `cmd_cancel` in `telegram_bot.py` killed the subprocess but never wrote a terminal state to `mission_control.json` — the killed process can't flush state itself. Added `_write_canceled_state()`, called immediately after kill: patches the JSON file directly from the bot process, sets `pipeline_state: "CANCELED"`, clears `active_agent`, writes the `terminal` block, marks running `agent_nodes` as canceled. Dashboard now flips to CANCELED terminal state immediately instead of hanging on the last EXECUTING snapshot | ✅ |
 | **ComfyUI DirectML backend (PR #67, 2026-06-15):** `asset_worker.py` rewritten with a ComfyUI backend: async SDXL workflow (`/prompt` → poll `/history/{id}` → `/view`), auto-detects installed checkpoint, configurable resolution. `ASSET_PROVIDER=comfyui` in `.env`. `run_amd_gpu.bat` fixed (`--cpu` → `--directml`) for AMD RX 9070 XT. A1111/Forge sync path preserved for `ASSET_PROVIDER=sd` | ✅ |
 | **Local Piper TTS + FluidSynth music (PR #68, 2026-06-15):** `audio_worker.py` rewritten — replaces Coqui TTS HTTP server with Piper binary subprocess (stdin→WAV, ~0.26× realtime CPU). `music_worker.py` rewritten — replaces MusicGen/audiocraft with `midiutil` MIDI composition rendered via FluidSynth + FluidR3_GM soundfont. Genre auto-detected from creative brief (jazz/horror/epic/romance/ambient); jazz uses walking bass + Cm7 piano comps at 120 BPM (correct for noir film test). Film stack is now fully local: ComfyUI frames ✅ + Piper narration ✅ + FluidSynth music ✅ + ffmpeg assembly ✅ | ✅ |
+| **Orphaned-run reconciliation (PR #72, 2026-06-16):** a killed/restarted bot could leave in-flight runs stuck in `EXECUTING`. The bot now reconciles orphaned runs on startup so a restart can't freeze the pipeline state (the long-standing restart-orphan trap) | ✅ |
+| **gitignore bot runtime logs (PR #74, 2026-06-16):** `*.log` ignored — bot daemon logs can contain the Telegram token in API request URLs | ✅ |
+| **Media + mission-control test coverage (PR #75, 2026-06-16):** `tests/test_mission_control.py` (8) covers `state_writer` terminal transitions, deploy/cost/review recording, atomic-write cleanup, and the `dashboard.py` HTTP control endpoints; `tests/test_media_workers.py` (6) covers genre/duration detection plus real Piper-TTS/FluidSynth WAV smoke tests that skip cleanly when binaries are absent. 14/14 green | ✅ |
+| **Style-aware ComfyUI checkpoints (PR #76, 2026-06-16):** `asset_worker.py` detects realistic vs anime/cartoon from the brief and routes to the matching checkpoint (RealVisXL / Animagine) with per-style prompt modifiers; realistic is the default and the noir-film case resolves to realistic. Checkpoint selection falls back through style-match → other configured → first available → config name when ComfyUI is unreachable. New config: `COMFYUI_CHECKPOINT_REALISTIC/ANIME`, `COMFYUI_STEPS=26`, `dpmpp_2m`+`karras`. `tests/test_asset_worker.py` — 12 pure-function tests | ✅ |
+| **Codex CLI OAuth worker rung (2026-06-16):** an optional flat-rate `codex::gpt-5.5` rung between the strongest local rung and Anthropic. It shells to `codex exec` (read-only sandbox, stdin prompt, clean output via `-o`) under the operator's ChatGPT Plus/Pro subscription — so escalations that would otherwise spend Anthropic dollars are caught for free first, making Anthropic the true last resort. Budget logic is now provider-class-driven: `METERED_PROVIDERS` (anthropic/openrouter) draw on `MAX_PAID_WORKER_CALLS`; `OAUTH_PROVIDERS` (codex) draw on a separate `CODEX_CLI_MAX_CALLS` capacity counter and never spend dollars. If Codex is unavailable (not logged in / 401 / 429 / quota / exe missing / timeout) the rung latches off for the run and escalation continues cleanly — the build never blocks on interactive reauth. $0 OAuth telemetry surfaces in the cost panel as a per-provider call-count row. Off by default (`CODEX_CLI_ENABLED=false`); `test_llm_layers.py` — 7 new mocked tests. **Landed as PR #79, hardened by PR #81** (atomic latch/reserve under `_oauth_lock`, narrowed unavailability classifier, `success=False` failure telemetry; suite now **40 green**). **Live-validated 2026-06-16** — first real `codex exec` returned valid JSON in ~9s | ✅ |
+| **Media-backend telemetry labels (PR #80, 2026-06-16):** `scheduler.py` reported the pre-rewrite backends (`sd-webui`/`coqui-tts`/`musicgen`); now reports the live ones (`comfyui`/`piper-tts`/`fluidsynth`). Cosmetic dashboard fix, no behavior change | ✅ |
 
 ---
 
 ## Current Status & What's Left to Finalize
+
+**2026-06-16 (eighth session) — PRs #70–#82 merged; Codex OAuth worker rung landed + hardened + live-validated; all media backends smoke-tested green.** PR #72: orphaned-run reconciliation on bot startup (a restart can no longer freeze `EXECUTING`). PR #74: `*.log` gitignored (logs can contain the Telegram token). PR #75: 14 new tests for the media workers and mission-control state/dashboard. PR #76: `asset_worker.py` selects a realistic vs anime checkpoint from the brief (RealVisXL / Animagine) with per-style prompt modifiers and a robust checkpoint fallback chain, plus 12 pure-function tests. PR #78: style cue voting fix (film/cinematic no longer outvotes anime cues). **PRs #79 + #81: optional flat-rate `codex::gpt-5.5` OAuth worker rung** between local Ollama and Anthropic — escalations that would spend Anthropic dollars are caught for free against a ChatGPT subscription first; off by default, latches off cleanly if Codex is unavailable, $0 telemetry in the cost panel; 7 new mocked tests, hardened to **40 green** and **live-validated** (first real `codex exec` → valid JSON in ~9s). PR #80: corrected stale media-backend telemetry labels. **All six worker/media backends smoke-tested green this session** (real ComfyUI PNG, Piper WAV, FluidSynth WAV, ffmpeg render, Ollama qwen3/deepseek, live Codex). Next: factory rehearsal test #4 — film noir run (end-to-end exercise of the now-fully-local + style-aware film stack).
 
 **2026-06-15 (seventh session) — PRs #55–#68 merged; film stack fully local; factory rehearsal 3/8 done.** PR #55: context-aware dashboard control buttons. PR #57: worker escalation learning loop. PR #60: Ollama token tracking in cost panel. PR #61 (critical): `_is_ollama_unavailable()` guard — unreachable Ollama fails immediately, no silent Sonnet escalation (saved $0.50 discovered live). PR #63: three worker quality rules — Tailwind CDN conditional, DOM event listener binding, contact form placeholder guard; + manifest icon existence check. PR #65: CANCELED state written to `mission_control.json` on `/cancel`. PR #67: ComfyUI DirectML backend (`--cpu` → `--directml` on AMD RX 9070 XT, SDXL async workflow). PR #68: Piper TTS narration + FluidSynth algorithmic music — film stack is now 100% local (no Coqui/MusicGen placeholders). Three factory rehearsal tests complete: #1 portfolio deploy ✅, #2 `/continue` fix flow ✅, #3 Tony Montana v8 clean run ✅. Next: factory rehearsal test #4 — film noir run.
 

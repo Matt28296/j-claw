@@ -1,20 +1,19 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-15, seventh session** (previous: sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-16, eighth session** (previous: seventh 2026-06-15, sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#70 are MERGED to `main`.** PR #71 (film-pipeline robustness) is open.
+**PRs #10–#82 are MERGED to `main`.** PR #71 (film-pipeline robustness) merged after reconcile.
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
 
-## ✅ DONE 2026-06-16 (eighth session) — film-pipeline robustness + ComfyUI/DirectML blocker found (PR #71)
+## ✅ DONE 2026-06-16 (eighth session continued) — film-pipeline robustness fixes (PR #71, MERGED)
 
 Factory rehearsal test #4 (the noir film run) failed three times; root-caused and fixed the
-pipeline, then discovered a **hardware-level image-generation blocker** that is the real reason
-the film looks wrong. All harness fixes verified on real ffmpeg / real data; **53 tests green.**
+harness-side pipeline. All fixes verified on real ffmpeg / real data; **53 tests green.**
 
 ### Pipeline fixes (4 commits, Codex-reviewed)
 - **`scheduler.py` — RAM OOM fix** (`663878b`): mixed DAG waves now run asset (ComfyUI) and
@@ -37,28 +36,118 @@ the film looks wrong. All harness fixes verified on real ffmpeg / real data; **5
   encoding the real ComfyUI frames (`-framerate <fps> -i frames/<pattern>.png`); synthetic video
   only when no frames exist. Added the working-directory contract + one-ffmpeg-per-output rule.
 
-### ⛔ BLOCKER: local image generation is broken on this AMD card
-The film's frames are **RGB noise/static**, not noir images — confirmed by viewing the source
-PNGs and a fresh ComfyUI render. Root cause (Codex second opinion + AMD docs): **`torch-directml`
-computes SDXL incorrectly on the RX 9070 XT (RDNA4 / gfx1201).**
-- ComfyUI runs `torch 2.4.1+cpu` + DirectML shim, device `privateuseone`, VRAM reported as a fake
-  1 GiB. Pure noise persists with **both `--fp32-vae` and `--force-fp32`** → the UNet denoising is
-  numerically broken, not just the VAE.
-- DirectML is in **maintenance mode**; `torch-directml` is alpha; AMD points RX 9070 XT users to
-  **ROCm** (native Windows ROCm 7.2.1 or WSL2) for gfx1201.
-- Secondary issue: the checkpoint `animagine-xl-3.1` is an **anime** model — wrong genre for noir
-  even once the backend works.
-- `run_amd_gpu.bat` was reverted to clean `--directml` (no benefit from the precision flags).
+### Image-gen blocker — observed earlier, NOT reproducing on the current config (reconciled 2026-06-16)
+When this PR was authored, ComfyUI frames came back as **RGB noise/static** and the cause was
+attributed to `torch-directml` computing SDXL incorrectly on the RX 9070 XT (RDNA4/gfx1201), with
+a planned ROCm migration. **A later same-session verification contradicts that for the current
+setup:** after restarting ComfyUI on a clean `--directml` with the `RealVisXL_V5.0_fp16` checkpoint,
+a fresh `_comfyui_txt2img` render produced a **clean, coherent noir frame** (verified by viewing the
+PNG — see the backend smoke-test section). So:
+- The image backend is **working on the current config** — ROCm migration is a **contingency, not a
+  confirmed requirement**.
+- The earlier noise may have been checkpoint-specific (the noir scene at one point resolved to the
+  `animagine-xl-3.1` **anime** model) or a transient `torch-directml`/state issue.
+- If noise recurs in a real build, the documented fix path remains ROCm (native Windows ROCm 7.2.1
+  PyTorch in ComfyUI's env, or WSL2+ROCm fallback) + a photoreal checkpoint.
 
-**Decision (Codex + Claude aligned):** stop chasing DirectML precision/checkpoint swaps. Plan:
-1. **CPU control render** (in progress, ~10–20 min) — same SDXL model/workflow on CPU; a clean
-   image confirms the pipeline is fine and convicts DirectML.
-2. **Move to ROCm** — native Windows ROCm 7.2.1 PyTorch (replace `torch-directml` in ComfyUI's
-   Python) is the most promising; WSL2+ROCm as fallback. Then a photoreal checkpoint for noir.
+The **harness fixes above stand regardless** of the backend question — they're why the pipeline now
+**completes** (cwd/RAM/guard) instead of failing on relative frame paths or passing grey placeholder
+video. Test #4 is now gated only on a real end-to-end run, not a known harness bug.
 
-### Factory rehearsal test #4 status
-Pipeline now **completes** reliably (cwd/RAM/guard fixes), but the film cannot look correct until
-the ComfyUI backend is fixed. Test #4 is **blocked on the image-gen backend**, not the harness.
+---
+
+## ✅ DONE 2026-06-16 (eighth session continued) — every backend smoke-tested green + runtime brought up for the film test
+
+Pre-flight before factory-rehearsal test #4: each worker/media stack was exercised in isolation so a failure shows up here, not 20 minutes into a build. **All six green:**
+
+| Stack | Test | Result |
+|---|---|---|
+| Image (ComfyUI / DirectML) | real `_comfyui_txt2img` noir frame | ✅ 541 KB PNG in ~32s |
+| Audio (Piper) | real narration WAV | ✅ non-silent |
+| Music (FluidSynth) | real jazz score WAV | ✅ non-silent |
+| Video (ffmpeg) | render + ffprobe | ✅ valid streams |
+| Code — local (Ollama) | qwen3:8b generation | ✅ + deepseek-coder-v2:16b loaded |
+| Code — Codex OAuth (gpt-5.5) | **first-ever live `codex exec`** | ✅ valid JSON in ~9s |
+
+**This resolves the standing "never run live" caveat on the Codex rung — it works live.** The media smoke tests (`tests/test_media_workers.py`) are 6/6.
+
+**Runtime up:** Ollama (:11434, both rungs), ComfyUI (:8188, `--directml`), j-claw Telegram bot (`bot.bat`→`start_bot.py`, sole poller, `getWebhookInfo` clean). Dashboard (:8765) auto-starts on build.
+
+**⚠️ OpenClaw shares the j-claw Telegram token** (`8853236488`, @JarvisClaw96bot) — Telegram allows only ONE `getUpdates` poller, so the two bots CANNOT run simultaneously (→ `telegram.error.Conflict`). To run the j-claw `/run` test cycle, OpenClaw was fully stopped. **Stopping it took three steps, not one:** disable the `OpenClaw Gateway` scheduled task, kill the persistent `C:\Users\Tyler\openclaw-watchdog.ps1` (it respawns the gateway the instant it dies — disabling the task alone was NOT enough), then kill the `openclaw.mjs gateway` node proc on :18789. **Restore OpenClaw after testing:** `Enable-ScheduledTask -TaskName "OpenClaw Gateway"` + re-launch the watchdog ps1. (Clean long-term fix: give the two bots SEPARATE tokens.)
+
+**Status: environment is fully ready for test #4.** No stack will silently fall back to a placeholder.
+
+---
+
+## ✅ DONE 2026-06-16 (eighth session continued) — Codex OAuth rung hardening per second-opinion review (PR #81, MERGED `ac63575`)
+
+Codex gave the merged PR #79 an independent second-opinion review: **verdict "the change looks solid"**, no correctness-breaking bug, three hardening items. All three applied + merged in PR #81:
+
+- **Medium (latch/reservation atomicity)** — `worker.py`: the `_codex_disabled` latch check now lives INSIDE `_reserve_oauth_call`, under the same `_oauth_lock` as the capacity bump. Previously the gate read the latch and reserved capacity as two separate steps, so under parallel workers one worker could read the latch False, another flip it True after an auth/quota failure, and the first still launch `codex exec`. Now atomic. The gate keeps only the cheap `CODEX_CLI_ENABLED` short-circuit (config constant, no race).
+- **Low (over-broad classifier)** — `_is_codex_unavailable` dropped the bare `"login"` substring (it could flag a genuine capability failure — e.g. a task writing a `LoginForm` echoed on a nonzero exit — as "unavailable" and wrongly skip the rung). Kept specific phrases: `"please run codex login"`, `"login required"`, `"run codex login"`, etc.
+- **Low (failure telemetry)** — `_call_codex` now records `success=False` on any failed invocation. `calls` = attempted invocations; `success` = how many returned — so the auth/quota failures that trip the latch are now visible in `cost_summary()["oauth"]` / the dashboard.
+
+**Also:** pinned `CODEX_CLI_ENABLED=True` in `TestCodexWorkerRung.setUp` — the suite previously depended on the operator's untracked `harness/.env` (a hermeticity gap the reviewer flagged in a separate, crashed pass: on a clean checkout/CI the flag defaults False, making the routing assertions vacuous). Added a bare-`"login"` false-positive test + a failed-call telemetry test. **Suite 40 green.**
+
+> ⚠️ **Review-tooling note (worth remembering):** the Codex rescue review had an orphaned-process bug — a job whose process died ~3.5 min in still reported `status: running` for 30+ min because the companion computes `elapsed` as now-minus-start and never noticed the exit (same failure class as the bot-restart orphan). When watching a Codex job, watch the **log file's write-time**, not the `elapsed` counter. Also: the rescue subagent launched TWO parallel passes on one shared runtime, which serialized them — prefer a single pass.
+
+**~~Still the one real gap: never run live~~ — RESOLVED 2026-06-16 (see the top section).** The rung was smoke-tested live: `CODEX_CLI_ENABLED=true` + `codex login` confirmed, a real `codex exec` returned valid JSON in ~9s. The remaining unknown is only its behavior under a *real build's* escalation load (parallel workers, capacity counter, latch) — which test #4 will exercise.
+
+---
+
+## ✅ DONE 2026-06-16 (eighth session continued) — Codex CLI OAuth worker rung (PR #79, MERGED `18c228c`)
+
+**What:** an optional flat-rate worker rung that sits BETWEEN the strongest local Ollama rung and the paid Anthropic rungs. It bills against the operator's ChatGPT Plus/Pro subscription (OAuth, flat-rate) rather than per token — so escalations that would otherwise spend Anthropic dollars are caught for free first, and Anthropic becomes the true last resort.
+
+**Why this is the right shape:** the worker ladder already escalates capability failures local → cloud. The missing tier was a strong-but-free model. Codex (gpt-5.5) on a subscription is exactly that — stronger than the 16B local rung, $0 marginal cost.
+
+### Files changed (PR #79 MERGED as squash `18c228c`; later hardened by PR #81 — see above):
+- **`config.py`** — `CODEX_CLI_ENABLED` (default `false`), `CODEX_HOME`, `CODEX_MODEL=gpt-5.5`, `CODEX_EFFORT`, `CODEX_CLI_MAX_CALLS=20`, `CODEX_TIMEOUT=300`. Default `WORKER_LADDER` gains a `codex::gpt-5.5` rung (inert unless enabled). New declarative provider-class sets: `METERED_PROVIDERS={anthropic,openrouter,groq}`, `OAUTH_PROVIDERS={codex}`.
+- **`worker.py`** —
+  - `_call_codex(model, system, user) -> str` mirrors `_call_ollama`'s contract: shells `codex exec --skip-git-repo-check --ephemeral -s read-only -o <tmpfile> -m <model> -` with the combined prompt on stdin, reads the clean final message from the temp file, records $0 telemetry, bounded by `CODEX_TIMEOUT`.
+  - `_is_codex_unavailable(exc)` — classifies "skip to next rung" failures (FileNotFoundError, TimeoutExpired, 401/403/429, "not logged in", "quota", "rate limit") vs genuine capability failures (a bad-output `ValueError` returns False → does NOT skip).
+  - Budget gate rewritten by provider class: METERED → `_reserve_paid_call()` (dollar budget); OAUTH → cheap `_codex_disabled`/`CODEX_CLI_ENABLED` short-circuit then `_reserve_oauth_call(provider)` (separate `_oauth_calls_made` counter capped at `CODEX_CLI_MAX_CALLS`); ollama ungated.
+  - `_codex_disabled` module latch — first auth/quota failure in a run disables the rung so subsequent tasks skip it without re-probing (no interactive-reauth hang). `reset_paid_budget()` now also clears the oauth counters + the latch.
+  - `_call_provider` routes provider `"codex"` → `_call_codex`.
+- **`cost.py`** — `_oauth_usage` accumulator + `record_oauth_usage(provider, *, success, latency_s, tokens)` ($0, never touches `_total_usd`); `cost_summary()` gains an `"oauth"` key; reset in `reset_costs()`.
+- **`state_writer.py`** — `on_cost()` normalizes the `oauth` block (per-provider calls/success/tokens/latency_s) into `mission_control.json`.
+- **`dashboard/index.html`** — cost panel renders a `<provider> (oauth)` row showing `N calls · $0 · M tok`; the table now also shows when there are oauth rows even with zero cloud spend.
+- **`.env.example`** — documented Codex rung block + an example ladder WITH the rung.
+- **`test_llm_layers.py`** — `TestCodexWorkerRung`, **7 new mocked tests** (routing, unavailability classification, oauth ≠ dollar-budget, capacity exhaustion → escalate, `_codex_disabled` short-circuit, parse path, cost telemetry). NO subprocess/API runs. **Full suite 39 green.**
+
+### Operator setup to actually use the rung (it's OFF by default):
+1. Install the Codex CLI and `codex login` (ChatGPT Plus/Pro session).
+2. In `harness/.env`: `CODEX_CLI_ENABLED=true` and add `codex::gpt-5.5` to `WORKER_LADDER` between the last `ollama::` rung and the first `anthropic::` rung.
+3. If the worker subprocess can't see the interactive login, set `CODEX_HOME` to the Codex auth dir.
+4. Safe to leave off — when disabled or unavailable the rung is skipped and the existing local→Anthropic ladder is unchanged.
+
+**Verify:** `cd harness && ./.venv/Scripts/python.exe -m pytest test_llm_layers.py -q` → 39 passed.
+
+---
+
+## ✅ DONE 2026-06-16 (eighth session) — test coverage + style-aware image checkpoints (PRs #74–#76)
+
+### PR #75 — Test coverage for media workers + mission control
+Two new test files, **14 tests green** under `harness/.venv`:
+- `tests/test_mission_control.py` (8) — `state_writer` terminal transitions (DONE / NEEDS_FOLLOWUP / FAILED / CANCELED / no-continuation), deploy/cost/review/dynamic-check recording, atomic-write temp-file cleanup, and the `dashboard.py` HTTP control endpoints (static serving, control-status, restart/continue/retry/cancel, 400s on bad requests, held-open-client regression).
+- `tests/test_media_workers.py` (6) — genre/duration detection plus real Piper-TTS and FluidSynth WAV smoke tests that assert non-silent output and skip cleanly when the binaries/soundfont are absent.
+
+### PR #76 — Style-aware ComfyUI checkpoint selection
+`asset_worker.py` now picks the checkpoint from the brief instead of using one fixed model:
+- `_detect_image_style(task, spec)` scans objective/goal/creative brief for keywords — anime/cartoon cues → anime checkpoint, everything else → realistic (the default; the noir-film case resolves to realistic).
+- `_style_modifiers(style)` injects per-style positive prefix + extra negative quality tags.
+- `_comfyui_checkpoint(style)` selection priority: explicit `COMFYUI_CHECKPOINT` override → style-matched model when installed → other configured model when installed → first available → preferred name (trusts config when ComfyUI's list is unreachable).
+- `config.py`: `COMFYUI_CHECKPOINT_REALISTIC` (RealVisXL), `COMFYUI_CHECKPOINT_ANIME` (Animagine), tunable `COMFYUI_STEPS=26` / `COMFYUI_SAMPLER=dpmpp_2m` / `COMFYUI_SCHEDULER=karras`.
+- `tests/test_asset_worker.py` — **12 pure-function tests** (style detection incl. default/tie/noir, modifiers, checkpoint fallback ordering with the availability probe monkeypatched). No ComfyUI required.
+
+### PR #74 — gitignore bot runtime logs
+`*.log` ignored (bot daemon logs can contain the Telegram token in API request URLs). The #75 branch had to be rebased to keep this broader rule rather than the narrower per-file version it originally carried.
+
+### Also landed earlier (PRs #70, #72)
+- PR #72 — reconcile orphaned runs so a killed/restarted bot can't freeze `EXECUTING` (the long-standing restart-orphan trap).
+- PR #70 — remove `'orchestrat'` from goal-text assembly detection.
+
+**New tests this session: 26 green (14 media/mission-control + 12 asset worker); full suite 38 green.**
 
 ---
 

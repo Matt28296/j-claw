@@ -1,6 +1,11 @@
 from __future__ import annotations
 import json
 import re
+import os
+import shutil
+import subprocess
+import tempfile
+import time
 import ollama
 import httpx
 from rich.console import Console
@@ -12,6 +17,8 @@ from config import (
     WORKER_FALLBACKS, ANTHROPIC_API_KEY, OPENROUTER_API_KEY,
     WORKER_LADDER, LOCAL_FIRST_TASK_TYPES, MAX_PAID_WORKER_CALLS,
     WORKER_TASK_TIMEOUT,
+    CODEX_CLI_ENABLED, CODEX_HOME, CODEX_MODEL, CODEX_EFFORT,
+    CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT, OAUTH_PROVIDERS, METERED_PROVIDERS,
 )
 from experience_log import get_worker_hints, log_escalation
 
@@ -663,12 +670,23 @@ This stack prompt applies to auth tasks within a full-stack project. Write COMPL
 _paid_calls_made = 0
 _paid_lock = threading.Lock()
 
+# OAuth-rung (flat-rate subscription) capacity: separate from the dollar budget above.
+# OAuth providers (codex) don't consume dollars, but subscription quotas are finite, so
+# each provider gets a per-run capacity cap. _codex_disabled latches once a run hits an
+# auth/quota failure so subsequent attempts skip the rung cheaply instead of re-probing.
+_oauth_calls_made: dict[str, int] = {}
+_oauth_lock = threading.Lock()
+_codex_disabled = False
+
 
 def reset_paid_budget() -> None:
     """Reset the per-project paid (cloud) worker-call counter. Call at project start."""
-    global _paid_calls_made
+    global _paid_calls_made, _codex_disabled
     with _paid_lock:
         _paid_calls_made = 0
+    with _oauth_lock:
+        _oauth_calls_made.clear()
+        _codex_disabled = False
 
 
 def _reserve_paid_call() -> bool:
@@ -678,6 +696,24 @@ def _reserve_paid_call() -> bool:
         if _paid_calls_made >= MAX_PAID_WORKER_CALLS:
             return False
         _paid_calls_made += 1
+        return True
+
+
+def _reserve_oauth_call(provider: str) -> bool:
+    """Atomically reserve one OAuth (flat-rate) worker call against this provider's per-run
+    capacity cap. Returns False if the rung has been latched off (an auth/quota failure earlier
+    in the run) or the cap is reached. Checking the disable-latch and reserving capacity under
+    the SAME lock is what makes the latch hold under parallel workers — otherwise one worker
+    could read _codex_disabled==False, another could latch it True, and the first would still
+    reserve and launch `codex exec`. Does NOT touch the dollar budget."""
+    cap = CODEX_CLI_MAX_CALLS if provider == "codex" else 0
+    with _oauth_lock:
+        if provider == "codex" and _codex_disabled:
+            return False
+        made = _oauth_calls_made.get(provider, 0)
+        if made >= cap:
+            return False
+        _oauth_calls_made[provider] = made + 1
         return True
 
 
@@ -733,6 +769,7 @@ def execute_task(
     the legacy WORKER_PROVIDER + WORKER_FALLBACKS chain if WORKER_LADDER is unset.
     Raises ValueError immediately on bad JSON format so the scheduler can send EXECUTION_ERROR.
     """
+    global _codex_disabled  # latched off when an OAuth rung hits auth/quota mid-run
     arch  = spec.get("architecture", {})
     stack = arch.get("stack", "vanilla")
     # For full-stack projects, pick the sub-stack based on task type
@@ -787,14 +824,29 @@ def execute_task(
     last_err: Exception | None = None
     failed_attempts: list[tuple[str, str, str]] = []  # (provider, model, error)
     for provider, model in attempts:
-        # Gate paid (non-local) calls on the per-project budget. When exhausted, skip the
-        # cloud rung and fall through to the local last-ditch instead of spending more.
-        if provider != "ollama" and not _reserve_paid_call():
-            console.print(
-                f"  [yellow]Paid-call budget ({MAX_PAID_WORKER_CALLS}) exhausted — "
-                f"skipping {provider}/{model}, staying local.[/yellow]"
-            )
-            continue
+        # Gate the attempt by provider class. METERED providers (anthropic/openrouter) draw
+        # on the per-project dollar budget; OAUTH providers (codex) draw on a separate flat-rate
+        # capacity cap and never spend dollars; ollama (local) is ungated.
+        if provider in METERED_PROVIDERS:
+            if not _reserve_paid_call():
+                console.print(
+                    f"  [yellow]Paid-call budget ({MAX_PAID_WORKER_CALLS}) exhausted — "
+                    f"skipping {provider}/{model}, staying local.[/yellow]"
+                )
+                continue
+        elif provider in OAUTH_PROVIDERS:
+            # Globally off? skip without touching capacity (config constant, no race).
+            if not CODEX_CLI_ENABLED:
+                continue
+            # The disable-latch check AND the capacity reservation happen atomically inside
+            # _reserve_oauth_call, so a parallel worker can't launch `codex exec` after the
+            # latch flips. A False here means "disabled or capacity exhausted" — either way skip.
+            if not _reserve_oauth_call(provider):
+                console.print(
+                    f"  [yellow]Codex unavailable (auth/quota latch) or capacity "
+                    f"(CODEX_CLI_MAX_CALLS) exhausted — skipping, escalating to next rung.[/yellow]"
+                )
+                continue
         try:
             raw = _call_provider(provider, model, system_prompt, user_message)
             parsed = _parse_and_validate(raw, task)
@@ -826,6 +878,18 @@ def execute_task(
                     f"builds. Task will fail rather than escalate to paid cloud workers. "
                     f"({exc})"
                 ) from exc
+            # An OAuth rung that's unavailable (not logged in / quota / exe missing / timeout)
+            # must NOT hard-raise like ollama — it skips cleanly to the next rung so the build
+            # still completes. Latch the rung off for the rest of the run to avoid re-probing.
+            if provider in OAUTH_PROVIDERS and _is_codex_unavailable(exc):
+                with _oauth_lock:
+                    _codex_disabled = True
+                console.print(
+                    "  [yellow]Codex unavailable (auth/quota) — disabling Codex rung for this "
+                    "run, escalating to next rung.[/yellow]"
+                )
+                failed_attempts.append((provider, model, str(exc)[:200]))
+                continue
             last_err = exc
             failed_attempts.append((provider, model, str(exc)[:200]))
             console.print(
@@ -855,6 +919,23 @@ def _is_ollama_unavailable(exc: Exception) -> bool:
     ))
 
 
+def _is_codex_unavailable(exc: Exception) -> bool:
+    """True when the Codex OAuth rung is unavailable (exe missing, not logged in, quota /
+    rate-limit hit, or the subprocess timed out) — these mean "skip to the next rung", NOT a
+    capability failure. A bad-output ValueError is handled elsewhere and returns False here."""
+    if isinstance(exc, (FileNotFoundError, subprocess.TimeoutExpired)):
+        return True
+    msg = str(exc).lower()
+    # NB: match specific auth/quota phrases, NOT a bare "login" — bare "login" can appear in a
+    # genuine capability failure (e.g. the task is writing a login form / auth code that Codex
+    # echoes on a nonzero exit), which would wrongly skip the rung as "unavailable".
+    return any(k in msg for k in (
+        "not logged in", "unauthorized", "401", "403", "429", "rate limit",
+        "usage limit", "quota", "please run codex login", "login required",
+        "login to codex", "run codex login",
+    ))
+
+
 def _call_provider(provider: str, model: str, system: str, user: str) -> str:
     if provider == "ollama":
         return _call_ollama(model, system, user)
@@ -862,6 +943,8 @@ def _call_provider(provider: str, model: str, system: str, user: str) -> str:
         return _call_anthropic(model, system, user)
     if provider == "openrouter":
         return _call_openrouter(model, system, user)
+    if provider == "codex":
+        return _call_codex(model, system, user)
     raise ValueError(f"Unknown worker provider: {provider!r}")
 
 
@@ -891,7 +974,10 @@ def _call_anthropic(model: str, system: str, user: str) -> str:
     import anthropic
     from cache_telemetry import log_cache_usage
     from cost import record_usage
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # Bound the request like the ollama client (worker.py:_call_ollama) so a hung
+    # escalation call can't stall the pipeline indefinitely; on timeout the SDK
+    # raises and main.py's handler writes a terminal FAILED state.
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=WORKER_TASK_TIMEOUT)
     response = client.messages.create(
         model=model,
         max_tokens=8192,
@@ -922,6 +1008,68 @@ def _call_openrouter(model: str, system: str, user: str) -> str:
         response_format={"type": "json_object"},
     )
     return response.choices[0].message.content.strip()
+
+
+def _call_codex(model: str, system: str, user: str) -> str:
+    """Run a one-shot read-only `codex exec` under the operator's ChatGPT subscription.
+
+    Mirrors _call_ollama's (model, system, user) -> str contract. The combined prompt is piped
+    on stdin; the clean final message (the JSON contract) is captured via `-o <tmpfile>`. The
+    sandbox is read-only so Codex writes no project files. Telemetry is recorded at $0 via
+    record_oauth_usage. The CODEX_TIMEOUT bounds the subprocess so a hang can't stall the build.
+    """
+    exe = shutil.which("codex") or shutil.which("codex.cmd") or "codex"
+    fd, tmpfile = tempfile.mkstemp(suffix=".txt", prefix="codex_out_")
+    os.close(fd)
+    cmd = [
+        exe, "exec", "--skip-git-repo-check", "--ephemeral",
+        "-s", "read-only", "-o", tmpfile, "-m", (model or CODEX_MODEL),
+    ]
+    if CODEX_EFFORT:
+        cmd.extend(["-c", f'model_reasoning_effort="{CODEX_EFFORT}"'])
+    cmd.append("-")  # read the prompt from stdin
+
+    env = {**os.environ}
+    if CODEX_HOME:
+        env["CODEX_HOME"] = CODEX_HOME
+
+    from cost import record_oauth_usage
+    start = time.monotonic()
+    try:
+        result = subprocess.run(
+            cmd,
+            input=(system + "\n\n" + user),
+            capture_output=True,
+            text=True,
+            timeout=CODEX_TIMEOUT,
+            env=env,
+            cwd=os.getcwd(),
+        )
+        if result.returncode != 0:
+            tail = ((result.stderr or "") + (result.stdout or ""))[-300:]
+            raise RuntimeError(
+                f"codex exec exited {result.returncode}: ...{tail}"
+            )
+        try:
+            with open(tmpfile, "r", encoding="utf-8") as fh:
+                text = fh.read().strip()
+        except OSError:
+            text = ""
+        if not text:
+            text = (result.stdout or "").strip()
+        record_oauth_usage("codex", success=True, latency_s=time.monotonic() - start, tokens=0)
+        return text
+    except BaseException:
+        # Count attempted invocations too — a failed call (exe missing, timeout, nonzero exit,
+        # auth/quota) is what trips the disable-latch, so it must be visible in cost telemetry.
+        # "calls" = attempts; the success counter tracks how many of those actually returned.
+        record_oauth_usage("codex", success=False, latency_s=time.monotonic() - start, tokens=0)
+        raise
+    finally:
+        try:
+            os.remove(tmpfile)
+        except OSError:
+            pass
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

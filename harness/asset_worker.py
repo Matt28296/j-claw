@@ -24,6 +24,8 @@ from rich.console import Console
 from config import (
     SD_API_URL, ASSET_PROVIDER,
     COMFYUI_API_URL, COMFYUI_CHECKPOINT, COMFYUI_WIDTH, COMFYUI_HEIGHT,
+    COMFYUI_CHECKPOINT_REALISTIC, COMFYUI_CHECKPOINT_ANIME,
+    COMFYUI_STEPS, COMFYUI_SAMPLER, COMFYUI_SCHEDULER,
 )
 
 console = Console()
@@ -37,6 +39,22 @@ _PLACEHOLDER_COLORS = [
 ]
 _COMFYUI_POLL_INTERVAL = 4    # seconds between history polls
 _COMFYUI_TIMEOUT_STEPS = 150  # 150 × 4s = 600s max per image
+
+# Keywords that route image generation to the realistic vs anime checkpoint.
+# Keep these lists free of words that appear in nearly every brief this (film)
+# pipeline handles — e.g. "film"/"cinematic" describe the medium and shot
+# framing, not the render style, so they must not outvote an explicit "anime"
+# cue. Also avoid keywords that are substrings of another in the same list
+# ("toon" ⊂ "cartoon"), which would double-count a single match.
+_ANIME_KEYWORDS = (
+    "anime", "cartoon", "manga", "cel shaded", "cel-shaded", "comic",
+    "pixel art", "chibi", "illustrat", "hand-drawn", "stylized sketch",
+)
+_REALISTIC_KEYWORDS = (
+    "realistic", "photoreal", "photo-real", "photograph", "photo ",
+    "live action", "live-action", "documentary", "noir", "lifelike",
+    "hyperreal", "8k", "4k", "dslr", "portrait photo",
+)
 
 
 def can_generate() -> bool:
@@ -102,6 +120,8 @@ def generate_assets(task, spec: dict, output_dir: Path) -> list[str]:
 
     goal = spec.get("goal", "scene")
     style_hint = _extract_style(spec)
+    img_style = _detect_image_style(task, spec)  # "realistic" | "anime"
+    quality_pos, quality_neg = _style_modifiers(img_style)
     brief = spec.get("creative_brief", {}) if spec else {}
     written: list[str] = []
 
@@ -123,18 +143,21 @@ def generate_assets(task, spec: dict, output_dir: Path) -> list[str]:
         if palette:
             prompt += f", {palette} color palette"
         prompt = f"{prompt}, {asset_name} for {goal}, {style_hint}, no text"
+        prompt = f"{quality_pos}, {prompt}"
         negative = (
             "blurry, low quality, distorted, text, watermark, "
-            "signature, background clutter, ugly, deformed"
+            f"signature, background clutter, ugly, deformed, {quality_neg}"
         )
 
-        console.print(f"  [dim]Generating asset via {ASSET_PROVIDER}: {file_path}…[/dim]")
+        console.print(
+            f"  [dim]Generating asset via {ASSET_PROVIDER} ({img_style} style): {file_path}…[/dim]"
+        )
         dest = output_dir / file_path
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         try:
             if ASSET_PROVIDER == "comfyui":
-                image_data = _comfyui_txt2img(prompt[:600], negative)
+                image_data = _comfyui_txt2img(prompt[:600], negative, img_style)
             else:
                 image_data = _a1111_txt2img(prompt[:800], negative)
 
@@ -155,32 +178,48 @@ def generate_assets(task, spec: dict, output_dir: Path) -> list[str]:
 
 # ── ComfyUI backend ───────────────────────────────────────────────────────────
 
-def _comfyui_checkpoint() -> str:
-    """Return the checkpoint name to use: COMFYUI_CHECKPOINT env var or the
-    first model listed by ComfyUI's object_info endpoint."""
-    if COMFYUI_CHECKPOINT:
-        return COMFYUI_CHECKPOINT
+def _available_checkpoints() -> list[str]:
+    """Checkpoints ComfyUI reports as installed (empty list if it can't be reached)."""
     try:
         url = f"{COMFYUI_API_URL}/object_info/CheckpointLoaderSimple"
         with urllib.request.urlopen(url, timeout=5) as resp:
             data = json.loads(resp.read())
-        models = data["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
-        if models:
-            return models[0]
+        return data["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0] or []
     except Exception:
-        pass
-    return ""
+        return []
 
 
-def _comfyui_txt2img(prompt: str, negative: str) -> bytes | None:
+def _comfyui_checkpoint(style: str = "realistic") -> str:
+    """Pick the checkpoint for the requested style.
+
+    Priority: explicit COMFYUI_CHECKPOINT override → the style-matched model when
+    installed → the other configured model when installed → first available →
+    the preferred name (trusting config when ComfyUI's list is unavailable).
+    """
+    if COMFYUI_CHECKPOINT:
+        return COMFYUI_CHECKPOINT
+    available = _available_checkpoints()
+    preferred = COMFYUI_CHECKPOINT_ANIME if style == "anime" else COMFYUI_CHECKPOINT_REALISTIC
+    # Use the style-matched checkpoint when it's installed (or when we can't
+    # verify the list — trust the configured name).
+    if preferred and (preferred in available or not available):
+        return preferred
+    # Style-matched model not installed: fall back to the other configured one.
+    other = COMFYUI_CHECKPOINT_REALISTIC if style == "anime" else COMFYUI_CHECKPOINT_ANIME
+    if other and other in available:
+        return other
+    return available[0] if available else (preferred or "")
+
+
+def _comfyui_txt2img(prompt: str, negative: str, style: str = "realistic") -> bytes | None:
     """Submit a txt2img workflow to ComfyUI and return PNG bytes.
 
     Uses the ComfyUI prompt API (async): POST /prompt → poll /history/{id}
-    → GET /view for the output image.
+    → GET /view for the output image. ``style`` selects the checkpoint.
     """
     import uuid
 
-    checkpoint = _comfyui_checkpoint()
+    checkpoint = _comfyui_checkpoint(style)
     if not checkpoint:
         raise RuntimeError("No ComfyUI checkpoint available")
 
@@ -217,10 +256,10 @@ def _comfyui_txt2img(prompt: str, negative: str) -> bytes | None:
                 "model": ["4", 0],
                 "negative": ["7", 0],
                 "positive": ["6", 0],
-                "sampler_name": "euler_ancestral",
-                "scheduler": "normal",
+                "sampler_name": COMFYUI_SAMPLER,
+                "scheduler": COMFYUI_SCHEDULER,
                 "seed": seed,
-                "steps": 20,
+                "steps": COMFYUI_STEPS,
             },
         },
         "8": {
@@ -309,6 +348,45 @@ def _a1111_txt2img(prompt: str, negative: str) -> bytes | None:
 
 
 # ── Style extraction ──────────────────────────────────────────────────────────
+
+def _detect_image_style(task, spec: dict) -> str:
+    """Decide whether the brief wants a 'realistic' or 'anime' image.
+
+    Scans the objective, goal, and creative brief for style keywords. Anime/
+    cartoon cues route to the anime checkpoint; everything else (the default)
+    routes to the realistic checkpoint.
+    """
+    spec = spec or {}
+    brief = spec.get("creative_brief", {}) or {}
+    visual = brief.get("visual_identity") or {}
+    text = " ".join(str(x) for x in [
+        getattr(task, "objective", ""),
+        spec.get("goal", ""),
+        brief.get("genre", ""), brief.get("tone", ""),
+        brief.get("visual_style", ""), brief.get("style", ""),
+        visual.get("style", ""),
+        " ".join(spec.get("constraints", []) or []),
+        " ".join(spec.get("features", []) or []),
+    ]).lower()
+
+    anime_hits = sum(1 for k in _ANIME_KEYWORDS if k in text)
+    real_hits = sum(1 for k in _REALISTIC_KEYWORDS if k in text)
+    return "anime" if anime_hits > real_hits else "realistic"
+
+
+def _style_modifiers(style: str) -> tuple[str, str]:
+    """Return (positive_prefix, extra_negative) quality tags for the style."""
+    if style == "anime":
+        return (
+            "masterpiece, best quality, highly detailed, anime style, vibrant",
+            "photorealistic, realistic photo, 3d render",
+        )
+    return (
+        "masterpiece, best quality, highly detailed, sharp focus, photorealistic, "
+        "professional photograph, realistic skin texture, natural lighting",
+        "anime, cartoon, illustration, painting, sketch, 3d render, cgi",
+    )
+
 
 def _extract_style(spec: dict) -> str:
     hints = []
