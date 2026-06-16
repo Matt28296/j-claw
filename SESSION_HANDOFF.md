@@ -5,18 +5,18 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#78 are MERGED to `main`.**
+**PRs #10–#78 are MERGED to `main`.** PR #79 (Codex OAuth worker rung) is OPEN — see below.
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
 
-## ✅ DONE 2026-06-16 (eighth session continued) — Codex CLI OAuth worker rung (branch `feat/codex-worker-rung`)
+## ✅ DONE 2026-06-16 (eighth session continued) — Codex CLI OAuth worker rung (PR #79, branch `feat/codex-worker-rung`)
 
 **What:** an optional flat-rate worker rung that sits BETWEEN the strongest local Ollama rung and the paid Anthropic rungs. It bills against the operator's ChatGPT Plus/Pro subscription (OAuth, flat-rate) rather than per token — so escalations that would otherwise spend Anthropic dollars are caught for free first, and Anthropic becomes the true last resort.
 
 **Why this is the right shape:** the worker ladder already escalates capability failures local → cloud. The missing tier was a strong-but-free model. Codex (gpt-5.5) on a subscription is exactly that — stronger than the 16B local rung, $0 marginal cost.
 
-### Files changed (all uncommitted on this branch as of handoff write):
+### Files changed (committed as `56be3c4`, pushed; PR #79 OPEN, mergeable/clean, full suite 39 green):
 - **`config.py`** — `CODEX_CLI_ENABLED` (default `false`), `CODEX_HOME`, `CODEX_MODEL=gpt-5.5`, `CODEX_EFFORT`, `CODEX_CLI_MAX_CALLS=20`, `CODEX_TIMEOUT=300`. Default `WORKER_LADDER` gains a `codex::gpt-5.5` rung (inert unless enabled). New declarative provider-class sets: `METERED_PROVIDERS={anthropic,openrouter,groq}`, `OAUTH_PROVIDERS={codex}`.
 - **`worker.py`** —
   - `_call_codex(model, system, user) -> str` mirrors `_call_ollama`'s contract: shells `codex exec --skip-git-repo-check --ephemeral -s read-only -o <tmpfile> -m <model> -` with the combined prompt on stdin, reads the clean final message from the temp file, records $0 telemetry, bounded by `CODEX_TIMEOUT`.
