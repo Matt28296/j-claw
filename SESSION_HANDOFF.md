@@ -5,7 +5,7 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#98 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (difficulty routing + per-role quotas) is next. Open PRs: #89 (remove dead `groq` config — complements #98's "groq confirmed dead" finding, ready to merge) and #73 (DRAFT operator WIP salvage — leave parked).
+**PRs #10–#99 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs sync #99, + dead-`groq`-config removal #89). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (difficulty routing + per-role quotas) is next. Only open PR: #73 (DRAFT operator WIP salvage — leave parked).
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
