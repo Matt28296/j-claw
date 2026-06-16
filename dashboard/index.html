@@ -1385,9 +1385,14 @@ function renderCostPanel(d) {
   const ollamaIn  = ollama.input  || 0;
   const ollamaOut = ollama.output || 0;
 
+  // Zero-cost OAuth/flat-rate providers (e.g. codex on a ChatGPT subscription):
+  // surface call counts (and tokens if reported) even though $ spend is 0.
+  const oauth = cost.oauth || {};
+  const oauthRows = Object.entries(oauth).filter(([, r]) => (r && (r.calls || 0)) > 0);
+
   const modelRows = Object.entries(modelMap);
   const tableEl = document.getElementById('cost-model-table');
-  if (modelRows.length || ollamaIn || ollamaOut) {
+  if (modelRows.length || ollamaIn || ollamaOut || oauthRows.length) {
     const cloudTokenRow = (tokIn || tokOut)
       ? `<tr style="border-top:1px solid var(--border);opacity:.7">
            <td colspan="2" style="color:var(--muted)">cloud tokens</td>
@@ -1398,6 +1403,16 @@ function renderCostPanel(d) {
            <td colspan="2" style="color:var(--muted)">local (ollama)</td>
            <td>${ollamaIn > 0 ? ollamaIn.toLocaleString() : '-'} in / ${ollamaOut > 0 ? ollamaOut.toLocaleString() : '-'} out</td>
          </tr>` : '';
+    const oauthRowsHtml = oauthRows.map(([prov, r]) => {
+      const calls = r.calls || 0;
+      const toks  = r.tokens || 0;
+      const detail = `${calls} call${calls === 1 ? '' : 's'} · $0` +
+        (toks > 0 ? ` · ${toks.toLocaleString()} tok` : '');
+      return `<tr style="opacity:.7">
+           <td colspan="2" style="color:var(--muted)">${esc(prov)} (oauth)</td>
+           <td>${detail}</td>
+         </tr>`;
+    }).join('');
     tableEl.innerHTML = `<table class="cost-table">
       <thead><tr>
         <th>Model</th><th colspan="2">Cost</th>
@@ -1411,6 +1426,7 @@ function renderCostPanel(d) {
         ).join('')}
         ${cloudTokenRow}
         ${ollamaTokenRow}
+        ${oauthRowsHtml}
       </tbody>
     </table>`;
   } else {

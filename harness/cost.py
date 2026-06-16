@@ -53,6 +53,10 @@ _by_model: dict[str, float] = {}
 _tokens: dict[str, int] = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
 _calls: int = 0
 _ollama_tokens: dict[str, int] = {"input": 0, "output": 0}
+# Zero-cost OAuth/flat-rate provider telemetry (e.g. codex on a ChatGPT
+# subscription): per-provider call counts / success / tokens / latency. These
+# bill against a subscription, not per token, so they never touch _total_usd.
+_oauth_usage: dict[str, dict] = {}
 
 
 def reset_costs() -> None:
@@ -66,6 +70,7 @@ def reset_costs() -> None:
         _tokens[k] = 0
     for k in _ollama_tokens:
         _ollama_tokens[k] = 0
+    _oauth_usage.clear()
 
 
 def call_cost(usage, model: str | None) -> float:
@@ -111,6 +116,21 @@ def record_ollama_usage(prompt_tokens: int, eval_tokens: int) -> None:
     _ollama_tokens["output"] += eval_tokens or 0
 
 
+def record_oauth_usage(provider: str, *, success: bool = True,
+                       latency_s: float = 0.0, tokens: int = 0) -> None:
+    """Accumulate one OAuth/flat-rate provider call (e.g. 'codex'). $0 cost —
+    these bill against a subscription, not per token, so this never touches
+    _total_usd. Tracks call count / successes / tokens / latency per provider."""
+    rec = _oauth_usage.setdefault(
+        provider, {"calls": 0, "success": 0, "tokens": 0, "latency_s": 0.0}
+    )
+    rec["calls"] += 1
+    if success:
+        rec["success"] += 1
+    rec["tokens"] += tokens or 0
+    rec["latency_s"] += latency_s or 0.0
+
+
 def cost_summary() -> dict:
     """Snapshot of accumulated cost for this run."""
     return {
@@ -120,6 +140,7 @@ def cost_summary() -> dict:
         "by_model": {k: round(v, 4) for k, v in sorted(_by_model.items(), key=lambda kv: -kv[1])},
         "tokens": dict(_tokens),
         "ollama_tokens": dict(_ollama_tokens),
+        "oauth": {p: dict(rec) for p, rec in _oauth_usage.items()},
     }
 
 

@@ -57,7 +57,7 @@ WORKER_FALLBACKS: list[tuple[str, str]] = _parse_fallbacks(
 WORKER_LADDER: list[tuple[str, str]] = _parse_fallbacks(
     os.getenv(
         "WORKER_LADDER",
-        "ollama::qwen3:8b,ollama::qwen2.5-coder:14b,anthropic::claude-sonnet-4-6",
+        "ollama::qwen3:8b,ollama::qwen2.5-coder:14b,codex::gpt-5.5,anthropic::claude-sonnet-4-6",
     )
 )
 
@@ -65,6 +65,28 @@ WORKER_LADDER: list[tuple[str, str]] = _parse_fallbacks(
 # to a cloud rung is gated by this budget; once spent, tasks clamp to the strongest local rung
 # instead of paying. Prevents a multi-task project from silently burning the API budget.
 MAX_PAID_WORKER_CALLS: int = int(os.getenv("MAX_PAID_WORKER_CALLS", "15"))
+
+# Codex CLI worker rung — a flat-rate OAuth (ChatGPT Plus/Pro) escalation tier that sits
+# ABOVE local Ollama and BELOW Anthropic in WORKER_LADDER. Because it bills against a
+# subscription rather than per token, escalations that would otherwise cost Anthropic dollars
+# are caught here for free first; Anthropic becomes the true last resort. Codex calls are
+# shelled out to `codex exec` in non-interactive mode (see worker._call_codex).
+CODEX_CLI_ENABLED: bool = os.getenv("CODEX_CLI_ENABLED", "false").lower() == "true"
+CODEX_HOME: str = os.getenv("CODEX_HOME", "")          # empty = use codex's own default (~/.codex)
+CODEX_MODEL: str = os.getenv("CODEX_MODEL", "gpt-5.5")
+CODEX_EFFORT: str = os.getenv("CODEX_EFFORT", "")      # empty = don't override codex's configured reasoning effort
+# Per-run capacity cap. NOT a dollar budget — Codex is flat-rate. This protects the
+# subscription's flat-rate rate-limit window so a multi-task run can't exhaust the quota and
+# trip an interactive reauth (which would hang the build).
+CODEX_CLI_MAX_CALLS: int = int(os.getenv("CODEX_CLI_MAX_CALLS", "20"))
+CODEX_TIMEOUT: int = int(os.getenv("CODEX_TIMEOUT", "300"))  # seconds per codex exec subprocess
+
+# Provider-class sets that make the worker's budget logic declarative. METERED providers bill
+# per token and consume the dollar budget MAX_PAID_WORKER_CALLS; OAUTH providers are flat-rate
+# subscriptions that consume a SEPARATE per-run capacity counter (CODEX_CLI_MAX_CALLS) instead,
+# so they never draw down the dollar budget but are still bounded against quota exhaustion.
+METERED_PROVIDERS: set[str] = {"anthropic", "openrouter", "groq"}
+OAUTH_PROVIDERS: set[str] = {"codex"}
 
 # Maximum tasks to run in parallel (1 = sequential, 2-4 = parallel)
 MAX_PARALLEL_WORKERS: int = int(os.getenv("MAX_PARALLEL_WORKERS", "4"))

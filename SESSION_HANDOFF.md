@@ -5,8 +5,38 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#76 are MERGED to `main`.**
+**PRs #10–#78 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-16 (eighth session continued) — Codex CLI OAuth worker rung (branch `feat/codex-worker-rung`)
+
+**What:** an optional flat-rate worker rung that sits BETWEEN the strongest local Ollama rung and the paid Anthropic rungs. It bills against the operator's ChatGPT Plus/Pro subscription (OAuth, flat-rate) rather than per token — so escalations that would otherwise spend Anthropic dollars are caught for free first, and Anthropic becomes the true last resort.
+
+**Why this is the right shape:** the worker ladder already escalates capability failures local → cloud. The missing tier was a strong-but-free model. Codex (gpt-5.5) on a subscription is exactly that — stronger than the 16B local rung, $0 marginal cost.
+
+### Files changed (all uncommitted on this branch as of handoff write):
+- **`config.py`** — `CODEX_CLI_ENABLED` (default `false`), `CODEX_HOME`, `CODEX_MODEL=gpt-5.5`, `CODEX_EFFORT`, `CODEX_CLI_MAX_CALLS=20`, `CODEX_TIMEOUT=300`. Default `WORKER_LADDER` gains a `codex::gpt-5.5` rung (inert unless enabled). New declarative provider-class sets: `METERED_PROVIDERS={anthropic,openrouter,groq}`, `OAUTH_PROVIDERS={codex}`.
+- **`worker.py`** —
+  - `_call_codex(model, system, user) -> str` mirrors `_call_ollama`'s contract: shells `codex exec --skip-git-repo-check --ephemeral -s read-only -o <tmpfile> -m <model> -` with the combined prompt on stdin, reads the clean final message from the temp file, records $0 telemetry, bounded by `CODEX_TIMEOUT`.
+  - `_is_codex_unavailable(exc)` — classifies "skip to next rung" failures (FileNotFoundError, TimeoutExpired, 401/403/429, "not logged in", "quota", "rate limit") vs genuine capability failures (a bad-output `ValueError` returns False → does NOT skip).
+  - Budget gate rewritten by provider class: METERED → `_reserve_paid_call()` (dollar budget); OAUTH → cheap `_codex_disabled`/`CODEX_CLI_ENABLED` short-circuit then `_reserve_oauth_call(provider)` (separate `_oauth_calls_made` counter capped at `CODEX_CLI_MAX_CALLS`); ollama ungated.
+  - `_codex_disabled` module latch — first auth/quota failure in a run disables the rung so subsequent tasks skip it without re-probing (no interactive-reauth hang). `reset_paid_budget()` now also clears the oauth counters + the latch.
+  - `_call_provider` routes provider `"codex"` → `_call_codex`.
+- **`cost.py`** — `_oauth_usage` accumulator + `record_oauth_usage(provider, *, success, latency_s, tokens)` ($0, never touches `_total_usd`); `cost_summary()` gains an `"oauth"` key; reset in `reset_costs()`.
+- **`state_writer.py`** — `on_cost()` normalizes the `oauth` block (per-provider calls/success/tokens/latency_s) into `mission_control.json`.
+- **`dashboard/index.html`** — cost panel renders a `<provider> (oauth)` row showing `N calls · $0 · M tok`; the table now also shows when there are oauth rows even with zero cloud spend.
+- **`.env.example`** — documented Codex rung block + an example ladder WITH the rung.
+- **`test_llm_layers.py`** — `TestCodexWorkerRung`, **7 new mocked tests** (routing, unavailability classification, oauth ≠ dollar-budget, capacity exhaustion → escalate, `_codex_disabled` short-circuit, parse path, cost telemetry). NO subprocess/API runs. **Full suite 39 green.**
+
+### Operator setup to actually use the rung (it's OFF by default):
+1. Install the Codex CLI and `codex login` (ChatGPT Plus/Pro session).
+2. In `harness/.env`: `CODEX_CLI_ENABLED=true` and add `codex::gpt-5.5` to `WORKER_LADDER` between the last `ollama::` rung and the first `anthropic::` rung.
+3. If the worker subprocess can't see the interactive login, set `CODEX_HOME` to the Codex auth dir.
+4. Safe to leave off — when disabled or unavailable the rung is skipped and the existing local→Anthropic ladder is unchanged.
+
+**Verify:** `cd harness && ./.venv/Scripts/python.exe -m pytest test_llm_layers.py -q` → 39 passed.
 
 ---
 
