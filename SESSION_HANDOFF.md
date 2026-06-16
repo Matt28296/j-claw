@@ -5,8 +5,60 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#68 are MERGED to `main`.**
+**PRs #10–#70 are MERGED to `main`.** PR #71 (film-pipeline robustness) is open.
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-16 (eighth session) — film-pipeline robustness + ComfyUI/DirectML blocker found (PR #71)
+
+Factory rehearsal test #4 (the noir film run) failed three times; root-caused and fixed the
+pipeline, then discovered a **hardware-level image-generation blocker** that is the real reason
+the film looks wrong. All harness fixes verified on real ffmpeg / real data; **53 tests green.**
+
+### Pipeline fixes (4 commits, Codex-reviewed)
+- **`scheduler.py` — RAM OOM fix** (`663878b`): mixed DAG waves now run asset (ComfyUI) and
+  code (Ollama/deepseek) tasks in **sequential sub-batches**; ComfyUI's resident checkpoint is
+  freed (`asset_worker.free_comfyui_models()` → ComfyUI `/free`) before the ~8 GB code model
+  loads. Warns if ComfyUI is up but won't free. Was: deepseek OOM ("requires 8.2 GiB") mid-heal.
+- **`video_worker.py` — ffmpeg cwd + binding** (`4f31841`): ffmpeg now runs with
+  `cwd=output_dir` (absolute), so render scripts' relative inputs (`frames/%05d.png`) resolve.
+  This — not deepseek's script quality — was why scenes kept failing. Also: bind each declared
+  output to the ffmpeg line that names it (fail closed when ambiguous), join `\`-continued
+  multi-line commands, and only overwrite the output token when it's actually the output path.
+- **`video_worker.py` — synthetic-render guard** (`b93f837`, hardened in `51370d1`): a film
+  render that sources video from a synthetic `lavfi`/`color=`/`testsrc`/`smptebars` generator
+  while real ComfyUI frames exist is now **failed** (so the heal loop rewrites it to encode the
+  frames) instead of passing grey placeholder video. Detection tokenizes `-i` inputs (catches
+  `color=black`/`color=gray`, not just `color=c`); synthetic `aevalsrc` audio beds still allowed.
+- **`worker.py` + `orchestrator.txt` — frame contract** (`51370d1`): the code-worker film prompt
+  previously told the worker to use synthetic `color=`/`testsrc` sources and NOT reference frame
+  files — directly contradicting the guard and preventing heal convergence. Rewritten to mandate
+  encoding the real ComfyUI frames (`-framerate <fps> -i frames/<pattern>.png`); synthetic video
+  only when no frames exist. Added the working-directory contract + one-ffmpeg-per-output rule.
+
+### ⛔ BLOCKER: local image generation is broken on this AMD card
+The film's frames are **RGB noise/static**, not noir images — confirmed by viewing the source
+PNGs and a fresh ComfyUI render. Root cause (Codex second opinion + AMD docs): **`torch-directml`
+computes SDXL incorrectly on the RX 9070 XT (RDNA4 / gfx1201).**
+- ComfyUI runs `torch 2.4.1+cpu` + DirectML shim, device `privateuseone`, VRAM reported as a fake
+  1 GiB. Pure noise persists with **both `--fp32-vae` and `--force-fp32`** → the UNet denoising is
+  numerically broken, not just the VAE.
+- DirectML is in **maintenance mode**; `torch-directml` is alpha; AMD points RX 9070 XT users to
+  **ROCm** (native Windows ROCm 7.2.1 or WSL2) for gfx1201.
+- Secondary issue: the checkpoint `animagine-xl-3.1` is an **anime** model — wrong genre for noir
+  even once the backend works.
+- `run_amd_gpu.bat` was reverted to clean `--directml` (no benefit from the precision flags).
+
+**Decision (Codex + Claude aligned):** stop chasing DirectML precision/checkpoint swaps. Plan:
+1. **CPU control render** (in progress, ~10–20 min) — same SDXL model/workflow on CPU; a clean
+   image confirms the pipeline is fine and convicts DirectML.
+2. **Move to ROCm** — native Windows ROCm 7.2.1 PyTorch (replace `torch-directml` in ComfyUI's
+   Python) is the most promising; WSL2+ROCm as fallback. Then a photoreal checkpoint for noir.
+
+### Factory rehearsal test #4 status
+Pipeline now **completes** reliably (cwd/RAM/guard fixes), but the film cannot look correct until
+the ComfyUI backend is fixed. Test #4 is **blocked on the image-gen backend**, not the harness.
 
 ---
 

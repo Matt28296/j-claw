@@ -381,6 +381,14 @@ Image assets (sprites, icons, backgrounds) are generated locally via ComfyUI or 
 
 Configure: `ASSET_PROVIDER`, `COMFYUI_API_URL`, `COMFYUI_WIDTH`, `COMFYUI_HEIGHT`, `COMFYUI_CHECKPOINT` in `.env`.
 
+> ⚠️ **Known issue (RDNA4 / RX 9070 XT, 2026-06-16):** `torch-directml` computes SDXL
+> **incorrectly** on gfx1201 — generated images come out as RGB noise/static regardless of
+> precision (`--fp32-vae` and `--force-fp32` both fail). DirectML is in maintenance mode and
+> `torch-directml` is alpha; AMD points RX 9070 XT users to **ROCm** (native Windows ROCm 7.2.1
+> or WSL2). Until the backend is migrated to ROCm, local image frames on this card are not
+> usable — the rest of the pipeline (RAM scheduling, ffmpeg render, frame guard) is fixed and
+> verified. See `SESSION_HANDOFF.md` (PR #71) for the full diagnosis and plan.
+
 ---
 
 ## Audio Generation
