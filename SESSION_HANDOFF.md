@@ -5,7 +5,7 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#95 are MERGED to `main`** (incl. #91 Grok rung, #92 Phase-0 instrumentation, #94 Phase-1 learning-loop, #95 Phase-2 planning_call). Phase 3 (CD/TA → Codex-first) lands in this PR.
+**PRs #10–#96 are MERGED to `main`** (incl. #91 Grok rung, #92 Phase-0 instrumentation, #94 Phase-1 learning-loop, #95 Phase-2 planning_call, #96 Phase-3 CD/TA Codex-first). Role-routing overhaul Phases 0–3 are merged; Phase 4 (difficulty routing + per-role quotas) is next.
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
