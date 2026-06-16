@@ -1547,6 +1547,53 @@ class TestPlanningCall(unittest.TestCase):
                 w.planning_call("s", "u", self._ok)
 
 
+class TestRoleCutover(unittest.TestCase):
+    """Phase 3: Creative Director + Technical Architect route through planning_call (Codex-first),
+    preserving their existing validation as the fallback boundary. planning_call is mocked."""
+
+    def test_creative_director_routes_through_planning_call(self):
+        import creative_director as cd, worker as w
+        brief = {"output_type": "web", "features": ["a"], "scale": "mvp"}
+        captured = {}
+
+        def fake_planning(system, user, validate_fn, *, role=None, **kw):
+            captured["role"] = role
+            captured["validate_fn"] = validate_fn
+            return brief
+
+        with patch.object(cd, "ANTHROPIC_API_KEY", "test-key"), \
+             patch.object(w, "planning_call", side_effect=fake_planning):
+            out = cd.CreativeDirector().interpret("build me a site")
+
+        self.assertEqual(out, brief)
+        self.assertEqual(captured["role"], "creative")
+        # The validation handed to planning_call must reject a brief missing required fields…
+        with self.assertRaises(ValueError):
+            captured["validate_fn"]({"features": ["a"]})  # missing output_type
+        captured["validate_fn"](brief)  # …and accept a valid one (no raise)
+
+    def test_technical_architect_routes_through_planning_call(self):
+        import tempfile
+        from pathlib import Path
+        import technical_architect as ta, worker as w
+        spec = {"confirmed_stack": "vanilla", "file_structure": [], "adrs_to_create": []}
+        captured = {}
+
+        def fake_planning(system, user, validate_fn, *, role=None, **kw):
+            captured["role"] = role
+            return spec
+
+        with patch.object(ta, "ANTHROPIC_API_KEY", "test-key"), \
+             patch.object(w, "planning_call", side_effect=fake_planning), \
+             patch.object(ta, "ProjectMemory") as mock_pm, \
+             tempfile.TemporaryDirectory() as tmp:
+            out = ta.TechnicalArchitect().review({"output_type": "web"}, "intent", Path(tmp))
+
+        self.assertEqual(out["confirmed_stack"], "vanilla")
+        self.assertEqual(captured["role"], "architect")
+        mock_pm.assert_called()  # ProjectMemory is still seeded after planning
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Runner
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1567,6 +1614,7 @@ if __name__ == "__main__":
         TestGrokWorkerRung,
         TestRoleMetrics,
         TestPlanningCall,
+        TestRoleCutover,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 

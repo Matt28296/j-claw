@@ -1088,7 +1088,7 @@ def planning_call(
     # Tier 2/3 — Anthropic Sonnet → Opus (paid), validated. fallback=True marks the cross-tier hop.
     for model in (sonnet_model, opus_model):
         try:
-            raw = _call_anthropic(model, system, user)
+            raw = _call_anthropic(model, system, user, label=role)
             parsed = _loads_tolerant(_strip_fences(raw))
             validate_fn(parsed)
             record_role_event(role, provider="anthropic", model=model, success=True, fallback=True)
@@ -1136,7 +1136,7 @@ def _call_ollama(model: str, system: str, user: str) -> str:
     return response.message.content.strip()
 
 
-def _call_anthropic(model: str, system: str, user: str) -> str:
+def _call_anthropic(model: str, system: str, user: str, label: str = "worker-esc") -> str:
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY not set — cannot use anthropic worker provider")
     import anthropic
@@ -1145,6 +1145,8 @@ def _call_anthropic(model: str, system: str, user: str) -> str:
     # Bound the request like the ollama client (worker.py:_call_ollama) so a hung
     # escalation call can't stall the pipeline indefinitely; on timeout the SDK
     # raises and main.py's handler writes a terminal FAILED state.
+    # `label` attributes the cost to the calling role (worker-esc by default; planning_call
+    # passes the planning role so CD/TA/orchestrator Anthropic fallbacks aren't mis-labelled).
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=WORKER_TASK_TIMEOUT)
     response = client.messages.create(
         model=model,
@@ -1152,8 +1154,8 @@ def _call_anthropic(model: str, system: str, user: str) -> str:
         system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": user}],
     )
-    log_cache_usage(response.usage, "worker-esc")
-    record_usage(response.usage, model, "worker-esc")
+    log_cache_usage(response.usage, label)
+    record_usage(response.usage, model, label)
     return response.content[0].text.strip()
 
 
