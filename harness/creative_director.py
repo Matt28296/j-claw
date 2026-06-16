@@ -1,22 +1,17 @@
 from __future__ import annotations
-import json
-import time
-from pathlib import Path
-import anthropic
 from rich.console import Console
 
-from config import CREATIVE_DIRECTOR_MODEL, ANTHROPIC_API_KEY, CREATIVE_DIRECTOR_PROMPT_PATH
-from cache_telemetry import log_cache_usage
-from cost import record_usage, record_role_event
+from config import CREATIVE_DIRECTOR_PROMPT_PATH
 
 console = Console()
 
 
 class CreativeDirector:
     def __init__(self) -> None:
-        if not ANTHROPIC_API_KEY:
-            raise RuntimeError("ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in.")
-        self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        # No ANTHROPIC_API_KEY requirement: interpret() plans Codex-first ($0) via planning_call.
+        # The Anthropic fallback inside planning_call raises only if it is actually reached without
+        # a key — so the Creative Director can run key-free whenever Codex is available (Codex-review
+        # fix: the old hard requirement blocked Codex-first planning when no Anthropic key was set).
         self._system_prompt = CREATIVE_DIRECTOR_PROMPT_PATH.read_text(encoding="utf-8")
 
     def interpret(self, intent: str) -> dict:
@@ -48,14 +43,3 @@ class CreativeDirector:
             f"features=[green]{len(brief['features'])}[/green]"
         )
         return brief
-
-
-def _strip_fences(text: str) -> str:
-    """Remove accidental ```json ... ``` wrapping that the model sometimes adds."""
-    if not text.startswith("```"):
-        return text
-    lines = text.splitlines()
-    inner = lines[1:] if lines[-1].strip() == "```" else lines[1:]
-    if inner and inner[-1].strip() == "```":
-        inner = inner[:-1]
-    return "\n".join(inner).strip()

@@ -280,9 +280,11 @@ class CompositeOrchestrator:
         try:
             return self._primary.call(payload, max_retries=max_retries)
         except RuntimeError as exc:
-            state = payload.get("system_state", "INIT")
-            record_role_event(f"orch:{state}", provider=ORCHESTRATOR_EMERGENCY_PROVIDER,
-                              model=EMERGENCY_ORCHESTRATOR_MODEL, success=True, fallback=True)
+            # Do NOT record a telemetry event here: the emergency orchestrator's own .call()
+            # records the real attempt (success/schema_fail + latency) under the same
+            # orch:<state> role. A pre-call record_role_event would phantom-success on emergency
+            # failure and double-count on success (Codex review fix). The primary's recorded
+            # schema_fails already signal that a fallback occurred.
             console.print(
                 f"\n[bold red]EMERGENCY: Primary orchestrator exhausted all retries — "
                 f"falling back to {type(self._emergency).__name__} "
