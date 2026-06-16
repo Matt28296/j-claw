@@ -301,6 +301,7 @@ class StateWriter:
         # mismatches or a partially-populated dict.
         raw_tokens = summary.get("tokens") or {}
         raw_ollama = summary.get("ollama_tokens") or {}
+        raw_oauth = summary.get("oauth") or {}
         self._state["cost"] = {
             "total_usd": float(
                 summary.get("total_usd")
@@ -317,6 +318,15 @@ class StateWriter:
             "ollama_tokens": {
                 "input":  int(raw_ollama.get("input", 0) or 0),
                 "output": int(raw_ollama.get("output", 0) or 0),
+            },
+            "oauth": {
+                str(p): {
+                    "calls":     int((rec or {}).get("calls", 0) or 0),
+                    "success":   int((rec or {}).get("success", 0) or 0),
+                    "tokens":    int((rec or {}).get("tokens", 0) or 0),
+                    "latency_s": float((rec or {}).get("latency_s", 0.0) or 0.0),
+                }
+                for p, rec in raw_oauth.items()
             },
             "paid_calls": int(summary.get("paid_calls", 0) or 0),
         }
