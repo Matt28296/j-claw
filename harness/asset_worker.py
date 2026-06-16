@@ -57,6 +57,35 @@ def can_generate() -> bool:
         return False
 
 
+def free_comfyui_models() -> bool:
+    """Ask ComfyUI to unload its checkpoint and free RAM.
+
+    ComfyUI is a persistent server that keeps its model resident between
+    requests. The scheduler calls this at the asset→code boundary so the
+    ~8 GB local code model (deepseek) can load without hitting an
+    out-of-memory error. Best-effort: never raise, never block the pipeline.
+    Returns True on a successful free, False otherwise. No-op unless the
+    active provider is ComfyUI.
+    """
+    if ASSET_PROVIDER != "comfyui":
+        return False
+    try:
+        payload = json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{COMFYUI_API_URL}/free",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            ok = 200 <= resp.status < 300
+        if ok:
+            console.print("  [dim]asset: freed ComfyUI models (RAM released for code worker)[/dim]")
+        return ok
+    except Exception:
+        return False
+
+
 def generate_assets(task, spec: dict, output_dir: Path) -> list[str]:
     """Generate image assets for an asset task.
 

@@ -78,8 +78,8 @@ def generate_video(task, spec: dict, output_dir: Path) -> tuple[list[Path], dict
                 written.append(out)
             continue
 
-        # It's a video file — try to find an ffmpeg command to render it.
-        cmd_line = _find_ffmpeg_command(inline.get(rel_path), disk_scripts)
+        # It's a video file — find the ffmpeg command that renders THIS output.
+        cmd_line = _find_ffmpeg_command(inline.get(rel_path), disk_scripts, rel_path)
 
         success = False
         reason = ""
@@ -91,17 +91,32 @@ def generate_video(task, spec: dict, output_dir: Path) -> tuple[list[Path], dict
                 "script on disk — the director task must emit one (e.g. in render.sh)"
             )
         else:
-            # Replace the last token (output path) with the real destination.
             try:
                 parts = shlex.split(cmd_line)
             except ValueError:
                 parts = cmd_line.split()
             if parts:
-                parts[-1] = str(out)
+                # Point the command at the real destination. Only overwrite the
+                # last token when it is actually the output path (matches the
+                # declared basename or looks like a video file); otherwise the
+                # script put the output elsewhere — append rather than clobber a
+                # trailing flag/value.
+                # Absolute output + absolute cwd so a relative output_dir can't
+                # double-resolve (cwd/output_dir/cwd/output_dir/…).
+                abs_out = out.resolve()
+                abs_cwd = output_dir.resolve()
+                if _is_output_token(parts[-1], rel_path):
+                    parts[-1] = str(abs_out)
+                else:
+                    parts.append(str(abs_out))
                 console.print(f"  [dim]video: running ffmpeg for {rel_path}[/dim]")
                 try:
+                    # Run from output_dir so the script's relative input paths
+                    # (frames/%05d.png, audio/x.wav) resolve correctly. Running
+                    # from the harness cwd was silently breaking every render.
                     result = subprocess.run(
                         parts,
+                        cwd=str(abs_cwd),
                         timeout=180,
                         capture_output=True,
                         text=True,
@@ -190,18 +205,78 @@ def _collect_disk_scripts(output_dir: Path) -> list[str]:
     return scripts
 
 
-def _find_ffmpeg_command(inline_content: str | None, disk_scripts: list[str]) -> str | None:
-    """Extract the first 'ffmpeg ...' command line from any available source."""
+def _is_output_token(token: str, rel_path: str) -> bool:
+    """True when `token` looks like the render's output path for rel_path —
+    either it ends with the declared basename, or it has a video extension (so a
+    bare `out.mp4` still counts). Used to avoid clobbering a trailing flag."""
+    base = Path(rel_path).name.lower()
+    tok = token.strip().strip('"\'').replace("\\", "/").lower()
+    if not tok or tok.startswith("-"):
+        return False
+    return tok.endswith(base) or Path(tok).suffix in _VIDEO_EXTS
+
+
+def _join_continued_lines(content: str) -> list[str]:
+    """Collapse shell/.cmd line continuations so a multi-line ffmpeg invocation
+    is returned as one logical line. Handles POSIX `\\` and Windows `^`."""
+    logical: list[str] = []
+    buf = ""
+    for raw in content.splitlines():
+        line = raw.rstrip()
+        if line.endswith("\\") or line.endswith("^"):
+            buf += line[:-1] + " "
+            continue
+        buf += line
+        logical.append(buf)
+        buf = ""
+    if buf:
+        logical.append(buf)
+    return logical
+
+
+def _ffmpeg_lines(sources: list[str]) -> list[str]:
+    """All 'ffmpeg …' logical command lines across the given sources, in order."""
+    cmds: list[str] = []
+    for content in sources:
+        for line in _join_continued_lines(content):
+            stripped = line.strip()
+            if stripped.startswith("ffmpeg "):
+                cmds.append(stripped)
+    return cmds
+
+
+def _find_ffmpeg_command(
+    inline_content: str | None,
+    disk_scripts: list[str],
+    rel_path: str | None = None,
+) -> str | None:
+    """Return the ffmpeg command that renders `rel_path`.
+
+    When a scene has multiple ffmpeg invocations (multiple outputs / a render +
+    an edit script), prefer the one whose final token matches the declared
+    output's basename. Only when nothing matches do we fall back to the first
+    ffmpeg line — preserving the original single-output behaviour.
+    """
     sources: list[str] = []
     if inline_content:
         sources.append(inline_content)
     sources.extend(disk_scripts)
-    for content in sources:
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("ffmpeg "):
-                return stripped
-    return None
+
+    cmds = _ffmpeg_lines(sources)
+    if not cmds:
+        return None
+
+    if rel_path:
+        base = Path(rel_path).name.lower()
+        for cmd in cmds:
+            try:
+                parts = shlex.split(cmd)
+            except ValueError:
+                parts = cmd.split()
+            if parts and parts[-1].strip().strip('"\'').replace("\\", "/").lower().endswith(base):
+                return cmd
+
+    return cmds[0]
 
 
 def _write_placeholder(path: Path) -> None:

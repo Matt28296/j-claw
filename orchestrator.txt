@@ -898,8 +898,21 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
      into `final.mp4` (and frame-checks it) after all scene sub-projects pass — a sub-project
      cannot reach its siblings' clips, so an assembly sub-project always fails. If one is
      emitted anyway the harness skips it.
-   - Worker tooling: ffmpeg (CLI), Stable Diffusion WebUI (local REST), Coqui TTS (local REST).
+   - Worker tooling: ffmpeg (CLI), ComfyUI (local REST), Piper TTS (local binary).
      All tools must be assumed available; no npm or pip install tasks for these tools.
+   - **Working-directory contract (load-bearing).** The harness runs every render/
+     edit script AND every direct ffmpeg edit-script with the scene's output dir as
+     the current working directory. Therefore ALL input and output paths in
+     render.sh / render_scene.py / shotlist.json / ffmpeg commands MUST be relative
+     to the scene root (e.g. `frames/%05d.png`, `audio/dialogue.wav`,
+     `video/scene_raw.mp4`) — never absolute host paths, never paths that reach
+     outside the scene dir (`../other_scene/...`). Absolute or parent-relative paths
+     will not resolve and the render fails.
+   - **One ffmpeg invocation per declared video output.** A scene's render/edit
+     script must contain exactly one `ffmpeg …` command per declared `.mp4`/`.webm`/
+     `.mov` output, and the OUTPUT PATH must be the final token of that command. The
+     harness binds each declared output to the ffmpeg line whose last token matches
+     that file's name; stray or extra ffmpeg lines cause the wrong command to run.
    - **Task typing is load-bearing.** Any task whose `files` include a video file (`.mp4`,
      `.webm`, `.mov`) MUST be `type: "video"` or `type: "editing"` — NEVER `backend`/
      `frontend`. The harness routes video types to its ffmpeg worker; a mistyped render

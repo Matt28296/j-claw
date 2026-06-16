@@ -145,6 +145,10 @@ class Scheduler:
             # Run ComfyUI (asset) and Ollama (code) tasks in separate sub-batches to
             # prevent concurrent RAM exhaustion on machines with limited system memory.
             self._dispatch_sub_batch(asset_tasks)
+            # ComfyUI keeps its checkpoint resident between requests; free it before
+            # the local code model loads so the ~8 GB model isn't denied for RAM.
+            from asset_worker import free_comfyui_models
+            free_comfyui_models()
             self._dispatch_sub_batch(other_tasks)
         else:
             self._dispatch_sub_batch(ready)
