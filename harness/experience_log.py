@@ -112,6 +112,14 @@ def get_relevant_hints(
     return hints
 
 
+# Rich lesson fields a rescue may carry (Phase 1 learning-loop distillation). Whitelisted so a
+# model-supplied `lesson` blob can't inject arbitrary keys into the experience log.
+_LESSON_FIELDS = (
+    "failure_pattern", "solution_technique", "prompt_hint", "changed_files_summary",
+    "verification_signal", "anti_pattern", "confidence", "applicability",
+)
+
+
 def log_escalation(
     task_type: str,
     stack: str,
@@ -119,12 +127,18 @@ def log_escalation(
     succeeded_model: str,
     error_summary: str,
     objective_summary: str,
+    lesson: dict | None = None,
 ) -> None:
     """Append one JSON line recording a within-chain escalation outcome.
 
     Called when a weaker model fails and a stronger model succeeds on the same
     task within a single execute_task() call. Used to pre-emptively warn future
     weak-model attempts about known failure patterns.
+
+    Phase 1: an optional `lesson` dict (distilled by the rescuing model via the in-schema
+    `lesson` field, or derived deterministically from the diff when absent) records the reusable
+    FIX *technique* — not just the error — so future weak-model attempts get a playbook, not only
+    a warning. Only whitelisted `_LESSON_FIELDS` are stored.
     """
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -136,6 +150,12 @@ def log_escalation(
         "error_summary": error_summary[:200],
         "objective_summary": objective_summary[:150],
     }
+    if isinstance(lesson, dict):
+        for k in _LESSON_FIELDS:
+            v = lesson.get(k)
+            if v:
+                entry[k] = v[:300] if isinstance(v, str) else v
+        entry["rescue_model"] = succeeded_model
     try:
         with EXPERIENCE_FILE.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
@@ -178,9 +198,17 @@ def get_worker_hints(task_type: str, stack: str, limit: int = 3) -> list[str]:
                 words = frozenset(_word_set(err))
                 if not words:
                     continue
-                rec = patterns.setdefault(words, {"count": 0, "error": err, "objective": obj})
+                rec = patterns.setdefault(words, {"count": 0, "error": err, "objective": obj,
+                                                  "technique": "", "verified": False, "anti": ""})
                 rec["count"] += 1
                 rec["objective"] = obj  # most recent wins
+                tech = entry.get("prompt_hint") or entry.get("solution_technique")
+                if tech:
+                    rec["technique"] = tech  # most recent proven technique wins
+                if entry.get("verification_signal"):
+                    rec["verified"] = True
+                if entry.get("anti_pattern"):
+                    rec["anti"] = entry["anti_pattern"]
 
     except OSError:
         return []
@@ -188,15 +216,29 @@ def get_worker_hints(task_type: str, stack: str, limit: int = 3) -> list[str]:
     if not patterns:
         return []
 
-    sorted_patterns = sorted(patterns.values(), key=lambda r: r["count"], reverse=True)
+    # Techniques-before-warnings: a proven FIX ("do Y") outranks a bare warning ("X fails").
+    # Within techniques, prefer verification-backed then frequent; warnings fall back by frequency.
+    vals = list(patterns.values())
+    techniques = sorted((r for r in vals if r["technique"]),
+                        key=lambda r: (r["verified"], r["count"]), reverse=True)
+    warnings = sorted((r for r in vals if not r["technique"]),
+                      key=lambda r: r["count"], reverse=True)
     hints: list[str] = []
-    for rec in sorted_patterns[:limit]:
-        hint = (
+    for rec in techniques:
+        if len(hints) >= limit:
+            break
+        hint = f"Known successful technique for {task_type} on {stack}: {rec['technique'][:160]}"
+        if rec["anti"]:
+            hint += f' (avoid: "{rec["anti"][:80]}")'
+        hints.append(hint)
+    for rec in warnings:
+        if len(hints) >= limit:
+            break
+        hints.append(
             f"Past {task_type} tasks on {stack} commonly fail with: "
             f'"{rec["error"][:120]}". '
             f'A successful approach had objective: "{rec["objective"][:120]}".'
         )
-        hints.append(hint)
     return hints
 
 

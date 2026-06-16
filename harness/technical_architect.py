@@ -1,18 +1,11 @@
 """Technical Architect — translates CREATIVE_BRIEF → TECH_SPEC and seeds project_memory/."""
 from __future__ import annotations
 import json
-import time
 from pathlib import Path
-import anthropic
 from rich.console import Console
 
-from config import (
-    ANTHROPIC_API_KEY, ORCHESTRATOR_MAX_TOKENS,
-    TECHNICAL_ARCHITECT_MODEL, TECHNICAL_ARCHITECT_PROMPT_PATH,
-)
+from config import TECHNICAL_ARCHITECT_PROMPT_PATH
 from project_memory import ProjectMemory
-from cache_telemetry import log_cache_usage
-from cost import record_usage
 
 console = Console()
 
@@ -27,9 +20,9 @@ class TechnicalArchitect:
     """Runs before the orchestrator INIT to own all technical decisions."""
 
     def __init__(self) -> None:
-        if not ANTHROPIC_API_KEY:
-            raise RuntimeError("ANTHROPIC_API_KEY is not set.")
-        self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        # No ANTHROPIC_API_KEY requirement: review() plans Codex-first ($0) via planning_call; the
+        # Anthropic fallback raises only if it is actually reached without a key (Codex-review fix:
+        # the old hard requirement blocked Codex-first planning when no Anthropic key was set).
         self._system_prompt = TECHNICAL_ARCHITECT_PROMPT_PATH.read_text(encoding="utf-8")
 
     def review(self, brief: dict, intent: str, output_dir: Path, max_retries: int = 2) -> dict:
@@ -39,49 +32,24 @@ class TechnicalArchitect:
         Raises RuntimeError if all retries fail.
         """
         user_message = json.dumps({"creative_brief": brief, "user_intent": intent})
-        last_error: Exception | None = None
 
-        for attempt in range(max_retries + 1):
-            try:
-                response = self._client.messages.create(
-                    model=TECHNICAL_ARCHITECT_MODEL,
-                    max_tokens=ORCHESTRATOR_MAX_TOKENS,
-                    system=[{
-                        "type": "text",
-                        "text": self._system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }],
-                    messages=[{"role": "user", "content": user_message}],
-                )
-                log_cache_usage(response.usage, "architect")
-                record_usage(response.usage, TECHNICAL_ARCHITECT_MODEL, "architect")
-                text = response.content[0].text.strip()
-                text = _strip_fences(text)
-                tech_spec = json.loads(text)
-                _validate(tech_spec)
+        # Phase 3: Codex-first planning ladder (Codex → one same-tier retry → Sonnet → Opus), gated
+        # by _validate (allowed-stack + required fields) as the fallback boundary — not mere parse
+        # success. planning_call owns retries, fallback, and telemetry; Codex unavailability/quota
+        # never hard-fails the run (falls through to Anthropic). `max_retries` is retained for
+        # signature compatibility but retry/fallback is now handled inside planning_call.
+        from worker import planning_call
+        tech_spec = planning_call(self._system_prompt, user_message, _validate, role="architect")
 
-                ProjectMemory(output_dir).initialize(tech_spec, intent)
+        ProjectMemory(output_dir).initialize(tech_spec, intent)
 
-                console.print(
-                    f"[bold cyan]Technical Architect:[/bold cyan] "
-                    f"stack=[green]{tech_spec['confirmed_stack']}[/green]  "
-                    f"files=[green]{len(tech_spec.get('file_structure', []))}[/green]  "
-                    f"ADRs=[green]{len(tech_spec.get('adrs_to_create', []))}[/green]"
-                )
-                return tech_spec
-
-            except (json.JSONDecodeError, ValueError) as exc:
-                last_error = exc
-                if attempt < max_retries:
-                    console.print(
-                        f"[yellow]Technical Architect output invalid "
-                        f"(attempt {attempt + 1}/{max_retries + 1}): {exc} — retrying...[/yellow]"
-                    )
-                    time.sleep(1 + attempt)
-
-        raise RuntimeError(
-            f"TechnicalArchitect failed after {max_retries + 1} attempts: {last_error}"
-        ) from last_error
+        console.print(
+            f"[bold cyan]Technical Architect:[/bold cyan] "
+            f"stack=[green]{tech_spec['confirmed_stack']}[/green]  "
+            f"files=[green]{len(tech_spec.get('file_structure', []))}[/green]  "
+            f"ADRs=[green]{len(tech_spec.get('adrs_to_create', []))}[/green]"
+        )
+        return tech_spec
 
 
 def _validate(spec: dict) -> None:

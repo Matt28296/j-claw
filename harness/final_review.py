@@ -12,7 +12,7 @@ from rich.console import Console
 
 from config import ANTHROPIC_API_KEY, FINAL_REVIEW_MODEL
 from cache_telemetry import log_cache_usage
-from cost import record_usage
+from cost import record_usage, record_role_event
 
 console = Console()
 
@@ -81,6 +81,7 @@ def run_final_review(output_dir: Path, spec: dict) -> bool:
         included.append(rel)
 
     review_text = None
+    _t0 = time.monotonic()
     for attempt in (1, 2):
         try:
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -93,6 +94,8 @@ def run_final_review(output_dir: Path, spec: dict) -> bool:
             log_cache_usage(response.usage, "review")
             record_usage(response.usage, FINAL_REVIEW_MODEL, "review")
             review_text = response.content[0].text.strip()
+            record_role_event("review", provider="anthropic", model=FINAL_REVIEW_MODEL,
+                              success=True, latency_s=time.monotonic() - _t0)
             break
         except Exception as exc:  # noqa: BLE001
             console.print(f"  [red]Final review API call failed (attempt {attempt}/2): {exc}[/red]")
@@ -103,6 +106,8 @@ def run_final_review(output_dir: Path, spec: dict) -> bool:
         # crashed review call returned True and green-lit a film scene whose
         # REVIEW.md still said ISSUES FOUND and which had rendered no video.)
         console.print("  [bold red]Final review unavailable after retry — failing closed.[/bold red]")
+        record_role_event("review", provider="anthropic", model=FINAL_REVIEW_MODEL,
+                          success=False, latency_s=time.monotonic() - _t0)
         return False
 
     passed = review_text.startswith("VERDICT: PASS")

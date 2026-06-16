@@ -651,6 +651,62 @@ class TestExperienceLearning(unittest.TestCase):
         self.assertTrue(any("[escalation]" in l for l in lessons),
                         f"Expected escalation lesson in: {lessons}")
 
+    # ── Phase 1: log_escalation stores whitelisted rich lesson fields ─────────
+    def test_log_escalation_stores_lesson_fields(self):
+        self._el.log_escalation(
+            task_type="frontend", stack="vanilla",
+            failed_model="ollama/qwen3:8b", succeeded_model="codex/gpt-5.5",
+            error_summary="addEventListener lost this binding",
+            objective_summary="wire the submit handler",
+            lesson={
+                "solution_technique": "Bind class methods or use an arrow wrapper as listeners",
+                "prompt_hint": "Register listeners with an arrow wrapper to preserve `this`",
+                "anti_pattern": "passing this.handler unbound",
+                "verification_signal": "form submit no longer throws",
+                "confidence": "high",
+                "bogus_field": "should be dropped",
+            },
+        )
+        e = self._read_entries()[0]
+        self.assertTrue(e["solution_technique"].startswith("Bind "))
+        self.assertIn("arrow", e["prompt_hint"])
+        self.assertEqual(e["rescue_model"], "codex/gpt-5.5")
+        self.assertNotIn("bogus_field", e, "non-whitelisted lesson keys must be dropped")
+
+    # ── Phase 1: techniques rank before bare warnings in get_worker_hints ─────
+    def test_get_worker_hints_techniques_before_warnings(self):
+        self._el.log_escalation(  # a bare warning (no technique)
+            task_type="frontend", stack="vanilla",
+            failed_model="ollama/qwen3:8b", succeeded_model="anthropic/claude-sonnet-4-6",
+            error_summary="generic truncation somewhere", objective_summary="write the file",
+        )
+        self._el.log_escalation(  # a technique-bearing rescue
+            task_type="frontend", stack="vanilla",
+            failed_model="ollama/qwen3:8b", succeeded_model="codex/gpt-5.5",
+            error_summary="event listener binding broke", objective_summary="wire handler",
+            lesson={"prompt_hint": "Use an arrow wrapper to preserve `this`",
+                    "verification_signal": "submit works"},
+        )
+        hints = self._el.get_worker_hints("frontend", "vanilla", limit=3)
+        self.assertTrue(hints)
+        self.assertIn("Known successful technique", hints[0],
+                      f"a proven technique must rank before bare warnings: {hints}")
+        self.assertIn("arrow wrapper", hints[0])
+
+    # ── Phase 1: _parse_and_validate lesson boundary (top-level only, never a file) ──
+    def test_parse_and_validate_lesson_boundary(self):
+        import worker as w
+        raw = json.dumps({
+            "files": [{"path": "a.js", "content": "console.log('hello world');", "lesson": "LEAK"}],
+            "lesson": {"solution_technique": "do Y"},
+        })
+        result = w._parse_and_validate(raw)
+        # Top-level lesson is captured for the experience log…
+        self.assertEqual(result["lesson"]["solution_technique"], "do Y")
+        # …and each file entry is reduced to exactly {path, content}; the in-entry "lesson" is
+        # dropped, so learning metadata can never be written to disk as/inside a file.
+        self.assertEqual(set(result["files"][0].keys()), {"path", "content"})
+
     # ── execute_task hint injection: hint appears in user_message ─────────────
     def test_execute_task_injects_worker_hints(self):
         import worker as w
@@ -1046,6 +1102,514 @@ class TestCodexWorkerRung(unittest.TestCase):
                          "_call_codex should tolerate stray output bytes via errors='replace'")
 
 
+class TestGrokWorkerRung(unittest.TestCase):
+    """Grok Build CLI OAuth rung — mirrors TestCodexWorkerRung. All mocked: no real `grok`
+    subprocess or network. Grok sits in the ladder ABOVE local Ollama and BELOW Codex (Grok-first).
+    Key behavioural difference vs Codex: a transient throttle (429) must NOT trip the disable-latch."""
+
+    def setUp(self):
+        import worker as w
+        self._w = w
+        self._orig_ladder = w.WORKER_LADDER
+        # Pin GROK_CLI_ENABLED so the rung is exercised deterministically (clean checkout/CI
+        # defaults it False, which would skip the rung and make routing assertions vacuous).
+        self._orig_grok_enabled = w.GROK_CLI_ENABLED
+        self._orig_codex_enabled = w.CODEX_CLI_ENABLED
+        w.GROK_CLI_ENABLED = True
+        w.CODEX_CLI_ENABLED = False  # isolate grok: escalation past grok lands on anthropic
+        # Grok rung between strongest-local and anthropic (codex omitted to isolate grok).
+        w.WORKER_LADDER = [
+            ("ollama", "qwen3:8b"),
+            ("ollama", "deepseek-coder-v2:16b"),
+            ("grok", "grok-build"),
+            ("anthropic", "claude-sonnet-4-6"),
+        ]
+        if hasattr(w, "reset_paid_budget"):
+            w.reset_paid_budget()
+        else:
+            w._paid_calls_made = 0
+
+    def tearDown(self):
+        self._w.WORKER_LADDER = self._orig_ladder
+        self._w.GROK_CLI_ENABLED = self._orig_grok_enabled
+        self._w.CODEX_CLI_ENABLED = self._orig_codex_enabled
+        if hasattr(self._w, "reset_paid_budget"):
+            self._w.reset_paid_budget()
+
+    def _task(self, retry=0):
+        t = MagicMock()
+        t.id = "task-1"
+        t.type = "frontend"
+        t.objective = "build a page"
+        t.files = ["index.html"]
+        t.dependencies = []
+        t.acceptance_criteria = []
+        t.verification = "none"
+        t.retry_count = retry
+        return t
+
+    def _good_output(self):
+        return json.dumps({"files": [{"path": "index.html", "content": "<html/>"}]})
+
+    # ── 1. _call_provider routes provider "grok" → _call_grok ──────────────────
+    def test_call_provider_routes_grok_to_call_grok(self):
+        w = self._w
+        sentinel = json.dumps({"files": [{"path": "x.txt", "content": "ok"}]})
+        with patch.object(w, "_call_grok", return_value=sentinel) as mock_grok:
+            out = w._call_provider("grok", "grok-build", "sys prompt", "user prompt")
+        mock_grok.assert_called_once()
+        args, kwargs = mock_grok.call_args
+        forwarded = list(args) + list(kwargs.values())
+        self.assertIn("grok-build", forwarded)
+        self.assertEqual(out, sentinel)
+
+    # ── 2. _is_grok_unavailable classification (throttle ≠ unavailable) ─────────
+    def test_is_grok_unavailable_classification(self):
+        w = self._w
+        fn = w._is_grok_unavailable
+
+        # PERMANENTLY unavailable (latch + skip) cases.
+        self.assertTrue(fn(FileNotFoundError("grok.exe not found")),
+                        "exe missing must be unavailable")
+        self.assertTrue(fn(RuntimeError("401 unauthorized")), "401 must be unavailable")
+        self.assertTrue(fn(RuntimeError("not logged in")), "not-logged-in must be unavailable")
+        self.assertTrue(fn(RuntimeError("Please run grok login")),
+                        "explicit 'please run grok login' must be unavailable")
+        self.assertTrue(fn(RuntimeError("daily limit reached")),
+                        "daily quota exhaustion must be unavailable")
+
+        # The DEFINING difference vs Codex: a transient throttle is NOT permanent-unavailable.
+        self.assertFalse(fn(RuntimeError("grok -p exited 1: 429 rate limit")),
+                         "429 / rate limit is a TRANSIENT throttle — must NOT latch the rung")
+        self.assertFalse(fn(RuntimeError("too many requests, throttled")),
+                         "burst throttle must NOT latch the rung")
+
+        # A real capability/output failure must NOT skip the rung.
+        self.assertFalse(fn(ValueError("bad output")),
+                         "bad output is a capability error, not unavailability")
+
+    # ── 3. OAuth grok call does NOT consume the dollar budget ──────────────────
+    def test_grok_oauth_call_does_not_consume_dollar_budget(self):
+        w = self._w
+        reserved = {"oauth": 0}
+        orig_reserve = w._reserve_oauth_call
+
+        def counting_reserve(provider):
+            ok = orig_reserve(provider)
+            if ok:
+                reserved["oauth"] += 1
+            return ok
+
+        def mock_call(provider, model, sys, user):
+            self.assertEqual(provider, "grok")
+            return self._good_output()
+
+        spec = {"architecture": {"stack": "vanilla"}}
+        with patch.object(w, "_call_provider", side_effect=mock_call), \
+             patch.object(w, "_call_grok", return_value=self._good_output()), \
+             patch.object(w, "_reserve_oauth_call", side_effect=counting_reserve), \
+             patch.object(w, "route_task", return_value=2), \
+             patch.object(w, "_parse_and_validate", return_value={"files": []}):
+            before = w._paid_calls_made
+            w.execute_task(self._task(), spec, {})
+            after = w._paid_calls_made
+
+        self.assertGreaterEqual(reserved["oauth"], 1,
+                                "expected an oauth capacity reservation on the grok rung")
+        self.assertEqual(before, after,
+                         "oauth grok call must NOT touch the dollar budget")
+
+    # ── 4. Capacity exhaustion skips grok → escalates to anthropic ─────────────
+    def test_grok_capacity_exhaustion_skips_grok_escalates_to_anthropic(self):
+        w = self._w
+        with patch.object(w, "GROK_MAX_CALLS", 0):
+            for _ in range(5):
+                w._reserve_oauth_call("grok")
+
+            call_log = []
+
+            def mock_call(provider, model, sys, user):
+                call_log.append((provider, model))
+                if provider == "ollama":
+                    raise RuntimeError("model output truncated — capability failure")
+                return self._good_output()
+
+            spec = {"architecture": {"stack": "vanilla"}}
+            with patch.object(w, "_call_provider", side_effect=mock_call), \
+                 patch.object(w, "_call_grok") as mock_grok, \
+                 patch.object(w, "_call_anthropic", MagicMock(return_value=self._good_output())), \
+                 patch.object(w, "_reserve_paid_call", return_value=True), \
+                 patch.object(w, "route_task", return_value=0), \
+                 patch.object(w, "_parse_and_validate", return_value={"files": []}):
+                w.execute_task(self._task(retry=2), spec, {})
+
+        self.assertFalse(any(p == "grok" for p, _ in call_log),
+                         f"grok rung must be skipped when capacity exhausted: {call_log}")
+        mock_grok.assert_not_called()
+        self.assertTrue(any(p == "anthropic" for p, _ in call_log),
+                        f"execution must escalate to anthropic rung: {call_log}")
+
+    # ── 5. _grok_disabled short-circuit after an unavailable (auth) error ──────
+    def test_grok_disabled_short_circuits_subsequent_tasks(self):
+        w = self._w
+        grok_calls = {"n": 0}
+
+        def grok_unavailable(model, system, user):
+            grok_calls["n"] += 1
+            raise RuntimeError("not logged in")
+
+        def mock_call(provider, model, sys, user):
+            if provider == "ollama":
+                raise RuntimeError("model output truncated — capability failure")
+            if provider == "grok":
+                return w._call_grok(model, sys, user)
+            return self._good_output()
+
+        spec = {"architecture": {"stack": "vanilla"}}
+        with patch.object(w, "_call_provider", side_effect=mock_call), \
+             patch.object(w, "_call_grok", side_effect=grok_unavailable), \
+             patch.object(w, "_reserve_paid_call", return_value=True), \
+             patch.object(w, "route_task", return_value=0), \
+             patch.object(w, "_parse_and_validate", return_value={"files": []}):
+            w.execute_task(self._task(retry=2), spec, {})
+            self.assertTrue(w._grok_disabled,
+                            "_grok_disabled must flip True after an unavailable error")
+            calls_after_first = grok_calls["n"]
+
+            second_log = []
+
+            def mock_call2(provider, model, sys, user):
+                second_log.append((provider, model))
+                if provider == "ollama":
+                    raise RuntimeError("model output truncated — capability failure")
+                if provider == "grok":
+                    return w._call_grok(model, sys, user)
+                return self._good_output()
+
+            with patch.object(w, "_call_provider", side_effect=mock_call2):
+                w.execute_task(self._task(retry=2), spec, {})
+
+        self.assertEqual(grok_calls["n"], calls_after_first,
+                         "_call_grok must NOT be invoked again once _grok_disabled is set")
+        self.assertTrue(any(p == "anthropic" for p, _ in second_log),
+                        f"second task must still reach anthropic rung: {second_log}")
+
+    # ── 6. A transient throttle must NOT latch the grok rung ───────────────────
+    def test_grok_transient_throttle_does_not_latch(self):
+        """The distinctive Grok semantics: a 429/throttle escalates that attempt but leaves the
+        rung enabled for later tasks (unlike Codex, which latches on 429)."""
+        w = self._w
+
+        def grok_throttled(model, system, user):
+            raise RuntimeError("grok -p exited 1: 429 too many requests")
+
+        def mock_call(provider, model, sys, user):
+            if provider == "ollama":
+                raise RuntimeError("model output truncated — capability failure")
+            if provider == "grok":
+                return w._call_grok(model, sys, user)
+            return self._good_output()
+
+        spec = {"architecture": {"stack": "vanilla"}}
+        with patch.object(w, "_call_provider", side_effect=mock_call), \
+             patch.object(w, "_call_grok", side_effect=grok_throttled), \
+             patch.object(w, "_reserve_paid_call", return_value=True), \
+             patch.object(w, "route_task", return_value=0), \
+             patch.object(w, "_parse_and_validate", return_value={"files": []}):
+            w.execute_task(self._task(retry=2), spec, {})
+            self.assertFalse(w._grok_disabled,
+                             "a transient 429 throttle must NOT trip the permanent disable-latch")
+
+    # ── 7. _call_grok parse path (.text envelope) → valid execute_task result ──
+    def test_call_grok_parse_path_yields_grok_result(self):
+        w = self._w
+        grok_json = json.dumps({"files": [{"path": "x.txt", "content": "ok"}]})
+
+        def mock_call(provider, model, sys, user):
+            if provider == "grok":
+                return w._call_grok(model, sys, user)
+            raise AssertionError(f"only the grok rung should be exercised here: {provider}")
+
+        spec = {"architecture": {"stack": "vanilla"}}
+        with patch.object(w, "_call_grok", return_value=grok_json) as mock_grok, \
+             patch.object(w, "_call_provider", side_effect=mock_call), \
+             patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "route_task", return_value=2):
+            result = w.execute_task(self._task(), spec, {})
+
+        mock_grok.assert_called()
+        files = result.get("files") if isinstance(result, dict) else None
+        self.assertTrue(files, f"expected parsed files from grok output: {result}")
+        self.assertEqual(files[0]["path"], "x.txt")
+        model_used = (result.get("model_used") or result.get("model") or "") \
+            if isinstance(result, dict) else ""
+        self.assertIn("grok", str(model_used).lower(),
+                      f"model_used must reflect grok rung: {result}")
+
+    # ── 8. _extract_grok_text unwraps the JSON envelope's "text" field ─────────
+    def test_extract_grok_text_envelope(self):
+        w = self._w
+        contract = json.dumps({"files": [{"path": "a.py", "content": "x=1"}]})
+        # Confirmed live shape: the contract lives inside the envelope's "text".
+        env = json.dumps({"text": contract, "stopReason": "EndTurn", "sessionId": "abc"})
+        self.assertEqual(w._extract_grok_text(env), contract,
+                         "must pull the final message out of the .text field")
+        # Non-JSON stdout falls back to raw (so _parse_and_validate can still hunt the contract).
+        self.assertEqual(w._extract_grok_text("plain text"), "plain text")
+        self.assertEqual(w._extract_grok_text(""), "")
+
+    # ── 9. _call_grok: real body — UTF-8, scratch cwd, correct flags, $0 telem ─
+    def test_call_grok_subprocess_shape_and_failed_telemetry(self):
+        w = self._w
+        import cost
+        cost.reset_costs()
+
+        # 9a. Success path: capture the subprocess shape and confirm envelope unwrap.
+        captured = {}
+        ok_proc = MagicMock()
+        ok_proc.returncode = 0
+        ok_proc.stdout = json.dumps({"text": json.dumps({"files": []}), "stopReason": "EndTurn"})
+        ok_proc.stderr = ""
+
+        def capture_run(cmd, *a, **kw):
+            captured["cmd"] = cmd
+            captured.update(kw)
+            return ok_proc
+
+        with patch.object(w.subprocess, "run", side_effect=capture_run), \
+             patch.object(w.shutil, "which", return_value="grok"):
+            out = w._call_grok("grok-build", "system ▶ arrow → bullet •", "user 中文")
+
+        self.assertEqual(out, json.dumps({"files": []}),
+                         "_call_grok must unwrap the .text envelope to the raw contract")
+        cmd = captured.get("cmd", [])
+        self.assertIn("-p", cmd, "must invoke headless -p mode")
+        self.assertIn("--output-format", cmd)
+        self.assertIn("json", cmd)
+        self.assertIn("-m", cmd)
+        self.assertIn("grok-build", cmd)
+        self.assertEqual(captured.get("encoding"), "utf-8",
+                         "_call_grok must force UTF-8 (non-cp1252 glyphs in real prompts)")
+        self.assertEqual(captured.get("errors"), "replace")
+        self.assertTrue(captured.get("cwd"),
+                        "_call_grok must run in an isolated scratch cwd, not the project dir")
+
+        # 9b. Failure path: a nonzero exit still records an attempted ($0) oauth call.
+        cost.reset_costs()
+        fail_proc = MagicMock()
+        fail_proc.returncode = 1
+        fail_proc.stderr = "429 too many requests"
+        fail_proc.stdout = ""
+        with patch.object(w.subprocess, "run", return_value=fail_proc), \
+             patch.object(w.shutil, "which", return_value="grok"):
+            with self.assertRaises(RuntimeError):
+                w._call_grok("grok-build", "sys", "user")
+        oauth = cost.cost_summary().get("oauth", {}).get("grok", {})
+        self.assertEqual(oauth.get("calls", 0), 1,
+                         "a failed grok invocation must still count as an attempted call")
+        self.assertEqual(oauth.get("success", -1), 0,
+                         "a failed grok invocation must NOT count as a success")
+
+    # ── 10. Grok-first ordering in the default config ladder ───────────────────
+    def test_default_ladder_places_grok_before_codex(self):
+        import config
+        provs = [p for p, _ in config.WORKER_LADDER]
+        if "grok" in provs and "codex" in provs:
+            self.assertLess(provs.index("grok"), provs.index("codex"),
+                            "Grok-first: grok rung must precede codex in the default ladder")
+        else:
+            self.skipTest("live WORKER_LADDER (from .env) does not include both grok and codex")
+
+
+class TestRoleMetrics(unittest.TestCase):
+    """Phase-0 instrumentation baseline: per-role routing telemetry in cost.py.
+    Pure accumulator — these never exercise a model. Verifies the metrics surfaced in
+    cost_summary()['roles'] + the derived 'anthropic_avoided' (free-OAuth successes)."""
+
+    def setUp(self):
+        import cost
+        self._cost = cost
+        cost.reset_costs()
+
+    def tearDown(self):
+        self._cost.reset_costs()
+
+    def test_record_role_event_accumulates(self):
+        cost = self._cost
+        cost.record_role_event("orch:INIT", provider="codex", model="gpt-5.5", success=True, latency_s=1.0)
+        cost.record_role_event("orch:INIT", provider="codex", model="gpt-5.5",
+                               success=False, schema_fail=True, latency_s=0.5)
+        cost.record_role_event("orch:INIT", provider="anthropic", model="sonnet",
+                               success=True, fallback=True, latency_s=2.0)
+        r = cost.cost_summary()["roles"]["orch:INIT"]
+        self.assertEqual(r["attempts"], 3)
+        self.assertEqual(r["success"], 2)
+        self.assertEqual(r["schema_fails"], 1)
+        self.assertEqual(r["fallbacks"], 1)
+        self.assertAlmostEqual(r["latency_s"], 3.5, places=3)
+        self.assertEqual(r["by_provider"]["codex"], {"calls": 2, "success": 1})
+        self.assertEqual(r["by_provider"]["anthropic"], {"calls": 1, "success": 1})
+
+    def test_anthropic_avoided_counts_oauth_successes(self):
+        cost = self._cost
+        cost.record_oauth_usage("grok", success=True)
+        cost.record_oauth_usage("grok", success=True)
+        cost.record_oauth_usage("codex", success=True)
+        cost.record_oauth_usage("codex", success=False)
+        # 3 successful free-OAuth calls = 3 Anthropic calls avoided.
+        self.assertEqual(cost.cost_summary()["anthropic_avoided"], 3)
+
+    def test_reset_clears_role_metrics(self):
+        cost = self._cost
+        cost.record_role_event("worker", provider="ollama", success=True)
+        self.assertTrue(cost.cost_summary()["roles"])
+        cost.reset_costs()
+        self.assertEqual(cost.cost_summary()["roles"], {})
+        self.assertEqual(cost.cost_summary()["anthropic_avoided"], 0)
+
+
+class TestPlanningCall(unittest.TestCase):
+    """Phase 2: planning_call — Codex-first → 1 retry → Sonnet → Opus, gated by validate_fn.
+    All mocked: _call_codex / _call_anthropic patched, no real subprocess/API. Helper is INERT
+    (not wired to a role yet) — these test it directly."""
+
+    def setUp(self):
+        import worker as w
+        self._w = w
+        self._orig_enabled = w.CODEX_CLI_ENABLED
+        w.CODEX_CLI_ENABLED = True
+        with w._oauth_lock:
+            w._codex_disabled = False
+            w._oauth_calls_made.clear()
+
+    def tearDown(self):
+        w = self._w
+        w.CODEX_CLI_ENABLED = self._orig_enabled
+        with w._oauth_lock:
+            w._codex_disabled = False
+            w._oauth_calls_made.clear()
+
+    def _ok(self, parsed):
+        if "ok" not in parsed:
+            raise ValueError("validate_fn: missing 'ok'")
+
+    def test_codex_first_success_no_anthropic(self):
+        w = self._w
+        with patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "_call_codex", return_value=json.dumps({"ok": True, "x": 1})) as mc, \
+             patch.object(w, "_call_anthropic") as ma:
+            out = w.planning_call("sys", "user", self._ok, role="creative")
+        self.assertEqual(out["x"], 1)
+        mc.assert_called_once()
+        ma.assert_not_called()
+
+    def test_codex_schema_fail_retries_then_escalates_to_sonnet(self):
+        w = self._w
+        with patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "_call_codex", return_value=json.dumps({"nope": 1})) as mc, \
+             patch.object(w, "_call_anthropic", return_value=json.dumps({"ok": True})) as ma:
+            out = w.planning_call("s", "u", self._ok, role="architect")
+        self.assertEqual(mc.call_count, 2, "codex schema-fail must retry once at the same tier")
+        ma.assert_called()
+        self.assertTrue(out["ok"])
+
+    def test_codex_unavailable_latches_and_falls_to_anthropic(self):
+        w = self._w
+
+        def codex_unavail(model, system, user):
+            raise RuntimeError("not logged in")
+
+        with patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "_call_codex", side_effect=codex_unavail) as mc, \
+             patch.object(w, "_call_anthropic", return_value=json.dumps({"ok": True})) as ma:
+            out = w.planning_call("s", "u", self._ok)
+        self.assertEqual(mc.call_count, 1, "unavailable codex must NOT retry — go straight to Anthropic")
+        self.assertTrue(w._codex_disabled, "codex unavailability must latch the rung")
+        ma.assert_called()
+        self.assertTrue(out["ok"])
+
+    def test_reservation_false_skips_codex_entirely(self):
+        w = self._w
+        with patch.object(w, "_reserve_oauth_call", return_value=False), \
+             patch.object(w, "_call_codex") as mc, \
+             patch.object(w, "_call_anthropic", return_value=json.dumps({"ok": True})) as ma:
+            out = w.planning_call("s", "u", self._ok)
+        mc.assert_not_called()
+        ma.assert_called()
+        self.assertTrue(out["ok"])
+
+    def test_planning_call_records_latency(self):
+        # Corrective fix: planning_call must pass latency_s to record_role_event (it was omitted,
+        # zeroing CD/TA latency telemetry that Phase 4 gates on).
+        w = self._w
+        calls = []
+
+        def rec(role, **kw):
+            calls.append(kw)
+
+        with patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "_call_codex", return_value=json.dumps({"ok": True})), \
+             patch.object(w, "record_role_event", side_effect=rec):
+            w.planning_call("s", "u", self._ok, role="creative")
+        self.assertTrue(calls, "record_role_event should be called")
+        self.assertIn("latency_s", calls[0], "planning_call must pass latency_s")
+
+    def test_all_tiers_fail_raises(self):
+        w = self._w
+        with patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "_call_codex", return_value=json.dumps({"nope": 1})), \
+             patch.object(w, "_call_anthropic", return_value=json.dumps({"nope": 1})):
+            with self.assertRaises(RuntimeError):
+                w.planning_call("s", "u", self._ok)
+
+
+class TestRoleCutover(unittest.TestCase):
+    """Phase 3: Creative Director + Technical Architect route through planning_call (Codex-first),
+    preserving their existing validation as the fallback boundary. planning_call is mocked."""
+
+    def test_creative_director_routes_through_planning_call(self):
+        import creative_director as cd, worker as w
+        brief = {"output_type": "web", "features": ["a"], "scale": "mvp"}
+        captured = {}
+
+        def fake_planning(system, user, validate_fn, *, role=None, **kw):
+            captured["role"] = role
+            captured["validate_fn"] = validate_fn
+            return brief
+
+        # No ANTHROPIC_API_KEY patch — the corrective fix lets CD construct key-free (Codex-first).
+        with patch.object(w, "planning_call", side_effect=fake_planning):
+            out = cd.CreativeDirector().interpret("build me a site")
+
+        self.assertEqual(out, brief)
+        self.assertEqual(captured["role"], "creative")
+        # The validation handed to planning_call must reject a brief missing required fields…
+        with self.assertRaises(ValueError):
+            captured["validate_fn"]({"features": ["a"]})  # missing output_type
+        captured["validate_fn"](brief)  # …and accept a valid one (no raise)
+
+    def test_technical_architect_routes_through_planning_call(self):
+        import tempfile
+        from pathlib import Path
+        import technical_architect as ta, worker as w
+        spec = {"confirmed_stack": "vanilla", "file_structure": [], "adrs_to_create": []}
+        captured = {}
+
+        def fake_planning(system, user, validate_fn, *, role=None, **kw):
+            captured["role"] = role
+            return spec
+
+        # No ANTHROPIC_API_KEY patch — the corrective fix lets TA construct key-free (Codex-first).
+        with patch.object(w, "planning_call", side_effect=fake_planning), \
+             patch.object(ta, "ProjectMemory") as mock_pm, \
+             tempfile.TemporaryDirectory() as tmp:
+            out = ta.TechnicalArchitect().review({"output_type": "web"}, "intent", Path(tmp))
+
+        self.assertEqual(out["confirmed_stack"], "vanilla")
+        self.assertEqual(captured["role"], "architect")
+        mock_pm.assert_called()  # ProjectMemory is still seeded after planning
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Runner
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1063,6 +1627,10 @@ if __name__ == "__main__":
         TestFinalReviewFailsClosed,
         TestExperienceLearning,
         TestCodexWorkerRung,
+        TestGrokWorkerRung,
+        TestRoleMetrics,
+        TestPlanningCall,
+        TestRoleCutover,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 

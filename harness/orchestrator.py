@@ -15,7 +15,7 @@ from config import (
 )
 from validator import validate_response, OrchestratorOutputError
 from cache_telemetry import log_cache_usage
-from cost import record_usage
+from cost import record_usage, record_role_event
 
 console = Console()
 
@@ -81,6 +81,7 @@ class Orchestrator:
         for attempt in range(max_retries + 1):
             try:
                 _model = EXECUTION_ERROR_MODEL if state == "EXECUTION_ERROR" else ORCHESTRATOR_MODEL
+                _t0 = time.monotonic()
                 response = self._client.messages.create(
                     model=_model,
                     max_tokens=ORCHESTRATOR_MAX_TOKENS,
@@ -100,6 +101,8 @@ class Orchestrator:
                 text = _fix_json_strings(text)
                 parsed = json.loads(text)
                 validate_response(state, parsed)
+                record_role_event(f"orch:{state}", provider="anthropic", model=_model,
+                                  success=True, latency_s=time.monotonic() - _t0)
                 return parsed
 
             except anthropic.APITimeoutError as exc:
@@ -126,6 +129,9 @@ class Orchestrator:
 
             except (json.JSONDecodeError, OrchestratorOutputError) as exc:
                 last_error = exc
+                record_role_event(f"orch:{state}", provider="anthropic", model=_model,
+                                  success=False, schema_fail=True,
+                                  latency_s=time.monotonic() - _t0)
                 if attempt < max_retries:
                     console.print(
                         f"[yellow]Orchestrator output invalid (attempt {attempt + 1}/{max_retries + 1}): "
@@ -153,6 +159,7 @@ class _OpenAICompatOrchestrator:
         )
         self._model_chain = model_chain
         self._system_prompt = ORCHESTRATOR_PROMPT_PATH.read_text(encoding="utf-8")
+        self._provider_name = "openai-compat"
 
     def call(self, payload: dict, max_retries: int = 3) -> dict:
         from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
@@ -166,6 +173,7 @@ class _OpenAICompatOrchestrator:
 
         for attempt in range(max_retries + 1):
             try:
+                _t0 = time.monotonic()
                 response = self._client.chat.completions.create(
                     model=current_model,
                     max_tokens=ORCHESTRATOR_MAX_TOKENS,
@@ -181,6 +189,9 @@ class _OpenAICompatOrchestrator:
                 text = _fix_json_strings(text)
                 parsed = json.loads(text)
                 validate_response(state, parsed)
+                record_role_event(f"orch:{state}", provider=getattr(self, "_provider_name", "openai-compat"),
+                                  model=current_model, success=True,
+                                  latency_s=time.monotonic() - _t0)
                 return parsed
 
             except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError) as exc:
@@ -205,6 +216,9 @@ class _OpenAICompatOrchestrator:
 
             except (json.JSONDecodeError, OrchestratorOutputError) as exc:
                 last_error = exc
+                record_role_event(f"orch:{state}", provider=getattr(self, "_provider_name", "openai-compat"),
+                                  model=current_model, success=False, schema_fail=True,
+                                  latency_s=time.monotonic() - _t0)
                 if attempt < max_retries:
                     console.print(
                         f"[yellow]Orchestrator output invalid (attempt {attempt + 1}/{max_retries + 1}): "
@@ -227,6 +241,7 @@ class OpenRouterOrchestrator(_OpenAICompatOrchestrator):
             model_chain=[ORCHESTRATOR_API_MODEL] + ORCHESTRATOR_FALLBACK_MODELS,
             headers={"X-Title": "J-Claw"},
         )
+        self._provider_name = "openrouter"
 
 
 class GeminiOrchestrator(_OpenAICompatOrchestrator):
@@ -241,6 +256,7 @@ class GeminiOrchestrator(_OpenAICompatOrchestrator):
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             model_chain=[GEMINI_ORCHESTRATOR_MODEL, "gemini-2.5-flash-lite"],
         )
+        self._provider_name = "gemini"
 
 
 class CompositeOrchestrator:
@@ -264,6 +280,11 @@ class CompositeOrchestrator:
         try:
             return self._primary.call(payload, max_retries=max_retries)
         except RuntimeError as exc:
+            # Do NOT record a telemetry event here: the emergency orchestrator's own .call()
+            # records the real attempt (success/schema_fail + latency) under the same
+            # orch:<state> role. A pre-call record_role_event would phantom-success on emergency
+            # failure and double-count on success (Codex review fix). The primary's recorded
+            # schema_fails already signal that a fallback occurred.
             console.print(
                 f"\n[bold red]EMERGENCY: Primary orchestrator exhausted all retries — "
                 f"falling back to {type(self._emergency).__name__} "

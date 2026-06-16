@@ -3,10 +3,10 @@
 J-Claw is a fully autonomous local-first AI software factory. Describe what you want in plain English — a game, app, website, or film — and the pipeline interprets the creative intent, designs the architecture, plans the full build, writes all the code and media, verifies every output, self-heals any issues, and delivers a production-ready artifact with no human in the loop.
 
 Four layers of intelligence (each with a verified fallback path):
-- **Creative Director** (Claude Haiku) — interprets intent, determines output type, produces a creative brief *(WHAT)*
-- **Technical Architect** (Claude Haiku) — chooses stack, file structure, ADRs, seeds persistent project memory *(HOW)*
+- **Creative Director** (Codex-first — free OAuth; falls back to Anthropic Sonnet→Opus) — interprets intent, determines output type, produces a creative brief *(WHAT)*
+- **Technical Architect** (Codex-first — free OAuth; falls back to Anthropic Sonnet→Opus) — chooses stack, file structure, ADRs, seeds persistent project memory *(HOW)*
 - **Orchestrator** (Gemini 2.5 Flash, free tier — falls back flash→flash-lite with backoff; Anthropic Sonnet available as provider) — translates spec into a task DAG, drives the pipeline, self-heals
-- **Worker** (local Ollama ladder: `qwen3:8b → deepseek-coder-v2:16b`, escalating to `claude-sonnet-4-6` then `claude-opus-4-8` as a budget-capped last resort; an optional flat-rate `codex::gpt-5.5` OAuth rung can sit between local and Anthropic) — writes all code and runs all generation tasks, local-first
+- **Worker** (local-first ladder: `qwen3:8b → deepseek-coder-v2:16b` → two $0 flat-rate OAuth rungs `grok-build → codex::gpt-5.5` → `claude-sonnet-4-6` then `claude-opus-4-8` as a budget-capped last resort) — writes all code and runs all generation tasks, local-first; the free OAuth tiers (Grok via SuperGrok, Codex via ChatGPT) absorb escalations before any Anthropic dollars are spent
 
 ---
 
@@ -15,11 +15,11 @@ Four layers of intelligence (each with a verified fallback path):
 ```
 "Build a game like Celeste" / "Make a 30-second explainer film about AI"
             │
-            ▼  CREATIVE DIRECTOR (Claude Haiku)
+            ▼  CREATIVE DIRECTOR (Codex-first, $0 OAuth → Sonnet→Opus fallback)
     Interprets intent → output_type, features, constraints, desired_experience
     NO stack choice — that belongs to the architect
             │
-            ▼  TECHNICAL ARCHITECT (Claude Haiku)
+            ▼  TECHNICAL ARCHITECT (Codex-first, $0 OAuth → Sonnet→Opus fallback)
     Reads CREATIVE_BRIEF → chooses confirmed_stack, file_structure
     Creates ADRs (Architecture Decision Records) documenting every major call
     Seeds project_memory/ with architecture.md, coding_standards.md,
@@ -36,8 +36,8 @@ Four layers of intelligence (each with a verified fallback path):
             │   ├─ Code tasks      → Worker (Ollama) writes files + optional memory_patch.json
             │   ├─ DevOps tasks    → Worker writes Dockerfile, docker-compose, nginx, CI/CD
             │   ├─ Docs tasks      → Worker writes README, JSDoc, docstrings, CHANGELOG
-            │   ├─ Asset tasks     → Stable Diffusion WebUI (SD-enriched prompts from brief)
-            │   ├─ Audio tasks     → Coqui TTS (tone/speaker from brief)
+            │   ├─ Asset tasks     → ComfyUI + DirectML (style-aware checkpoint from brief)
+            │   ├─ Audio tasks     → Piper TTS (narration) + FluidSynth/MIDI (music)
             │   ├─ Video tasks     → video_worker (ffmpeg pipeline)
             │   └─ On failure      → EXECUTION_ERROR (Haiku) → retry
             │
@@ -232,13 +232,14 @@ copy harness\.env.example harness\.env
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Required for the Haiku roles (director/architect/review/error triage) and worker escalation rungs |
+| `ANTHROPIC_API_KEY` | — | Required for the Anthropic control-plane roles (final review / error triage), the planning fallback (director/architect when Codex is unavailable), and the Anthropic worker escalation rungs |
 | `ORCHESTRATOR_PROVIDER` | `anthropic` | `gemini` (free tier, recommended) \| `anthropic` \| `openrouter` |
 | `GOOGLE_API_KEY` | — | Required when `ORCHESTRATOR_PROVIDER=gemini` (aistudio.google.com — free tier) |
 | `OPENROUTER_API_KEY` | — | Alternative orchestrator — set `ORCHESTRATOR_PROVIDER=openrouter` |
-| `CREATIVE_DIRECTOR_MODEL` / `TECHNICAL_ARCHITECT_MODEL` / `FINAL_REVIEW_MODEL` / `EXECUTION_ERROR_MODEL` | Haiku | Per-role model overrides — bump to Sonnet for higher quality at higher cost |
+| `FINAL_REVIEW_MODEL` / `EXECUTION_ERROR_MODEL` | Haiku | Per-role Anthropic model for review / error triage — bump to Sonnet for higher quality at higher cost |
+| `CREATIVE_DIRECTOR_MODEL` / `TECHNICAL_ARCHITECT_MODEL` | Haiku | Vestigial as of Phase 3 — the Creative Director + Technical Architect now plan **Codex-first** via `planning_call` (Codex → Sonnet → Opus); these vars no longer drive their normal path |
 | `WORKER_MODEL` | `qwen2.5-coder:14b` | Legacy single Ollama worker model (never Claude); superseded by `WORKER_LADDER` |
-| `WORKER_LADDER` | `qwen3:8b → deepseek-coder-v2:16b → codex::gpt-5.5 → claude-sonnet-4-6 → claude-opus-4-8` | Weakest→strongest worker ladder. Base routing is always local; a task escalates one rung per retry; Opus is the last-resort rung. The `codex::` rung is inert unless `CODEX_CLI_ENABLED=true`. |
+| `WORKER_LADDER` | `qwen3:8b → qwen2.5-coder:14b → grok::grok-build → codex::gpt-5.5 → claude-sonnet-4-6` | Weakest→strongest worker ladder. Base routing is always local; a task escalates one rung per retry. The two $0 OAuth rungs are inert unless enabled: `grok::` needs `GROK_CLI_ENABLED=true`, `codex::` needs `CODEX_CLI_ENABLED=true` (both live in the operator's `.env`). |
 | `MAX_PAID_WORKER_CALLS` | `15` | Hard cap on paid (non-Ollama, *metered*) worker escalations per project run; once spent, tasks clamp to the strongest local rung. The Codex OAuth rung does NOT count against this budget |
 | `CODEX_CLI_ENABLED` | `false` | Master switch for the flat-rate `codex::` OAuth worker rung (ChatGPT Plus/Pro subscription, billed per-subscription not per-token) |
 | `CODEX_MODEL` | `gpt-5.5` | Model passed to `codex exec` for the OAuth rung |

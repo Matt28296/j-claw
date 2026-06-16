@@ -1,12 +1,78 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-16, eighth session** (previous: seventh 2026-06-15, sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-16, ninth session** (previous: eighth 2026-06-16, seventh 2026-06-15, sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#87 are MERGED to `main`.** PR #71 (film-pipeline robustness) merged after reconcile.
+**PRs #10–#98 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (difficulty routing + per-role quotas) is next. Open PRs: #89 (remove dead `groq` config — complements #98's "groq confirmed dead" finding, ready to merge) and #73 (DRAFT operator WIP salvage — leave parked).
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-16 (ninth session) — Grok OAuth worker rung LIVE + role-routing overhaul started
+
+### Grok Build CLI OAuth worker rung (PR #91, MERGED `9cfc354`) — LIVE, $0
+A second flat-rate OAuth worker rung, **Grok-first**: the live ladder is now
+`qwen3:8b → deepseek-coder-v2:16b → grok::grok-build → codex::gpt-5.5 → sonnet → opus` (grok before
+codex — abundant/weaker first, scarce/stronger second). Headless `grok -p -m grok-build
+--output-format json` authenticates via the cached `~/.grok/auth.json` OAuth token (operator's
+SuperGrok sub, matthew.t.a@hotmail.com) — **NO xAI API key, $0 marginal.** The earlier "no $0 headless
+path" worry was overturned by the May–June 2026 Grok Build update (headless/device-code OAuth;
+`XAI_API_KEY` is only a fallback). Setup done live: Grok Build CLI 0.2.54 installed
+(`irm https://x.ai/cli/install.ps1|iex`, binary `~/.grok/bin/grok.exe`), logged in via
+`grok login --device-auth`; a real `_call_grok` returned the exact `{"files":[...]}` contract at $0
+(~6.7s). worker.py: `_call_grok` (single-flight `_grok_call_lock` — xAI rotates the OAuth refresh
+token per use; isolated scratch cwd; UTF-8 forced), `_extract_grok_text` (unwraps the `.text`
+envelope), `_is_grok_unavailable` (a transient 429 throttle does NOT latch — unlike codex; only
+permanent auth/quota/exe failures latch). Enabled live in `harness/.env` (`GROK_CLI_ENABLED=true`).
+NB: the real model id is **`grok-build`** (not the plan's assumed `grok-build-0.1`).
+
+### Role-model routing overhaul — APPROVED PLAN, Phases 0–3 done, 4–5 pending
+Plan (designed via 2 Codex design passes + a 2-round adversarial Codex review):
+`C:\Users\Tyler\.claude\plans\everything-should-be-set-idempotent-cupcake.md`. Philosophy: maximize
+local execution; exhaust free OAuth (Grok→Codex) before metered Anthropic; front-load reasoning into
+planning (difficulty-routed: `prototype→Haiku`, `mvp→Codex`, `production→Sonnet/Opus`) to REDUCE
+avoidable worker ambiguity (NOT eliminate Anthropic — environmental surprises survive any plan);
+distill each strong-model rescue into a reusable local lesson.
+- **Phase 0 (PR #92, MERGED `d2ddab1`)** — per-role instrumentation baseline in `cost.py`
+  (`record_role_event` → `cost_summary()["roles"]`: attempts/success/schema_fails/fallbacks/latency +
+  per-provider success ratios; `anthropic_avoided` = free-OAuth successes), wired into orchestrator /
+  CD / TA / final-review / worker (record-only, NO routing change), persisted to mission_control.json.
+  Suite 53 green. Gates all later phases via before/after metrics.
+- **Phase 1 (PR #94, MERGED `ad4e3f7`)** — learning-loop distillation: `log_escalation` stores rich
+  lesson fields (solution_technique/prompt_hint/…); `get_worker_hints` ranks techniques BEFORE
+  warnings; `_parse_and_validate` enforces the strict file-entry boundary + extracts an optional
+  top-level `lesson` (Codex must-fix #1 — never writable as a file). In-schema capture, no extra
+  paid call. Suite 56 green.
+- **Phase 2 (PR #95, MERGED `6fd8339`)** — `planning_call(system, user, validate_fn)` helper landed
+  **inert**: Codex → 1 same-tier retry → Sonnet → Opus, each gated by validate_fn; Codex draws the
+  shared OAuth reservation/latch; never hard-fails on Codex quota (always falls back to Anthropic).
+  Suite 61 green.
+- **Phase 3 (PR #96, MERGED `0c7fccf`)** — Creative Director + Technical Architect now route through `planning_call`
+  (Codex-first), preserving their required-field / allowed-stack validation as the fallback boundary.
+  `_call_anthropic` gained a `label` param so CD/TA Anthropic fallbacks attribute cost correctly.
+  NB: this DROPS Haiku as the CD/TA primary — on the operator's box (Codex enabled) they now plan at
+  $0 on Codex; if Codex is ever disabled they fall to Sonnet (pricier than the old Haiku, but more
+  reliable for strict-schema planning — the documented trade-off). Suite 63 green.
+- **Review pass + corrective fixes (PR #98, MERGED `811bab9`)** — a 5-agent review team + an independent Codex
+  verification audited Phases 0–3 (Phases 1/2/3 + integration SOUND: learning-loop + telemetry chains
+  connected end-to-end, no circular import, groq confirmed dead, no dormant Phase 4/5 code). Fixed:
+  (1) `planning_call` now records real `latency_s` (was zeroed for CD/TA); (2) `CompositeOrchestrator`
+  no longer double-counts/phantom-successes the emergency hop (premature record dropped — the emergency
+  orchestrator records the real outcome); (3) CD/TA constructors no longer hard-require
+  `ANTHROPIC_API_KEY` (the old guard blocked key-free Codex-first planning) + dead
+  client/imports/`_strip_fences` removed. DEFERRED to Phase 4: the emergency-model override is
+  ineffective (`make_orchestrator` patches `config.ORCHESTRATOR_MODEL` but `Orchestrator.call` reads the
+  module import) — no-op today (both default to Sonnet), fixed when Phase 4 reworks orchestrator model
+  selection. Suite 64 green.
+- **Pending (one PR each, dependency-ordered — they share worker.py/orchestrator.py/config.py so
+  cannot be parallelized):** P4 difficulty routing + per-role Codex quotas (`CODEX_PLANNING_RESERVE`,
+  hard non-lending sub-caps, decrement-on-start) + `CodexOrchestrator` + evidence-gated Haiku→Grok
+  triage → P5 cut INIT/DAG onto the router (last, highest blast radius).
+- Per-cycle cost expectation: clean `mvp` ≈ $0 (Codex plans free, local executes); `production` ≈
+  $0.10–0.30 (paid planning only); problem-heavy ≈ $0.30–0.70, hard-capped ~$1 by
+  `MAX_PAID_WORKER_CALLS=15`.
 
 ---
 
@@ -18,6 +84,8 @@ Test #4 (the noir film run) had **two distinct failure modes**, both now fixed. 
 - **PR #87 (MERGED `913ba46`) — throughput / stills-to-motion contract.** Per-frame SDXL generation is infeasible on this DirectML host (~16s/still → a 6s scene at 24fps ≈ 39 min, far past the 600s task timeout) — this is why test #4 scenes never rendered. Changed the contract in `harness/worker.py` (film-director worker prompt) and `orchestrator.txt` (FORMAT 5 rule 21): the **asset task produces 1–3 STILLS**; the **video task ANIMATES them** with ffmpeg `zoompan` (Ken Burns) + `xfade` to fill the scene duration. The exact ffmpeg recipe is embedded in the commit, hand-verified against a real 6s noir clip built from 2 stills (proof artifacts were validated then discarded as scratch).
 
 These complement PR #71 (RAM/ffmpeg-cwd/synthetic-render-guard). **#71 = pipeline completes; #86 = right project shape; #87 = it renders within the timeout.** Next step is a real end-to-end test #4 run (factory-rehearsal item #3).
+
+**Housekeeping (2026-06-16):** The #87 proof artifacts (`harness/_motion_proof/` — 2 input stills, the 6s noir render, extracted Ken-Burns/xfade frames) were validated, then **deleted as scratch**. A gitignore rule `/harness/_*` now covers underscore-prefixed scratch dirs/files under `harness/` (it rode upstream on `origin/main` via the PR #88 handoff-sync merge — a concurrent session scooped the chore commit into its branch, see [[feedback-concurrent-sessions]]). Also removed the stray `harness/_test4_noir.log`. Working tree clean, `main` = `origin/main`.
 
 ---
 
