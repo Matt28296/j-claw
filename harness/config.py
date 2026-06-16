@@ -89,9 +89,24 @@ JWT_SECRET: str = os.getenv(
 SD_API_URL: str = os.getenv("SD_API_URL", "http://localhost:7860")   # AUTOMATIC1111 / Forge
 ASSET_PROVIDER: str = os.getenv("ASSET_PROVIDER", "sd")  # "sd" | "comfyui" | "none"
 COMFYUI_API_URL: str = os.getenv("COMFYUI_API_URL", "http://localhost:8188")
-COMFYUI_CHECKPOINT: str = os.getenv("COMFYUI_CHECKPOINT", "")  # auto-detect if empty
+# Explicit checkpoint override — when set, used for ALL styles (auto-detect if empty).
+COMFYUI_CHECKPOINT: str = os.getenv("COMFYUI_CHECKPOINT", "")
+# Style-aware checkpoints: the asset worker detects whether the brief wants a
+# realistic or anime/cartoon look and selects the matching model. Realistic is
+# the default when the style is ambiguous.
+COMFYUI_CHECKPOINT_REALISTIC: str = os.getenv(
+    "COMFYUI_CHECKPOINT_REALISTIC", "RealVisXL_V5.0_fp16.safetensors"
+)
+COMFYUI_CHECKPOINT_ANIME: str = os.getenv(
+    "COMFYUI_CHECKPOINT_ANIME", "animagine-xl-3.1.safetensors"
+)
 COMFYUI_WIDTH: int = int(os.getenv("COMFYUI_WIDTH", "768"))
 COMFYUI_HEIGHT: int = int(os.getenv("COMFYUI_HEIGHT", "512"))
+# Sampling quality knobs (dpmpp_2m + karras gives better detail than euler at no
+# extra cost; steps trade quality for CPU render time).
+COMFYUI_STEPS: int = int(os.getenv("COMFYUI_STEPS", "26"))
+COMFYUI_SAMPLER: str = os.getenv("COMFYUI_SAMPLER", "dpmpp_2m")
+COMFYUI_SCHEDULER: str = os.getenv("COMFYUI_SCHEDULER", "karras")
 COQUI_API_URL: str = os.getenv("COQUI_API_URL", "http://localhost:5002")
 
 # Piper TTS — local narration (replaces Coqui when PIPER_BINARY is set)
