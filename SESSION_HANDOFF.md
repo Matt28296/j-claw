@@ -5,8 +5,19 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#84 are MERGED to `main`.** PR #71 (film-pipeline robustness) merged after reconcile.
+**PRs #10–#87 are MERGED to `main`.** PR #71 (film-pipeline robustness) merged after reconcile.
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-16 (eighth session continued) — film test #4 unblocked: project-type + stills-to-motion fixes (PRs #86, #87, MERGED)
+
+Test #4 (the noir film run) had **two distinct failure modes**, both now fixed. Per the handoff's earlier note, test #4 was "gated only on a real end-to-end run, not a known harness bug" — with these two PRs merged, **that is now fully true: no known harness bug blocks it.**
+
+- **PR #86 (MERGED `632813a`) — wrong project type.** The architect was scaffolding film scenes as **Python CV projects** (OpenCV/numpy code) instead of media-generation tasks. Fixed so film briefs route to the asset/video media pipeline, not a code project.
+- **PR #87 (MERGED `913ba46`) — throughput / stills-to-motion contract.** Per-frame SDXL generation is infeasible on this DirectML host (~16s/still → a 6s scene at 24fps ≈ 39 min, far past the 600s task timeout) — this is why test #4 scenes never rendered. Changed the contract in `harness/worker.py` (film-director worker prompt) and `orchestrator.txt` (FORMAT 5 rule 21): the **asset task produces 1–3 STILLS**; the **video task ANIMATES them** with ffmpeg `zoompan` (Ken Burns) + `xfade` to fill the scene duration. The exact ffmpeg recipe is embedded in the commit, hand-verified against a real 6s noir clip built from 2 stills (proof artifacts were validated then discarded as scratch).
+
+These complement PR #71 (RAM/ffmpeg-cwd/synthetic-render-guard). **#71 = pipeline completes; #86 = right project shape; #87 = it renders within the timeout.** Next step is a real end-to-end test #4 run (factory-rehearsal item #3).
 
 ---
 
