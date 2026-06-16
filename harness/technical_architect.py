@@ -12,7 +12,7 @@ from config import (
 )
 from project_memory import ProjectMemory
 from cache_telemetry import log_cache_usage
-from cost import record_usage
+from cost import record_usage, record_role_event
 
 console = Console()
 
@@ -43,6 +43,7 @@ class TechnicalArchitect:
 
         for attempt in range(max_retries + 1):
             try:
+                _t0 = time.monotonic()
                 response = self._client.messages.create(
                     model=TECHNICAL_ARCHITECT_MODEL,
                     max_tokens=ORCHESTRATOR_MAX_TOKENS,
@@ -59,6 +60,8 @@ class TechnicalArchitect:
                 text = _strip_fences(text)
                 tech_spec = json.loads(text)
                 _validate(tech_spec)
+                record_role_event("architect", provider="anthropic", model=TECHNICAL_ARCHITECT_MODEL,
+                                  success=True, latency_s=time.monotonic() - _t0)
 
                 ProjectMemory(output_dir).initialize(tech_spec, intent)
 
@@ -72,6 +75,8 @@ class TechnicalArchitect:
 
             except (json.JSONDecodeError, ValueError) as exc:
                 last_error = exc
+                record_role_event("architect", provider="anthropic", model=TECHNICAL_ARCHITECT_MODEL,
+                                  success=False, schema_fail=True, latency_s=time.monotonic() - _t0)
                 if attempt < max_retries:
                     console.print(
                         f"[yellow]Technical Architect output invalid "

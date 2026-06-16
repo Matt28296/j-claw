@@ -57,6 +57,11 @@ _ollama_tokens: dict[str, int] = {"input": 0, "output": 0}
 # subscription): per-provider call counts / success / tokens / latency. These
 # bill against a subscription, not per token, so they never touch _total_usd.
 _oauth_usage: dict[str, dict] = {}
+# Phase-0 instrumentation baseline: per-role routing metrics (attempts, schema
+# failures, cross-tier fallbacks, latency, per-provider success). Additive only —
+# recording these never changes routing. Keyed by role label: "creative",
+# "architect", "review", "orch:<STATE>", "worker". Surfaces in cost_summary()["roles"].
+_role_metrics: dict[str, dict] = {}
 
 
 def reset_costs() -> None:
@@ -71,6 +76,7 @@ def reset_costs() -> None:
     for k in _ollama_tokens:
         _ollama_tokens[k] = 0
     _oauth_usage.clear()
+    _role_metrics.clear()
 
 
 def call_cost(usage, model: str | None) -> float:
@@ -131,6 +137,42 @@ def record_oauth_usage(provider: str, *, success: bool = True,
     rec["latency_s"] += latency_s or 0.0
 
 
+def record_role_event(
+    role: str,
+    *,
+    provider: str = "",
+    model: str = "",
+    success: bool = True,
+    schema_fail: bool = False,
+    fallback: bool = False,
+    latency_s: float = 0.0,
+) -> None:
+    """Record one per-role routing attempt for the Phase-0 instrumentation baseline.
+
+    Pure telemetry — never affects routing. `schema_fail` marks an output that failed
+    validation (JSON/schema); `fallback` marks an attempt that escalated to a different
+    provider/tier than the role's primary. `by_provider` success ratios feed the
+    Grok/Codex-quality and Anthropic-avoided metrics. Safe to call from any role site."""
+    rec = _role_metrics.setdefault(
+        role,
+        {"attempts": 0, "success": 0, "schema_fails": 0, "fallbacks": 0,
+         "latency_s": 0.0, "by_provider": {}},
+    )
+    rec["attempts"] += 1
+    if success:
+        rec["success"] += 1
+    if schema_fail:
+        rec["schema_fails"] += 1
+    if fallback:
+        rec["fallbacks"] += 1
+    rec["latency_s"] += latency_s or 0.0
+    if provider:
+        pr = rec["by_provider"].setdefault(provider, {"calls": 0, "success": 0})
+        pr["calls"] += 1
+        if success:
+            pr["success"] += 1
+
+
 def cost_summary() -> dict:
     """Snapshot of accumulated cost for this run."""
     return {
@@ -141,6 +183,13 @@ def cost_summary() -> dict:
         "tokens": dict(_tokens),
         "ollama_tokens": dict(_ollama_tokens),
         "oauth": {p: dict(rec) for p, rec in _oauth_usage.items()},
+        "roles": {
+            r: {**{k: v for k, v in rec.items() if k != "by_provider"},
+                "by_provider": {p: dict(pr) for p, pr in rec["by_provider"].items()}}
+            for r, rec in _role_metrics.items()
+        },
+        # Free OAuth successes are escalations that would otherwise have spent Anthropic dollars.
+        "anthropic_avoided": sum(int(rec.get("success", 0)) for rec in _oauth_usage.values()),
     }
 
 

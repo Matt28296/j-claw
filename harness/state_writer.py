@@ -328,6 +328,24 @@ class StateWriter:
                 }
                 for p, rec in raw_oauth.items()
             },
+            "roles": {
+                str(r): {
+                    "attempts":     int((rec or {}).get("attempts", 0) or 0),
+                    "success":      int((rec or {}).get("success", 0) or 0),
+                    "schema_fails": int((rec or {}).get("schema_fails", 0) or 0),
+                    "fallbacks":    int((rec or {}).get("fallbacks", 0) or 0),
+                    "latency_s":    float((rec or {}).get("latency_s", 0.0) or 0.0),
+                    "by_provider": {
+                        str(p): {
+                            "calls":   int((pr or {}).get("calls", 0) or 0),
+                            "success": int((pr or {}).get("success", 0) or 0),
+                        }
+                        for p, pr in ((rec or {}).get("by_provider") or {}).items()
+                    },
+                }
+                for r, rec in (summary.get("roles") or {}).items()
+            },
+            "anthropic_avoided": int(summary.get("anthropic_avoided", 0) or 0),
             "paid_calls": int(summary.get("paid_calls", 0) or 0),
         }
         self._write()
