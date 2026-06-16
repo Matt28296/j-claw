@@ -1,12 +1,38 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-15, seventh session** (previous: sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-16, eighth session** (previous: seventh 2026-06-15, sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#68 are MERGED to `main`.**
+**PRs #10–#76 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-16 (eighth session) — test coverage + style-aware image checkpoints (PRs #74–#76)
+
+### PR #75 — Test coverage for media workers + mission control
+Two new test files, **14 tests green** under `harness/.venv`:
+- `tests/test_mission_control.py` (8) — `state_writer` terminal transitions (DONE / NEEDS_FOLLOWUP / FAILED / CANCELED / no-continuation), deploy/cost/review/dynamic-check recording, atomic-write temp-file cleanup, and the `dashboard.py` HTTP control endpoints (static serving, control-status, restart/continue/retry/cancel, 400s on bad requests, held-open-client regression).
+- `tests/test_media_workers.py` (6) — genre/duration detection plus real Piper-TTS and FluidSynth WAV smoke tests that assert non-silent output and skip cleanly when the binaries/soundfont are absent.
+
+### PR #76 — Style-aware ComfyUI checkpoint selection
+`asset_worker.py` now picks the checkpoint from the brief instead of using one fixed model:
+- `_detect_image_style(task, spec)` scans objective/goal/creative brief for keywords — anime/cartoon cues → anime checkpoint, everything else → realistic (the default; the noir-film case resolves to realistic).
+- `_style_modifiers(style)` injects per-style positive prefix + extra negative quality tags.
+- `_comfyui_checkpoint(style)` selection priority: explicit `COMFYUI_CHECKPOINT` override → style-matched model when installed → other configured model when installed → first available → preferred name (trusts config when ComfyUI's list is unreachable).
+- `config.py`: `COMFYUI_CHECKPOINT_REALISTIC` (RealVisXL), `COMFYUI_CHECKPOINT_ANIME` (Animagine), tunable `COMFYUI_STEPS=26` / `COMFYUI_SAMPLER=dpmpp_2m` / `COMFYUI_SCHEDULER=karras`.
+- `tests/test_asset_worker.py` — **12 pure-function tests** (style detection incl. default/tie/noir, modifiers, checkpoint fallback ordering with the availability probe monkeypatched). No ComfyUI required.
+
+### PR #74 — gitignore bot runtime logs
+`*.log` ignored (bot daemon logs can contain the Telegram token in API request URLs). The #75 branch had to be rebased to keep this broader rule rather than the narrower per-file version it originally carried.
+
+### Also landed earlier (PRs #70, #72)
+- PR #72 — reconcile orphaned runs so a killed/restarted bot can't freeze `EXECUTING` (the long-standing restart-orphan trap).
+- PR #70 — remove `'orchestrat'` from goal-text assembly detection.
+
+**Full suite: 26 tests green (14 media/mission-control + 12 asset worker).**
 
 ---
 
