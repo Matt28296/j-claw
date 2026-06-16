@@ -119,8 +119,8 @@ All stacks also support:
 ```
 j-claw/
 ├── orchestrator.txt              Orchestrator system prompt (FORMATs 1–5)
-├── creative_director.txt         Creative Director system prompt (Claude Opus)
-├── technical_architect.txt       Technical Architect system prompt (Claude Sonnet)
+├── creative_director.txt         Creative Director system prompt (Codex-first; Sonnet→Opus fallback)
+├── technical_architect.txt       Technical Architect system prompt (Codex-first; Sonnet→Opus fallback)
 ├── run.bat                       Entry point (Windows)
 ├── bot.bat                       Telegram bot entry point
 ├── dashboard.py                  Mission Control dashboard server (port 8765, auto-starts)
