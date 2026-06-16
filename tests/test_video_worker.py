@@ -152,6 +152,47 @@ def test_synthetic_source_ignoring_real_frames_fails(tmp_path, fake_ffmpeg):
     assert not fake_ffmpeg  # never ran the grey render
 
 
+@pytest.mark.parametrize("source", [
+    "color=black:s=1280x720:rate=24:duration=7",
+    "color=gray:size=1280x720",
+    "color=c=0x1a1a1a:size=1280x720",
+    "testsrc=size=1280x720:rate=24",
+    "smptebars=size=1280x720",
+])
+def test_synthetic_video_detection_covers_common_lavfi_forms(tmp_path, fake_ffmpeg, source):
+    """Named colors (black/gray) and other generators must be caught, not just color=c."""
+    _seed_frames(tmp_path)
+    (tmp_path / "render.sh").write_text(
+        f"ffmpeg -y -f lavfi -i {source} -c:v libx264 -pix_fmt yuv420p video/scene_raw.mp4\n",
+        encoding="utf-8",
+    )
+    task = _make_task(["video/scene_raw.mp4"])
+
+    written, failures = video_worker.generate_video(task, SPEC_FILM, tmp_path)
+
+    assert "video/scene_raw.mp4" in failures
+    assert "synthetic" in failures["video/scene_raw.mp4"].lower()
+    assert not fake_ffmpeg
+
+
+def test_ambiguous_multi_command_binding_fails_closed(tmp_path, fake_ffmpeg):
+    """Two ffmpeg lines, neither naming the declared output as a path token →
+    fail closed rather than run the first command against the wrong inputs."""
+    (tmp_path / "render.sh").write_text(
+        # Both write to generic names; declared output 'video/scene2_raw.mp4'
+        # matches neither, so binding must not fall back to the first command.
+        "ffmpeg -y -i frames/a/%05d.png out_a.mp4\n"
+        "ffmpeg -y -i frames/b/%05d.png out_b.mp4\n",
+        encoding="utf-8",
+    )
+    task = _make_task(["video/scene2_raw.mp4"])
+
+    written, failures = video_worker.generate_video(task, SPEC_FILM, tmp_path)
+
+    assert "video/scene2_raw.mp4" in failures
+    assert not fake_ffmpeg  # never ran an unbound command
+
+
 def test_real_frame_encode_with_synthetic_audio_bed_passes(tmp_path, fake_ffmpeg):
     """Encoding the real frames is fine even with a synthetic aevalsrc AUDIO bed."""
     _seed_frames(tmp_path)

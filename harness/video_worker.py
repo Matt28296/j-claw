@@ -233,12 +233,33 @@ def _scene_has_real_frames(output_dir: Path) -> bool:
     return False
 
 
+# lavfi VIDEO generators (any of these as an `-i` source means synthetic visuals).
+# Audio generators (aevalsrc/anullsrc/sine) are deliberately excluded — a synthetic
+# audio bed over real frames is fine.
+_SYNTHETIC_VIDEO_SOURCES = (
+    "color=", "color:", "testsrc", "smptebars", "smptehdbars",
+    "nullsrc", "rgbtestsrc", "yuvtestsrc", "mandelbrot", "life=", "cellauto",
+)
+_SYNTHETIC_AUDIO_SOURCES = ("aevalsrc", "anullsrc", "sine")
+
+
 def _cmd_uses_synthetic_video(cmd_line: str) -> bool:
-    """True when the ffmpeg command sources its VIDEO from a synthetic generator
-    (`color=`/`lavfi … color`/`smptebars`/`testsrc`) rather than real frames.
-    `aevalsrc` (synthetic AUDIO bed) does not count — audio beds are fine."""
-    low = cmd_line.lower()
-    return any(tok in low for tok in ("color=c", "color=s", "smptebars", "testsrc", "nullsrc"))
+    """True when the ffmpeg command sources its VIDEO from a synthetic lavfi
+    generator (color=black, color=c=0x…, testsrc, smptebars, …) rather than real
+    frames. Inspects each `-i <source>` argument so `color=black:s=…` and
+    `color=gray:size=…` are caught, while audio-only sources are ignored."""
+    try:
+        parts = shlex.split(cmd_line)
+    except ValueError:
+        parts = cmd_line.split()
+    for i, tok in enumerate(parts):
+        if tok == "-i" and i + 1 < len(parts):
+            src = parts[i + 1].strip().strip('"\'').lower()
+            if any(src.startswith(s) or s in src for s in _SYNTHETIC_AUDIO_SOURCES):
+                continue  # audio bed — fine
+            if any(s in src for s in _SYNTHETIC_VIDEO_SOURCES):
+                return True
+    return False
 
 
 def _cmd_uses_frames(cmd_line: str) -> bool:
@@ -315,17 +336,30 @@ def _find_ffmpeg_command(
     if not cmds:
         return None
 
-    if rel_path:
-        base = Path(rel_path).name.lower()
-        for cmd in cmds:
-            try:
-                parts = shlex.split(cmd)
-            except ValueError:
-                parts = cmd.split()
-            if parts and parts[-1].strip().strip('"\'').replace("\\", "/").lower().endswith(base):
-                return cmd
+    # Single command: it renders the only declared output.
+    if len(cmds) == 1:
+        return cmds[0]
 
-    return cmds[0]
+    # Multiple commands: bind to the one that names this output. Scan ALL
+    # path-like (non-option) tokens, not just the last — a command may write its
+    # output before a trailing flag. Fail closed (None) when none unambiguously
+    # targets rel_path, rather than silently running the first command (which
+    # could render this clip from another scene's inputs).
+    if not rel_path:
+        return cmds[0]
+    base = Path(rel_path).name.lower()
+    matches = []
+    for cmd in cmds:
+        try:
+            parts = shlex.split(cmd)
+        except ValueError:
+            parts = cmd.split()
+        for tok in parts:
+            t = tok.strip().strip('"\'').replace("\\", "/").lower()
+            if not t.startswith("-") and t.endswith(base):
+                matches.append(cmd)
+                break
+    return matches[0] if len(matches) == 1 else None
 
 
 def _write_placeholder(path: Path) -> None:

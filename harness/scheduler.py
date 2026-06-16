@@ -147,8 +147,16 @@ class Scheduler:
             self._dispatch_sub_batch(asset_tasks)
             # ComfyUI keeps its checkpoint resident between requests; free it before
             # the local code model loads so the ~8 GB model isn't denied for RAM.
-            from asset_worker import free_comfyui_models
-            free_comfyui_models()
+            from asset_worker import free_comfyui_models, can_generate as asset_can_generate
+            freed = free_comfyui_models()
+            if not freed and asset_can_generate():
+                # ComfyUI is up but would not release memory (no /free endpoint,
+                # timeout, or refusal) — the code worker may now hit the OOM this
+                # is meant to prevent. Surface it instead of failing silently.
+                console.print(
+                    "  [yellow]warning: ComfyUI did not free its model before the code "
+                    "worker — local code tasks may OOM on constrained hosts.[/yellow]"
+                )
             self._dispatch_sub_batch(other_tasks)
         else:
             self._dispatch_sub_batch(ready)
