@@ -86,8 +86,12 @@ JWT_SECRET: str = os.getenv(
     "JWT_SECRET",
     "change-me-to-a-long-random-secret-at-least-32-chars",
 )
-SD_API_URL: str = os.getenv("SD_API_URL", "http://localhost:7860")   # AUTOMATIC1111 / Forge / ComfyUI
-ASSET_PROVIDER: str = os.getenv("ASSET_PROVIDER", "sd")  # "sd" | "none"
+SD_API_URL: str = os.getenv("SD_API_URL", "http://localhost:7860")   # AUTOMATIC1111 / Forge
+ASSET_PROVIDER: str = os.getenv("ASSET_PROVIDER", "sd")  # "sd" | "comfyui" | "none"
+COMFYUI_API_URL: str = os.getenv("COMFYUI_API_URL", "http://localhost:8188")
+COMFYUI_CHECKPOINT: str = os.getenv("COMFYUI_CHECKPOINT", "")  # auto-detect if empty
+COMFYUI_WIDTH: int = int(os.getenv("COMFYUI_WIDTH", "768"))
+COMFYUI_HEIGHT: int = int(os.getenv("COMFYUI_HEIGHT", "512"))
 COQUI_API_URL: str = os.getenv("COQUI_API_URL", "http://localhost:5002")
 
 # Optional deployment hook: command to run in the output dir after git commit.
