@@ -37,6 +37,10 @@ Rules:
 - Every file listed in the task's "files" array must appear in your output.
 - Write complete, working file contents. Never truncate, never use placeholders.
 - Dependency files show what already exists on disk — do not re-emit them.
+- OPTIONAL: you MAY add a top-level "lesson" object as a SIBLING of "files" (never inside a file
+  entry) capturing the single key technique or gotcha for this task, e.g.
+  {"files":[...], "lesson":{"solution_technique":"...","prompt_hint":"one-sentence rule","anti_pattern":"the mistake to avoid"}}.
+  It is metadata for the build's memory, NOT a file. Omit it if you have nothing useful to add.
 """
 
 _STACK_PROMPTS: dict[str, str] = {
@@ -891,6 +895,17 @@ def execute_task(
             parsed["model_used"] = label
             # Record escalation outcomes so future weak-model attempts can learn from them.
             if failed_attempts:
+                # Phase 1: distill the rescue into a reusable lesson. Prefer the in-schema
+                # `lesson` the rescuing model supplied; else derive a low-confidence one from the
+                # diff (changed files) + the last failure — no extra paid call either way.
+                _lesson = parsed.get("lesson") if isinstance(parsed.get("lesson"), dict) else None
+                if not _lesson:
+                    _changed = ", ".join(f.get("path", "") for f in parsed.get("files", [])[:6])
+                    _lesson = {
+                        "changed_files_summary": _changed,
+                        "failure_pattern": (failed_attempts[-1][2] or "")[:160],
+                        "confidence": "low",
+                    }
                 for fail_prov, fail_model, fail_err in failed_attempts:
                     log_escalation(
                         task_type=getattr(task, "type", "unknown"),
@@ -899,6 +914,7 @@ def execute_task(
                         succeeded_model=f"{provider}/{model}",
                         error_summary=fail_err,
                         objective_summary=getattr(task, "objective", "")[:150],
+                        lesson=_lesson,
                     )
             record_role_event("worker", provider=provider, model=model, success=True,
                               fallback=bool(failed_attempts), latency_s=time.monotonic() - _t0)
@@ -1337,13 +1353,25 @@ def _parse_and_validate(raw: str, task=None) -> dict:
         else:
             raise ValueError(f"Worker output missing 'files' list. Got keys: {list(parsed.keys())}")
 
+    clean_files = []
     for entry in parsed["files"]:
         if not isinstance(entry.get("path"), str) or not isinstance(entry.get("content"), str):
             raise ValueError(f"Worker file entry missing 'path' or 'content': {entry}")
-        entry["content"] = _fix_literal_newlines(entry["path"], entry["content"])
-        _warn_if_truncated(entry["path"], entry["content"])
+        content = _fix_literal_newlines(entry["path"], entry["content"])
+        _warn_if_truncated(entry["path"], content)
+        # Strict boundary (Phase 1): a file entry is EXACTLY {path, content}. Any other key
+        # (e.g. a stray "lesson") is dropped here so learning metadata can NEVER be written to
+        # disk as a file — the file-writer only ever sees path/content.
+        clean_files.append({"path": entry["path"], "content": content})
 
-    return parsed
+    result = {"files": clean_files}
+    # Optional TOP-LEVEL `lesson` (Phase 1 learning-loop distillation). Read for the experience
+    # log only; it is a sibling of `files`, never part of it, and never reaches the file-writer.
+    # Ignored unless it's a non-empty dict.
+    lesson = parsed.get("lesson") if isinstance(parsed, dict) else None
+    if isinstance(lesson, dict) and lesson:
+        result["lesson"] = lesson
+    return result
 
 
 def _strip_fences(text: str) -> str:
