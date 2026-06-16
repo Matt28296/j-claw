@@ -738,7 +738,7 @@ class TestExperienceLearning(unittest.TestCase):
 #   - WORKER_LADDER default gains a ("codex","gpt-5.5") rung between the strongest
 #     local rung and the anthropic rung.
 #   - config: CODEX_CLI_ENABLED, CODEX_MODEL, CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT,
-#     OAUTH_PROVIDERS={"codex"}, METERED_PROVIDERS={"anthropic","openrouter","groq"}.
+#     OAUTH_PROVIDERS={"codex"}, METERED_PROVIDERS={"anthropic","openrouter"}.
 #   - worker: _call_codex(model, system, user) -> str (shells to `codex exec`),
 #     _is_codex_unavailable(exc) -> bool, _reserve_oauth_call(provider) -> bool
 #     (capacity counter capped at CODEX_CLI_MAX_CALLS), module flag _codex_disabled,

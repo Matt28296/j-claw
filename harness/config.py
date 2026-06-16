@@ -28,7 +28,7 @@ ORCHESTRATOR_FALLBACK_MODELS: list[str] = [
     m.strip() for m in os.getenv("ORCHESTRATOR_FALLBACKS", "nvidia/nemotron-3-super-120b-a12b:free,meta-llama/llama-3.3-70b-instruct:free").split(",") if m.strip()
 ]
 
-WORKER_PROVIDER: str = os.getenv("WORKER_PROVIDER", "ollama")  # "ollama" | "groq" | "openrouter"
+WORKER_PROVIDER: str = os.getenv("WORKER_PROVIDER", "ollama")  # "ollama" | "openrouter"
 WORKER_MODEL: str = os.getenv("WORKER_MODEL", "qwen2.5-coder:14b")
 
 # Fallback worker providers tried in order on rate limit / error.
@@ -85,7 +85,7 @@ CODEX_TIMEOUT: int = int(os.getenv("CODEX_TIMEOUT", "300"))  # seconds per codex
 # per token and consume the dollar budget MAX_PAID_WORKER_CALLS; OAUTH providers are flat-rate
 # subscriptions that consume a SEPARATE per-run capacity counter (CODEX_CLI_MAX_CALLS) instead,
 # so they never draw down the dollar budget but are still bounded against quota exhaustion.
-METERED_PROVIDERS: set[str] = {"anthropic", "openrouter", "groq"}
+METERED_PROVIDERS: set[str] = {"anthropic", "openrouter"}
 OAUTH_PROVIDERS: set[str] = {"codex"}
 
 # Maximum tasks to run in parallel (1 = sequential, 2-4 = parallel)
@@ -98,7 +98,6 @@ LOCAL_FIRST_TASK_TYPES: set[str] = set(
 )
 
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
-GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY: str | None = os.getenv("OPENROUTER_API_KEY")
 GOOGLE_API_KEY: str | None = os.getenv("GOOGLE_API_KEY")
 
