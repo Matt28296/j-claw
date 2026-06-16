@@ -892,6 +892,13 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
        scene, generated via Piper TTS binary (local, no GPU). Falls back to silent WAV placeholder.
      - At least one `type: "video"` task — encode/assemble the scene's frames into a video
        clip using ffmpeg. Use `verification: "ffprobe"`.
+       **The render MUST encode the actual ComfyUI frames written by the asset task**
+       (e.g. `-framerate <fps> -i frames/<pattern>.png` or an image2/concat input).
+       It is a SPEC/RENDER ERROR to substitute a synthetic `lavfi`/`color=`/`testsrc`
+       solid-color or generated background for the scene visuals — those produce a
+       grey clip that passes ffprobe but discards the generated frames. A synthetic
+       `aevalsrc` AUDIO bed is acceptable; a synthetic VIDEO source is not. State this
+       requirement explicitly in the video task's `objective`.
      - At least one `type: "editing"` task — cut, trim, and layer audio onto the video clip
        using ffmpeg. Use `verification: "sync_check"`.
    - Do NOT add an assembly sub-project. The harness itself concatenates the scene clips

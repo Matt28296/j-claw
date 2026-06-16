@@ -90,6 +90,22 @@ def generate_video(task, spec: dict, output_dir: Path) -> tuple[list[Path], dict
                 "no executable 'ffmpeg …' line found in task output or any edit "
                 "script on disk — the director task must emit one (e.g. in render.sh)"
             )
+        elif (
+            video_is_deliverable
+            and _scene_has_real_frames(output_dir)
+            and _cmd_uses_synthetic_video(cmd_line)
+            and not _cmd_uses_frames(cmd_line)
+        ):
+            # The scene generated real ComfyUI frames but this render command
+            # synthesises a blank `lavfi`/`color=` source and ignores them — the
+            # result passes ffprobe but is a grey placeholder, not the scene. Fail
+            # so the heal loop rewrites the command to encode the actual frames.
+            reason = (
+                "render command uses a synthetic 'lavfi'/'color=' video source and "
+                "ignores the generated frames in frames/ — encode the real frames "
+                "instead (e.g. `-framerate <fps> -i frames/<pattern>.png`); do NOT "
+                "substitute a solid color/lavfi background for the scene visuals"
+            )
         else:
             try:
                 parts = shlex.split(cmd_line)
@@ -203,6 +219,39 @@ def _collect_disk_scripts(output_dir: Path) -> list[str]:
             except OSError:
                 continue
     return scripts
+
+
+def _scene_has_real_frames(output_dir: Path) -> bool:
+    """True when the scene produced PNG frames meant to be encoded into the clip
+    (ComfyUI output). Looks for pngs under a 'frames' dir or named like a frame."""
+    if not output_dir.exists():
+        return False
+    for p in output_dir.rglob("*.png"):
+        parts = {part.lower() for part in p.parts}
+        if "frames" in parts or "frame" in p.stem.lower():
+            return True
+    return False
+
+
+def _cmd_uses_synthetic_video(cmd_line: str) -> bool:
+    """True when the ffmpeg command sources its VIDEO from a synthetic generator
+    (`color=`/`lavfi … color`/`smptebars`/`testsrc`) rather than real frames.
+    `aevalsrc` (synthetic AUDIO bed) does not count — audio beds are fine."""
+    low = cmd_line.lower()
+    return any(tok in low for tok in ("color=c", "color=s", "smptebars", "testsrc", "nullsrc"))
+
+
+def _cmd_uses_frames(cmd_line: str) -> bool:
+    """True when the ffmpeg command takes a frame-image sequence as input
+    (a frames/ path, a printf glob like %04d, or an image2 glob)."""
+    low = cmd_line.lower()
+    return (
+        "frames/" in low
+        or "frame_" in low
+        or "%0" in cmd_line  # printf sequence e.g. %04d / %05d
+        or "-pattern_type glob" in low
+        or "image2" in low
+    )
 
 
 def _is_output_token(token: str, rel_path: str) -> bool:

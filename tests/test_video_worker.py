@@ -125,3 +125,45 @@ def test_missing_ffmpeg_line_is_a_film_failure(tmp_path, fake_ffmpeg):
 
     assert "video/scene_raw.mp4" in failures
     assert not fake_ffmpeg  # ffmpeg never invoked
+
+
+def _seed_frames(tmp_path, n=3):
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    for i in range(1, n + 1):
+        (frames / f"scene1_frame_{i:04d}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+
+def test_synthetic_source_ignoring_real_frames_fails(tmp_path, fake_ffmpeg):
+    """When real frames exist but the command renders a lavfi/color grey source,
+    the render is failed so the heal loop rewrites it — not passed as grey video."""
+    _seed_frames(tmp_path)
+    (tmp_path / "render.sh").write_text(
+        "ffmpeg -y -f lavfi -i color=c=0x1a1a1a:size=1280x720:rate=24:duration=7 "
+        "-c:v libx264 -pix_fmt yuv420p video/scene_raw.mp4\n",
+        encoding="utf-8",
+    )
+    task = _make_task(["video/scene_raw.mp4"])
+
+    written, failures = video_worker.generate_video(task, SPEC_FILM, tmp_path)
+
+    assert "video/scene_raw.mp4" in failures
+    assert "synthetic" in failures["video/scene_raw.mp4"].lower()
+    assert not fake_ffmpeg  # never ran the grey render
+
+
+def test_real_frame_encode_with_synthetic_audio_bed_passes(tmp_path, fake_ffmpeg):
+    """Encoding the real frames is fine even with a synthetic aevalsrc AUDIO bed."""
+    _seed_frames(tmp_path)
+    (tmp_path / "render.sh").write_text(
+        "ffmpeg -y -framerate 24 -i frames/scene1_frame_%04d.png "
+        "-f lavfi -i aevalsrc=0.05*sin(2*PI*110*t):d=7 "
+        "-c:v libx264 -pix_fmt yuv420p -shortest video/scene_raw.mp4\n",
+        encoding="utf-8",
+    )
+    task = _make_task(["video/scene_raw.mp4"])
+
+    written, failures = video_worker.generate_video(task, SPEC_FILM, tmp_path)
+
+    assert not failures
+    assert len(fake_ffmpeg) == 1  # ran: uses real frames, audio bed allowed
