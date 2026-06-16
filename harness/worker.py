@@ -433,14 +433,23 @@ that the harness feeds to ffmpeg to render the final film. Write every file comp
   token, so the output path MUST be the final argument and nothing may follow it.
 - Put the ffmpeg command(s) in a render script named render.sh (or build_film.sh). One
   command per line.
-- FRAME CONTRACT (most important visual rule): when the task's inputs/dependencies
-  include image frames produced by an upstream asset task (PNG files under frames/,
-  e.g. frames/scene1_frame_%04d.png), the render MUST ENCODE THOSE REAL FRAMES as the
-  video source — `-framerate <fps> -i frames/<pattern>.png` (or an image2/concat input).
-  These frames are the scene's actual visuals. It is a HARD ERROR to substitute a
-  synthetic lavfi VIDEO source (color=, testsrc=, smptebars, nullsrc) for the frames —
-  the harness will REJECT such a render and the task will fail. Only when NO real frames
-  exist as a dependency may you fall back to a synthetic lavfi background.
+- STILLS-TO-MOTION CONTRACT (most important visual rule): the upstream asset task produces
+  a SMALL number of still images (typically 1-3 per scene) under frames/ (e.g.
+  frames/scene1_still_01.png) — NOT a per-frame sequence. Generating one image per video
+  frame is infeasible here (~16s per still), so a scene NEVER has hundreds of frames; you
+  MUST synthesize the scene's motion and duration FROM those few stills with ffmpeg. Animate
+  each still with a slow Ken Burns zoom/pan via the `zoompan` filter, and transition between
+  stills with `xfade`. Proven working pattern on this host (ffmpeg 8.1.1) for two stills:
+    ffmpeg -y -loop 1 -t <half> -i frames/still_01.png -loop 1 -t <half> -i frames/still_02.png \\
+      -i audio/<bed>.wav -filter_complex \\
+      "[0:v]scale=2560:1440:force_original_aspect_ratio=increase,crop=2560:1440,zoompan=z='min(zoom+0.0012,1.3)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=24,setsar=1[v0];\\
+        [1:v]scale=2560:1440:force_original_aspect_ratio=increase,crop=2560:1440,zoompan=z='min(zoom+0.0012,1.3)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=24,setsar=1[v1];\\
+        [v0][v1]xfade=transition=fade:duration=0.5:offset=<half-0.5>,format=yuv420p[v]" \\
+      -map "[v]" -map 2:a -t <dur> -c:v libx264 -crf 20 -pix_fmt yuv420p -c:a aac -b:a 128k <out>.mp4
+  For a single still, drop the second input and the `xfade` (one zoompan stream straight to
+  output). It is a HARD ERROR to substitute a synthetic lavfi VIDEO source (color=, testsrc=,
+  smptebars, nullsrc) for the stills — the harness REJECTS such a render and the task fails.
+  Only when NO stills exist as a dependency may you fall back to a synthetic lavfi background.
 - A synthetic AUDIO bed is always fine: pair the frame video with `-f lavfi -i
   aevalsrc=...` (or use the upstream audio WAV) for sound.
 - All input/output paths are relative to the scene dir (the harness runs the script
@@ -471,10 +480,11 @@ that the harness feeds to ffmpeg to render the final film. Write every file comp
     `color=c=RRGGBB` instead of gradient expressions.
   * Font paths with `:` (e.g. `C:/Windows/Fonts/arial.ttf`) break option parsing — skip
     `fontfile=` entirely.
-  * Encode the real frames: `-framerate FPS -i "frames/<pattern>.png"` paired with
-    `-f lavfi -i "aevalsrc=exprs=EXPR:c=mono:s=44100:d=N"` (or the upstream audio WAV).
-    Use `-pix_fmt yuv420p` and `-shortest`. A synthetic `color=` video source is ONLY
-    acceptable as a last resort when the task has no frame dependency.
+  * Animate the stills (NOT a frame sequence): `-loop 1 -t <secs> -i "frames/<still>.png"`
+    per still with a `zoompan` Ken Burns move, joined by `xfade`, paired with the upstream
+    audio WAV (or `-f lavfi -i "aevalsrc=exprs=EXPR:c=mono:s=44100:d=N"`). Use `-pix_fmt
+    yuv420p`. A synthetic `color=` video source is ONLY acceptable as a last resort when the
+    task has no still-image dependency.
 - NEVER emit placeholder ffmpeg flags, NEVER leave the output path unresolved, and NEVER
   produce an index.html — this is a film, not a web page.
 """,
