@@ -907,6 +907,14 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
      emitted anyway the harness skips it.
    - Worker tooling: ffmpeg (CLI), ComfyUI (local REST), Piper TTS (local binary).
      All tools must be assumed available; no npm or pip install tasks for these tools.
+   - **A film scene is NOT a code project — never scaffold one.** Do NOT emit any task that
+     writes `requirements.txt`, a `src/` package, `config.py`, `__init__.py`, or that pip-installs
+     a Python media library (`opencv-python`, `pillow`, `numpy`, `scipy`, `moviepy`,
+     `imageio`, `ffmpeg-python`). Scenes are rendered by the ffmpeg CLI plus ComfyUI/Piper/
+     FluidSynth binaries. The ONLY code file a scene may include is a SINGLE render script
+     (`render_scene.py` or `render.sh`) that shells the ffmpeg CLI via `subprocess.run(cmd,
+     check=True)`. A scene with a `build`/`unit_test` verification or a dependency-install task
+     is a SPEC ERROR — film tasks verify with `ffprobe` / `frame_integrity` / `sync_check` only.
    - **Working-directory contract (load-bearing).** The harness runs every render/
      edit script AND every direct ffmpeg edit-script with the scene's output dir as
      the current working directory. Therefore ALL input and output paths in

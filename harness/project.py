@@ -98,6 +98,19 @@ class ProjectInstance:
     def write_task_files(self, task: Task) -> None:
         for rel_path, content in task.output_files.items():
             full = self.output_dir / rel_path
+            # Guard against a file-vs-directory collision. If a prior task wrote a bare file
+            # (e.g. "src") and this task needs a path under it ("src/config.py"), mkdir raises a
+            # cryptic "WinError 183: Cannot create a file when that file already exists". Detect
+            # the occupied ancestor and raise a clear, actionable spec error instead.
+            for ancestor in full.parents:
+                if ancestor == self.output_dir:
+                    break
+                if ancestor.is_file():
+                    raise ValueError(
+                        f"Cannot write {rel_path!r}: ancestor {ancestor.name!r} already exists "
+                        f"as a file, not a directory — an earlier task wrote a bare file with "
+                        f"that name. The spec has a file/directory name collision; rename one."
+                    )
             full.parent.mkdir(parents=True, exist_ok=True)
             full.write_text(content, encoding="utf-8")
 
