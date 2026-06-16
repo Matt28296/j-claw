@@ -5,7 +5,7 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#97 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective-fixes PR lands in this PR. Phase 4 (difficulty routing + per-role quotas) is next.
+**PRs #10–#98 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (difficulty routing + per-role quotas) is next. Open PRs: #89 (remove dead `groq` config — complements #98's "groq confirmed dead" finding, ready to merge) and #73 (DRAFT operator WIP salvage — leave parked).
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
@@ -49,13 +49,13 @@ distill each strong-model rescue into a reusable local lesson.
   **inert**: Codex → 1 same-tier retry → Sonnet → Opus, each gated by validate_fn; Codex draws the
   shared OAuth reservation/latch; never hard-fails on Codex quota (always falls back to Anthropic).
   Suite 61 green.
-- **Phase 3 (this PR)** — Creative Director + Technical Architect now route through `planning_call`
+- **Phase 3 (PR #96, MERGED `0c7fccf`)** — Creative Director + Technical Architect now route through `planning_call`
   (Codex-first), preserving their required-field / allowed-stack validation as the fallback boundary.
   `_call_anthropic` gained a `label` param so CD/TA Anthropic fallbacks attribute cost correctly.
   NB: this DROPS Haiku as the CD/TA primary — on the operator's box (Codex enabled) they now plan at
   $0 on Codex; if Codex is ever disabled they fall to Sonnet (pricier than the old Haiku, but more
   reliable for strict-schema planning — the documented trade-off). Suite 63 green.
-- **Review pass + corrective fixes (this PR)** — a 5-agent review team + an independent Codex
+- **Review pass + corrective fixes (PR #98, MERGED `811bab9`)** — a 5-agent review team + an independent Codex
   verification audited Phases 0–3 (Phases 1/2/3 + integration SOUND: learning-loop + telemetry chains
   connected end-to-end, no circular import, groq confirmed dead, no dormant Phase 4/5 code). Fixed:
   (1) `planning_call` now records real `latency_s` (was zeroed for CD/TA); (2) `CompositeOrchestrator`
