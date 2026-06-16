@@ -393,14 +393,17 @@ async def _queue_worker(bot) -> None:
             except Exception as exc:  # noqa: BLE001 — one bad job must not kill the worker
                 logger.error("Job stream failed: %s", exc)
             finally:
-                _PIPELINE_PIDFILE.unlink(missing_ok=True)
-                # The child has exited. If it died without writing its own terminal
-                # state (crash / external kill), the file is stuck non-terminal —
-                # patch it FAILED so the dashboard converges. /cancel already wrote
-                # CANCELED, and a clean run wrote DONE/NEEDS_FOLLOWUP, so both are
-                # skipped by the terminal-state check below.
-                if not (_state.current and _state.current.cancelled):
-                    _reconcile_exited_child(proc.returncode)
+                # If the child actually exited (returncode set) without writing its
+                # own terminal state (crash / external kill), patch it FAILED so the
+                # dashboard converges. Skip when returncode is None — the child is
+                # still alive (e.g. worker cancelled on shutdown, or proc.wait timed
+                # out); marking a live run FAILED would be wrong. /cancel already
+                # wrote CANCELED and a clean run wrote DONE/NEEDS_FOLLOWUP, both of
+                # which are skipped by the terminal-state check inside.
+                if proc.returncode is not None:
+                    _PIPELINE_PIDFILE.unlink(missing_ok=True)
+                    if not (_state.current and _state.current.cancelled):
+                        _reconcile_exited_child(proc.returncode)
                 _state.proc = None
                 _state.current = None
             if _state.pending:
