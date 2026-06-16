@@ -656,15 +656,17 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
         # Film decompositions: the parent assembles the final film itself (below),
         # so an orchestrator-emitted assembly sub-project is skipped — isolated in
         # its own directory it cannot reach the sibling scene clips and would fail.
-        # Detect by name, by goal text (conservative stems only — a scene goal may
-        # legitimately mention 'concat' for its internal xfade), or by shape
-        # (depends on every other sub-project — a scene chain only ever depends
-        # on the previous scene). Observed live: one named 'orchestration'.
+        # Detect by name, by goal text, or by shape (depends on every other sub-project
+        # — a scene chain only ever depends on the previous scene).
+        # Observed live: one named 'orchestration'. NOTE: "orchestrat" is intentionally
+        # absent from the goal check — Gemini uses "orchestrate" as a synonym for
+        # "direct/coordinate" in scene goals, which caused all scenes to be falsely
+        # skipped as assembly sub-projects (observed 2026-06-16).
         other_names = {s["name"] for s in sub_projects if s["name"] != name}
         looks_like_assembly = bool(
             re.search(r"assembl|concat|orchestrat|full_film|final_film|final_cut|final_movie",
                       name, re.IGNORECASE)
-            or re.search(r"assembl|orchestrat", sp.get("goal", ""), re.IGNORECASE)
+            or re.search(r"assembl", sp.get("goal", ""), re.IGNORECASE)
             or (len(other_names) >= 2 and set(sp.get("depends_on", [])) >= other_names)
         )
         if film_decomposition and looks_like_assembly:
