@@ -5,7 +5,7 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#92 are MERGED to `main`** (incl. #91 Grok OAuth worker rung, #92 Phase-0 role instrumentation).
+**PRs #10–#94 are MERGED to `main`** (incl. #91 Grok OAuth rung, #92 Phase-0 instrumentation, #94 Phase-1 learning-loop). Phase 2 (`planning_call`, inert) lands in the next PR.
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
@@ -28,7 +28,7 @@ envelope), `_is_grok_unavailable` (a transient 429 throttle does NOT latch — u
 permanent auth/quota/exe failures latch). Enabled live in `harness/.env` (`GROK_CLI_ENABLED=true`).
 NB: the real model id is **`grok-build`** (not the plan's assumed `grok-build-0.1`).
 
-### Role-model routing overhaul — APPROVED PLAN, Phase 0 MERGED, phases 1–5 pending
+### Role-model routing overhaul — APPROVED PLAN, Phases 0–2 done, 3–5 pending
 Plan (designed via 2 Codex design passes + a 2-round adversarial Codex review):
 `C:\Users\Tyler\.claude\plans\everything-should-be-set-idempotent-cupcake.md`. Philosophy: maximize
 local execution; exhaust free OAuth (Grok→Codex) before metered Anthropic; front-load reasoning into
@@ -40,13 +40,20 @@ distill each strong-model rescue into a reusable local lesson.
   per-provider success ratios; `anthropic_avoided` = free-OAuth successes), wired into orchestrator /
   CD / TA / final-review / worker (record-only, NO routing change), persisted to mission_control.json.
   Suite 53 green. Gates all later phases via before/after metrics.
+- **Phase 1 (PR #94, MERGED `ad4e3f7`)** — learning-loop distillation: `log_escalation` stores rich
+  lesson fields (solution_technique/prompt_hint/…); `get_worker_hints` ranks techniques BEFORE
+  warnings; `_parse_and_validate` enforces the strict file-entry boundary + extracts an optional
+  top-level `lesson` (Codex must-fix #1 — never writable as a file). In-schema capture, no extra
+  paid call. Suite 56 green.
+- **Phase 2 (this PR)** — `planning_call(system, user, validate_fn)` helper landed **inert**:
+  Codex → 1 same-tier retry → Sonnet → Opus, each gated by validate_fn; Codex draws the shared OAuth
+  reservation/latch; never hard-fails on Codex quota (always falls back to Anthropic). Not yet wired
+  to any role. Suite 61 green.
 - **Pending (one PR each, dependency-ordered — they share worker.py/orchestrator.py/config.py so
-  cannot be parallelized):** P1 learning-loop distillation (in-schema `lesson` field, strict
-  top-level-only boundary so it can't leak into a written file, techniques-before-warnings) → P2
-  `planning_call` helper (landed inert) → P3 CD/TA → Codex-first → P4 difficulty routing + per-role
-  Codex quotas (`CODEX_PLANNING_RESERVE`, hard non-lending sub-caps, decrement-on-start) +
-  `CodexOrchestrator` + evidence-gated Haiku→Grok triage → P5 cut INIT/DAG onto the router (last,
-  highest blast radius).
+  cannot be parallelized):** P3 route CD/TA through `planning_call` (Codex-first, preserving their
+  validation) → P4 difficulty routing + per-role Codex quotas (`CODEX_PLANNING_RESERVE`, hard
+  non-lending sub-caps, decrement-on-start) + `CodexOrchestrator` + evidence-gated Haiku→Grok triage
+  → P5 cut INIT/DAG onto the router (last, highest blast radius).
 - Per-cycle cost expectation: clean `mvp` ≈ $0 (Codex plans free, local executes); `production` ≈
   $0.10–0.30 (paid planning only); problem-heavy ≈ $0.30–0.70, hard-capped ~$1 by
   `MAX_PAID_WORKER_CALLS=15`.

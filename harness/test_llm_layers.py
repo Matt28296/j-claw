@@ -1468,6 +1468,85 @@ class TestRoleMetrics(unittest.TestCase):
         self.assertEqual(cost.cost_summary()["anthropic_avoided"], 0)
 
 
+class TestPlanningCall(unittest.TestCase):
+    """Phase 2: planning_call — Codex-first → 1 retry → Sonnet → Opus, gated by validate_fn.
+    All mocked: _call_codex / _call_anthropic patched, no real subprocess/API. Helper is INERT
+    (not wired to a role yet) — these test it directly."""
+
+    def setUp(self):
+        import worker as w
+        self._w = w
+        self._orig_enabled = w.CODEX_CLI_ENABLED
+        w.CODEX_CLI_ENABLED = True
+        with w._oauth_lock:
+            w._codex_disabled = False
+            w._oauth_calls_made.clear()
+
+    def tearDown(self):
+        w = self._w
+        w.CODEX_CLI_ENABLED = self._orig_enabled
+        with w._oauth_lock:
+            w._codex_disabled = False
+            w._oauth_calls_made.clear()
+
+    def _ok(self, parsed):
+        if "ok" not in parsed:
+            raise ValueError("validate_fn: missing 'ok'")
+
+    def test_codex_first_success_no_anthropic(self):
+        w = self._w
+        with patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "_call_codex", return_value=json.dumps({"ok": True, "x": 1})) as mc, \
+             patch.object(w, "_call_anthropic") as ma:
+            out = w.planning_call("sys", "user", self._ok, role="creative")
+        self.assertEqual(out["x"], 1)
+        mc.assert_called_once()
+        ma.assert_not_called()
+
+    def test_codex_schema_fail_retries_then_escalates_to_sonnet(self):
+        w = self._w
+        with patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "_call_codex", return_value=json.dumps({"nope": 1})) as mc, \
+             patch.object(w, "_call_anthropic", return_value=json.dumps({"ok": True})) as ma:
+            out = w.planning_call("s", "u", self._ok, role="architect")
+        self.assertEqual(mc.call_count, 2, "codex schema-fail must retry once at the same tier")
+        ma.assert_called()
+        self.assertTrue(out["ok"])
+
+    def test_codex_unavailable_latches_and_falls_to_anthropic(self):
+        w = self._w
+
+        def codex_unavail(model, system, user):
+            raise RuntimeError("not logged in")
+
+        with patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "_call_codex", side_effect=codex_unavail) as mc, \
+             patch.object(w, "_call_anthropic", return_value=json.dumps({"ok": True})) as ma:
+            out = w.planning_call("s", "u", self._ok)
+        self.assertEqual(mc.call_count, 1, "unavailable codex must NOT retry — go straight to Anthropic")
+        self.assertTrue(w._codex_disabled, "codex unavailability must latch the rung")
+        ma.assert_called()
+        self.assertTrue(out["ok"])
+
+    def test_reservation_false_skips_codex_entirely(self):
+        w = self._w
+        with patch.object(w, "_reserve_oauth_call", return_value=False), \
+             patch.object(w, "_call_codex") as mc, \
+             patch.object(w, "_call_anthropic", return_value=json.dumps({"ok": True})) as ma:
+            out = w.planning_call("s", "u", self._ok)
+        mc.assert_not_called()
+        ma.assert_called()
+        self.assertTrue(out["ok"])
+
+    def test_all_tiers_fail_raises(self):
+        w = self._w
+        with patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "_call_codex", return_value=json.dumps({"nope": 1})), \
+             patch.object(w, "_call_anthropic", return_value=json.dumps({"nope": 1})):
+            with self.assertRaises(RuntimeError):
+                w.planning_call("s", "u", self._ok)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Runner
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1487,6 +1566,7 @@ if __name__ == "__main__":
         TestCodexWorkerRung,
         TestGrokWorkerRung,
         TestRoleMetrics,
+        TestPlanningCall,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 

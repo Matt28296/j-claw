@@ -1033,6 +1033,75 @@ def _oauth_unavailable(provider: str, exc: Exception) -> bool:
     return False
 
 
+def planning_call(
+    system: str,
+    user: str,
+    validate_fn,
+    *,
+    role: str = "planning",
+    codex_model: str | None = None,
+    sonnet_model: str = "claude-sonnet-4-6",
+    opus_model: str = "claude-opus-4-8",
+) -> dict:
+    """Codex-first planning helper for strict-schema control-plane roles (Creative Director,
+    Technical Architect, later the orchestrator). Tries the cheapest *reliable* tier first:
+
+        Codex (free OAuth) → one same-tier retry → Anthropic Sonnet → Anthropic Opus
+
+    Each candidate's parsed JSON is gated by `validate_fn(parsed)` — role-specific validation that
+    raises on a bad shape — NOT mere parse success, so a plausible-but-wrong plan is rejected and
+    escalates. Codex draws the shared OAuth reservation + disable-latch (no quota bypass); a Codex
+    capability/schema failure retries once at the same tier, while a Codex *unavailability*
+    (auth/quota/exe) latches the rung and falls straight through to Anthropic. Planning NEVER hard-
+    fails on Codex quota — it always has the Anthropic fallback. Raises RuntimeError only if every
+    tier fails validation.
+
+    INERT as of Phase 2 — landed + unit-tested but not yet wired to any role (Phase 3 routes CD/TA
+    through it; Phase 4 adds the per-role Codex sub-budget). Returns the validated dict.
+    """
+    global _codex_disabled
+    last_err: Exception | None = None
+
+    # Tier 1 — Codex (free OAuth), with one same-tier retry for truncation / output-wrapping.
+    if _oauth_enabled("codex"):
+        for _attempt in range(2):
+            if not _reserve_oauth_call("codex"):
+                break  # latched off or capacity exhausted → fall through to Anthropic
+            try:
+                raw = _call_codex(codex_model or CODEX_MODEL, system, user)
+                parsed = _loads_tolerant(_strip_fences(raw))
+                validate_fn(parsed)
+                record_role_event(role, provider="codex", model=codex_model or CODEX_MODEL,
+                                  success=True)
+                return parsed
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                if _is_codex_unavailable(exc):
+                    with _oauth_lock:
+                        _codex_disabled = True
+                    record_role_event(role, provider="codex", success=False)
+                    break  # unavailable → stop retrying Codex, go to Anthropic
+                # capability/validation failure → record schema_fail and retry once at this tier
+                record_role_event(role, provider="codex",
+                                  model=codex_model or CODEX_MODEL, success=False, schema_fail=True)
+
+    # Tier 2/3 — Anthropic Sonnet → Opus (paid), validated. fallback=True marks the cross-tier hop.
+    for model in (sonnet_model, opus_model):
+        try:
+            raw = _call_anthropic(model, system, user)
+            parsed = _loads_tolerant(_strip_fences(raw))
+            validate_fn(parsed)
+            record_role_event(role, provider="anthropic", model=model, success=True, fallback=True)
+            return parsed
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            record_role_event(role, provider="anthropic", model=model,
+                              success=False, schema_fail=True, fallback=True)
+            continue
+
+    raise RuntimeError(f"planning_call({role}) exhausted all tiers. Last error: {last_err}") from last_err
+
+
 def _call_provider(provider: str, model: str, system: str, user: str) -> str:
     if provider == "ollama":
         return _call_ollama(model, system, user)
