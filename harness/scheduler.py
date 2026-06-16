@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, wait as _cf_wait, FIRST_EXCEP
 from pathlib import Path
 from rich.console import Console
 
-from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, WORKER_PROVIDER, MAX_PARALLEL_WORKERS, MAX_TASKS, WORKER_TASK_TIMEOUT, WORKER_LADDER, spec_stack
+from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, WORKER_PROVIDER, MAX_PARALLEL_WORKERS, MAX_TASKS, WORKER_TASK_TIMEOUT, WORKER_LADDER, ASSET_PROVIDER, spec_stack
 from experience_log import log_outcome, get_relevant_hints
 from project import ProjectInstance, Task
 from worker import execute_task, routed_rung
@@ -216,7 +216,7 @@ class Scheduler:
             )
             written = generate_assets(task, self.instance.spec, self.instance.output_dir)
             self._record_written_files(written, task)
-            result = {"files": [], "model_used": "sd-webui" if can_generate() else "stub:asset"}
+            result = {"files": [], "model_used": ASSET_PROVIDER if can_generate() else "stub:asset"}
             task.status = "done"
             self._finish_worker_telemetry(
                 task,
@@ -241,7 +241,7 @@ class Scheduler:
             )
             written = generate_audio(task, self.instance.spec, self.instance.output_dir)
             self._record_written_files(written, task)
-            result = {"files": [], "model_used": "coqui-tts" if audio_can_generate() else "stub:audio"}
+            result = {"files": [], "model_used": "piper-tts" if audio_can_generate() else "stub:audio"}
             task.status = "done"
             self._finish_worker_telemetry(
                 task,
@@ -326,13 +326,13 @@ class Scheduler:
             self._start_worker_telemetry(
                 task,
                 "music_worker",
-                "musicgen" if music_can_generate() else "stub:music",
+                "fluidsynth" if music_can_generate() else "stub:music",
                 "music_worker",
                 summary="Generating music assets",
             )
             written = generate_music(task, self.instance.spec, self.instance.output_dir)
             self._record_written_files(written, task)
-            model_used = "musicgen" if music_can_generate() else "stub:music"
+            model_used = "fluidsynth" if music_can_generate() else "stub:music"
             task.status = "done"
             self._finish_worker_telemetry(
                 task,
