@@ -5,8 +5,31 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#81 are MERGED to `main`.**
+**PRs #10–#82 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-16 (eighth session continued) — every backend smoke-tested green + runtime brought up for the film test
+
+Pre-flight before factory-rehearsal test #4: each worker/media stack was exercised in isolation so a failure shows up here, not 20 minutes into a build. **All six green:**
+
+| Stack | Test | Result |
+|---|---|---|
+| Image (ComfyUI / DirectML) | real `_comfyui_txt2img` noir frame | ✅ 541 KB PNG in ~32s |
+| Audio (Piper) | real narration WAV | ✅ non-silent |
+| Music (FluidSynth) | real jazz score WAV | ✅ non-silent |
+| Video (ffmpeg) | render + ffprobe | ✅ valid streams |
+| Code — local (Ollama) | qwen3:8b generation | ✅ + deepseek-coder-v2:16b loaded |
+| Code — Codex OAuth (gpt-5.5) | **first-ever live `codex exec`** | ✅ valid JSON in ~9s |
+
+**This resolves the standing "never run live" caveat on the Codex rung — it works live.** The media smoke tests (`tests/test_media_workers.py`) are 6/6.
+
+**Runtime up:** Ollama (:11434, both rungs), ComfyUI (:8188, `--directml`), j-claw Telegram bot (`bot.bat`→`start_bot.py`, sole poller, `getWebhookInfo` clean). Dashboard (:8765) auto-starts on build.
+
+**⚠️ OpenClaw shares the j-claw Telegram token** (`8853236488`, @JarvisClaw96bot) — Telegram allows only ONE `getUpdates` poller, so the two bots CANNOT run simultaneously (→ `telegram.error.Conflict`). To run the j-claw `/run` test cycle, OpenClaw was fully stopped. **Stopping it took three steps, not one:** disable the `OpenClaw Gateway` scheduled task, kill the persistent `C:\Users\Tyler\openclaw-watchdog.ps1` (it respawns the gateway the instant it dies — disabling the task alone was NOT enough), then kill the `openclaw.mjs gateway` node proc on :18789. **Restore OpenClaw after testing:** `Enable-ScheduledTask -TaskName "OpenClaw Gateway"` + re-launch the watchdog ps1. (Clean long-term fix: give the two bots SEPARATE tokens.)
+
+**Status: environment is fully ready for test #4.** No stack will silently fall back to a placeholder.
 
 ---
 
@@ -22,7 +45,7 @@ Codex gave the merged PR #79 an independent second-opinion review: **verdict "th
 
 > ⚠️ **Review-tooling note (worth remembering):** the Codex rescue review had an orphaned-process bug — a job whose process died ~3.5 min in still reported `status: running` for 30+ min because the companion computes `elapsed` as now-minus-start and never noticed the exit (same failure class as the bot-restart orphan). When watching a Codex job, watch the **log file's write-time**, not the `elapsed` counter. Also: the rescue subagent launched TWO parallel passes on one shared runtime, which serialized them — prefer a single pass.
 
-**Still the one real gap:** the rung is fully unit-tested but `codex exec` has **never been run live**. Smoke-test it before trusting it in a build (enable, `codex login`, force one escalation through the codex rung, confirm valid file output).
+**~~Still the one real gap: never run live~~ — RESOLVED 2026-06-16 (see the top section).** The rung was smoke-tested live: `CODEX_CLI_ENABLED=true` + `codex login` confirmed, a real `codex exec` returned valid JSON in ~9s. The remaining unknown is only its behavior under a *real build's* escalation load (parallel workers, capacity counter, latch) — which test #4 will exercise.
 
 ---
 
