@@ -5,8 +5,20 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#82 are MERGED to `main`.** PR #71 (film-pipeline robustness) merged after reconcile.
+**PRs #10–#84 are MERGED to `main`.** PR #71 (film-pipeline robustness) merged after reconcile.
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-16 (eighth session continued) — Codex rung FULL live validation + UTF-8 stdin fix (PR #84, MERGED `527438e`)
+
+An earlier partial live test (see the backend-smoke-test section below) ran a *direct* `_call_codex` with a benign ASCII prompt → valid JSON. That passed but was **incomplete** — it never routed a *real worker prompt* through `execute_task`. Doing that exposed a blocking bug:
+
+- **Bug:** `_call_codex` called `subprocess.run(..., text=True)` with **no `encoding=`**, so on Windows stdin was encoded as the locale default (**cp1252**). Real worker prompts contain non-cp1252 glyphs (arrows, bullets, box chars — the same `▶`-class chars seen earlier this project). `codex exec` reads stdin **strictly as UTF-8**, so it rejected **every real prompt**: `Failed to read prompt from stdin: input is not valid UTF-8 (invalid byte at offset N)`. The rung would have failed on every real task — the ASCII test passed only because it dodged the failing bytes.
+- **Fix:** `encoding="utf-8", errors="replace"` on the subprocess (also hardens the stdout/stderr decode side).
+- **Verified live, end-to-end:** `execute_task` → codex rung → `model_used=codex/gpt-5.5`, correct `hello.html`, `$0` oauth telemetry, ~12s. Added a regression test asserting `encoding='utf-8'`. **Suite 41 green.**
+
+**This is the real close-out of the "never run live" caveat — the rung is now validated through the full `execute_task` path, not just a direct call.** Lesson: a live smoke test must exercise the *real* prompt path; a benign hand-written prompt hid a production-blocking encoding bug.
 
 ---
 
@@ -67,9 +79,9 @@ Pre-flight before factory-rehearsal test #4: each worker/media stack was exercis
 | Music (FluidSynth) | real jazz score WAV | ✅ non-silent |
 | Video (ffmpeg) | render + ffprobe | ✅ valid streams |
 | Code — local (Ollama) | qwen3:8b generation | ✅ + deepseek-coder-v2:16b loaded |
-| Code — Codex OAuth (gpt-5.5) | **first-ever live `codex exec`** | ✅ valid JSON in ~9s |
+| Code — Codex OAuth (gpt-5.5) | **first-ever live `codex exec`** (direct, ASCII prompt) | ✅ valid JSON in ~9s |
 
-**This resolves the standing "never run live" caveat on the Codex rung — it works live.** The media smoke tests (`tests/test_media_workers.py`) are 6/6.
+**This direct call works live — but note it was only a partial validation.** It used a benign ASCII prompt and did NOT route through `execute_task`, so it missed a UTF-8 stdin bug that the *full* path then exposed and fixed (PR #84, see the top section). The media smoke tests (`tests/test_media_workers.py`) are 6/6.
 
 **Runtime up:** Ollama (:11434, both rungs), ComfyUI (:8188, `--directml`), j-claw Telegram bot (`bot.bat`→`start_bot.py`, sole poller, `getWebhookInfo` clean). Dashboard (:8765) auto-starts on build.
 
@@ -91,7 +103,7 @@ Codex gave the merged PR #79 an independent second-opinion review: **verdict "th
 
 > ⚠️ **Review-tooling note (worth remembering):** the Codex rescue review had an orphaned-process bug — a job whose process died ~3.5 min in still reported `status: running` for 30+ min because the companion computes `elapsed` as now-minus-start and never noticed the exit (same failure class as the bot-restart orphan). When watching a Codex job, watch the **log file's write-time**, not the `elapsed` counter. Also: the rescue subagent launched TWO parallel passes on one shared runtime, which serialized them — prefer a single pass.
 
-**~~Still the one real gap: never run live~~ — RESOLVED 2026-06-16 (see the top section).** The rung was smoke-tested live: `CODEX_CLI_ENABLED=true` + `codex login` confirmed, a real `codex exec` returned valid JSON in ~9s. The remaining unknown is only its behavior under a *real build's* escalation load (parallel workers, capacity counter, latch) — which test #4 will exercise.
+**~~Still the one real gap: never run live~~ — RESOLVED 2026-06-16 (PR #84, see the top section).** Validated end-to-end through `execute_task` (not just a direct call): `CODEX_CLI_ENABLED=true` + `codex login` confirmed, `model_used=codex/gpt-5.5`, valid file output, `$0` telemetry. The full-path test found + fixed a UTF-8 stdin bug. The remaining unknown is only its behavior under a *real build's* escalation load (parallel workers, capacity counter, latch) — which test #4 will exercise.
 
 ---
 
