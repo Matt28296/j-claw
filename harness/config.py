@@ -94,6 +94,14 @@ COMFYUI_WIDTH: int = int(os.getenv("COMFYUI_WIDTH", "768"))
 COMFYUI_HEIGHT: int = int(os.getenv("COMFYUI_HEIGHT", "512"))
 COQUI_API_URL: str = os.getenv("COQUI_API_URL", "http://localhost:5002")
 
+# Piper TTS — local narration (replaces Coqui when PIPER_BINARY is set)
+PIPER_BINARY: str = os.getenv("PIPER_BINARY", r"E:\tools\piper\piper\piper.exe")
+PIPER_VOICE: str = os.getenv("PIPER_VOICE", r"E:\tools\piper\voices\en_US-ryan-high.onnx")
+
+# FluidSynth — local music rendering from MIDI
+FLUIDSYNTH_BINARY: str = os.getenv("FLUIDSYNTH_BINARY", r"E:\tools\fluidsynth\fluidsynth-v2.5.5-win10-x64-cpp11\bin\fluidsynth.exe")
+FLUIDSYNTH_SOUNDFONT: str = os.getenv("FLUIDSYNTH_SOUNDFONT", r"E:\tools\soundfonts\FluidR3_GM.sf2")
+
 # Optional deployment hook: command to run in the output dir after git commit.
 # Example: "vercel --prod --yes" or "netlify deploy --prod --dir=dist"
 DEPLOY_HOOK: str | None = os.getenv("DEPLOY_HOOK")  # None = no deployment
