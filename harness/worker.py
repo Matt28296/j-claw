@@ -1041,6 +1041,13 @@ def _call_codex(model: str, system: str, user: str) -> str:
             input=(system + "\n\n" + user),
             capture_output=True,
             text=True,
+            # Force UTF-8 for stdin/stdout. Without this, text mode uses the Windows locale
+            # encoding (cp1252) — real worker prompts contain non-cp1252 glyphs (arrows, bullets,
+            # box chars), and `codex exec` reads stdin strictly as UTF-8, so it rejects the prompt
+            # with "input is not valid UTF-8". errors="replace" keeps a stray output byte from
+            # crashing the decode side too.
+            encoding="utf-8",
+            errors="replace",
             timeout=CODEX_TIMEOUT,
             env=env,
             cwd=os.getcwd(),
