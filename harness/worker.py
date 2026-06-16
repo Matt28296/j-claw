@@ -22,6 +22,7 @@ from config import (
     GROK_CLI_ENABLED, GROK_HOME, GROK_MODEL, GROK_MAX_CALLS, GROK_TIMEOUT,
 )
 from experience_log import get_worker_hints, log_escalation
+from cost import record_role_event
 
 console = Console()
 
@@ -883,6 +884,7 @@ def execute_task(
                 )
                 continue
         try:
+            _t0 = time.monotonic()
             raw = _call_provider(provider, model, system_prompt, user_message)
             parsed = _parse_and_validate(raw, task)
             label = model if provider == "ollama" else f"{provider}/{model}"
@@ -898,12 +900,18 @@ def execute_task(
                         error_summary=fail_err,
                         objective_summary=getattr(task, "objective", "")[:150],
                     )
+            record_role_event("worker", provider=provider, model=model, success=True,
+                              fallback=bool(failed_attempts), latency_s=time.monotonic() - _t0)
             return parsed
 
         except ValueError:
+            record_role_event("worker", provider=provider, model=model, success=False,
+                              schema_fail=True, latency_s=time.monotonic() - _t0)
             raise  # Bad output format — let scheduler handle via EXECUTION_ERROR
 
         except Exception as exc:  # noqa: BLE001
+            record_role_event("worker", provider=provider, model=model, success=False,
+                              latency_s=time.monotonic() - _t0)
             # Infrastructure failure on Ollama (server unreachable) — do NOT escalate
             # to cloud. Anthropic escalation is for capability failures only (bad output,
             # wrong format). A down Ollama server should fail the task, not burn API credits.

@@ -1,12 +1,13 @@
 from __future__ import annotations
 import json
+import time
 from pathlib import Path
 import anthropic
 from rich.console import Console
 
 from config import CREATIVE_DIRECTOR_MODEL, ANTHROPIC_API_KEY, CREATIVE_DIRECTOR_PROMPT_PATH
 from cache_telemetry import log_cache_usage
-from cost import record_usage
+from cost import record_usage, record_role_event
 
 console = Console()
 
@@ -23,6 +24,7 @@ class CreativeDirector:
         Send raw user intent to the Creative Director model.
         Returns a validated CREATIVE_BRIEF dict.
         """
+        _t0 = time.monotonic()
         response = self._client.messages.create(
             model=CREATIVE_DIRECTOR_MODEL,
             max_tokens=2048,
@@ -38,14 +40,20 @@ class CreativeDirector:
         log_cache_usage(response.usage, "creative")
         record_usage(response.usage, CREATIVE_DIRECTOR_MODEL, "creative")
 
-        text = response.content[0].text.strip()
-        text = _strip_fences(text)
-        brief = json.loads(text)
-
-        if "output_type" not in brief:
-            raise ValueError("CREATIVE_BRIEF missing required field: output_type")
-        if not isinstance(brief.get("features"), list) or not brief["features"]:
-            raise ValueError("CREATIVE_BRIEF missing required field: features (non-empty array)")
+        try:
+            text = response.content[0].text.strip()
+            text = _strip_fences(text)
+            brief = json.loads(text)
+            if "output_type" not in brief:
+                raise ValueError("CREATIVE_BRIEF missing required field: output_type")
+            if not isinstance(brief.get("features"), list) or not brief["features"]:
+                raise ValueError("CREATIVE_BRIEF missing required field: features (non-empty array)")
+        except (json.JSONDecodeError, ValueError):
+            record_role_event("creative", provider="anthropic", model=CREATIVE_DIRECTOR_MODEL,
+                              success=False, schema_fail=True, latency_s=time.monotonic() - _t0)
+            raise
+        record_role_event("creative", provider="anthropic", model=CREATIVE_DIRECTOR_MODEL,
+                          success=True, latency_s=time.monotonic() - _t0)
 
         console.print(
             f"[bold cyan]Creative Brief:[/bold cyan] "

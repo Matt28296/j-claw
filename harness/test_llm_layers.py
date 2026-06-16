@@ -1365,6 +1365,53 @@ class TestGrokWorkerRung(unittest.TestCase):
             self.skipTest("live WORKER_LADDER (from .env) does not include both grok and codex")
 
 
+class TestRoleMetrics(unittest.TestCase):
+    """Phase-0 instrumentation baseline: per-role routing telemetry in cost.py.
+    Pure accumulator — these never exercise a model. Verifies the metrics surfaced in
+    cost_summary()['roles'] + the derived 'anthropic_avoided' (free-OAuth successes)."""
+
+    def setUp(self):
+        import cost
+        self._cost = cost
+        cost.reset_costs()
+
+    def tearDown(self):
+        self._cost.reset_costs()
+
+    def test_record_role_event_accumulates(self):
+        cost = self._cost
+        cost.record_role_event("orch:INIT", provider="codex", model="gpt-5.5", success=True, latency_s=1.0)
+        cost.record_role_event("orch:INIT", provider="codex", model="gpt-5.5",
+                               success=False, schema_fail=True, latency_s=0.5)
+        cost.record_role_event("orch:INIT", provider="anthropic", model="sonnet",
+                               success=True, fallback=True, latency_s=2.0)
+        r = cost.cost_summary()["roles"]["orch:INIT"]
+        self.assertEqual(r["attempts"], 3)
+        self.assertEqual(r["success"], 2)
+        self.assertEqual(r["schema_fails"], 1)
+        self.assertEqual(r["fallbacks"], 1)
+        self.assertAlmostEqual(r["latency_s"], 3.5, places=3)
+        self.assertEqual(r["by_provider"]["codex"], {"calls": 2, "success": 1})
+        self.assertEqual(r["by_provider"]["anthropic"], {"calls": 1, "success": 1})
+
+    def test_anthropic_avoided_counts_oauth_successes(self):
+        cost = self._cost
+        cost.record_oauth_usage("grok", success=True)
+        cost.record_oauth_usage("grok", success=True)
+        cost.record_oauth_usage("codex", success=True)
+        cost.record_oauth_usage("codex", success=False)
+        # 3 successful free-OAuth calls = 3 Anthropic calls avoided.
+        self.assertEqual(cost.cost_summary()["anthropic_avoided"], 3)
+
+    def test_reset_clears_role_metrics(self):
+        cost = self._cost
+        cost.record_role_event("worker", provider="ollama", success=True)
+        self.assertTrue(cost.cost_summary()["roles"])
+        cost.reset_costs()
+        self.assertEqual(cost.cost_summary()["roles"], {})
+        self.assertEqual(cost.cost_summary()["anthropic_avoided"], 0)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Runner
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1382,6 +1429,8 @@ if __name__ == "__main__":
         TestFinalReviewFailsClosed,
         TestExperienceLearning,
         TestCodexWorkerRung,
+        TestGrokWorkerRung,
+        TestRoleMetrics,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 
