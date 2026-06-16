@@ -759,6 +759,11 @@ class TestCodexWorkerRung(unittest.TestCase):
         import worker as w
         self._w = w
         self._orig_ladder = w.WORKER_LADDER
+        # Pin CODEX_CLI_ENABLED so the rung is exercised deterministically — otherwise these
+        # tests silently depend on the operator's untracked harness/.env (a clean checkout/CI
+        # has it default False, which would skip the rung and make routing assertions vacuous).
+        self._orig_codex_enabled = w.CODEX_CLI_ENABLED
+        w.CODEX_CLI_ENABLED = True
         # Codex rung between strongest-local and anthropic.
         w.WORKER_LADDER = [
             ("ollama", "qwen3:8b"),
@@ -774,6 +779,7 @@ class TestCodexWorkerRung(unittest.TestCase):
 
     def tearDown(self):
         self._w.WORKER_LADDER = self._orig_ladder
+        self._w.CODEX_CLI_ENABLED = self._orig_codex_enabled
         if hasattr(self._w, "reset_paid_budget"):
             self._w.reset_paid_budget()
 
@@ -819,12 +825,18 @@ class TestCodexWorkerRung(unittest.TestCase):
                         "429 must be unavailable")
         self.assertTrue(fn(RuntimeError("not logged in")),
                         "not-logged-in must be unavailable")
+        self.assertTrue(fn(RuntimeError("Please run codex login to continue")),
+                        "explicit 'please run codex login' must be unavailable")
 
         # NOT unavailable — a real capability/output failure must NOT skip the rung.
         self.assertFalse(fn(ValueError("bad output")),
                          "bad output is a capability error, not unavailability")
         self.assertFalse(fn(RuntimeError("model refused the task — capability gap")),
                          "generic capability error is not unavailability")
+        # Bare "login" must NOT trip the unavailable classifier — a genuine capability failure
+        # in a task that writes login/auth code can echo the word on a nonzero exit.
+        self.assertFalse(fn(RuntimeError("TypeError in generated LoginForm.handleLogin")),
+                         "a capability error merely containing 'login' must not skip the rung")
 
     # ── 3. OAuth call does NOT consume the dollar budget ───────────────────────
     def test_oauth_call_does_not_consume_dollar_budget(self):
@@ -980,6 +992,31 @@ class TestCodexWorkerRung(unittest.TestCase):
         summary = cost.cost_summary()
         self.assertIn("oauth", summary,
                       "cost_summary() must expose an 'oauth' key for OAuth-rung telemetry")
+
+    # ── 8. A FAILED _call_codex still records an attempted oauth call ($0) ──────
+    def test_failed_call_codex_records_failed_oauth_attempt(self):
+        w = self._w
+        import cost
+        cost.reset_costs()
+
+        # Real _call_codex body runs; only the subprocess is mocked to fail (nonzero exit),
+        # exercising the failure-telemetry path. record_oauth_usage is imported inside
+        # _call_codex from the cost module, so patch it there.
+        fake_proc = MagicMock()
+        fake_proc.returncode = 1
+        fake_proc.stderr = "429 usage limit reached"
+        fake_proc.stdout = ""
+
+        with patch.object(w.subprocess, "run", return_value=fake_proc), \
+             patch.object(w.shutil, "which", return_value="codex"):
+            with self.assertRaises(RuntimeError):
+                w._call_codex("gpt-5.5", "sys", "user")
+
+        oauth = cost.cost_summary().get("oauth", {}).get("codex", {})
+        self.assertEqual(oauth.get("calls", 0), 1,
+                         "a failed codex invocation must still count as an attempted call")
+        self.assertEqual(oauth.get("success", -1), 0,
+                         "a failed codex invocation must NOT count as a success")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

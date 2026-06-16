@@ -689,9 +689,15 @@ def _reserve_paid_call() -> bool:
 
 def _reserve_oauth_call(provider: str) -> bool:
     """Atomically reserve one OAuth (flat-rate) worker call against this provider's per-run
-    capacity cap. Returns False if the cap is reached. Does NOT touch the dollar budget."""
+    capacity cap. Returns False if the rung has been latched off (an auth/quota failure earlier
+    in the run) or the cap is reached. Checking the disable-latch and reserving capacity under
+    the SAME lock is what makes the latch hold under parallel workers — otherwise one worker
+    could read _codex_disabled==False, another could latch it True, and the first would still
+    reserve and launch `codex exec`. Does NOT touch the dollar budget."""
     cap = CODEX_CLI_MAX_CALLS if provider == "codex" else 0
     with _oauth_lock:
+        if provider == "codex" and _codex_disabled:
+            return False
         made = _oauth_calls_made.get(provider, 0)
         if made >= cap:
             return False
@@ -817,16 +823,16 @@ def execute_task(
                 )
                 continue
         elif provider in OAUTH_PROVIDERS:
-            # Cheap short-circuit first: if the rung is disabled (auth/quota latch) or globally
-            # off, skip it without consuming any capacity.
-            with _oauth_lock:
-                disabled = _codex_disabled
-            if disabled or not CODEX_CLI_ENABLED:
+            # Globally off? skip without touching capacity (config constant, no race).
+            if not CODEX_CLI_ENABLED:
                 continue
+            # The disable-latch check AND the capacity reservation happen atomically inside
+            # _reserve_oauth_call, so a parallel worker can't launch `codex exec` after the
+            # latch flips. A False here means "disabled or capacity exhausted" — either way skip.
             if not _reserve_oauth_call(provider):
                 console.print(
-                    f"  [yellow]Codex capacity (CODEX_CLI_MAX_CALLS) exhausted — "
-                    f"skipping, escalating to next rung.[/yellow]"
+                    f"  [yellow]Codex unavailable (auth/quota latch) or capacity "
+                    f"(CODEX_CLI_MAX_CALLS) exhausted — skipping, escalating to next rung.[/yellow]"
                 )
                 continue
         try:
@@ -908,9 +914,13 @@ def _is_codex_unavailable(exc: Exception) -> bool:
     if isinstance(exc, (FileNotFoundError, subprocess.TimeoutExpired)):
         return True
     msg = str(exc).lower()
+    # NB: match specific auth/quota phrases, NOT a bare "login" — bare "login" can appear in a
+    # genuine capability failure (e.g. the task is writing a login form / auth code that Codex
+    # echoes on a nonzero exit), which would wrongly skip the rung as "unavailable".
     return any(k in msg for k in (
         "not logged in", "unauthorized", "401", "403", "429", "rate limit",
-        "usage limit", "quota", "please run codex login", "login",
+        "usage limit", "quota", "please run codex login", "login required",
+        "login to codex", "run codex login",
     ))
 
 
@@ -1011,6 +1021,7 @@ def _call_codex(model: str, system: str, user: str) -> str:
     if CODEX_HOME:
         env["CODEX_HOME"] = CODEX_HOME
 
+    from cost import record_oauth_usage
     start = time.monotonic()
     try:
         result = subprocess.run(
@@ -1034,10 +1045,14 @@ def _call_codex(model: str, system: str, user: str) -> str:
             text = ""
         if not text:
             text = (result.stdout or "").strip()
-        elapsed = time.monotonic() - start
-        from cost import record_oauth_usage
-        record_oauth_usage("codex", success=True, latency_s=elapsed, tokens=0)
+        record_oauth_usage("codex", success=True, latency_s=time.monotonic() - start, tokens=0)
         return text
+    except BaseException:
+        # Count attempted invocations too — a failed call (exe missing, timeout, nonzero exit,
+        # auth/quota) is what trips the disable-latch, so it must be visible in cost telemetry.
+        # "calls" = attempts; the success counter tracks how many of those actually returned.
+        record_oauth_usage("codex", success=False, latency_s=time.monotonic() - start, tokens=0)
+        raise
     finally:
         try:
             os.remove(tmpfile)
