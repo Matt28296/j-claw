@@ -1,12 +1,55 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-16, eighth session** (previous: seventh 2026-06-15, sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-16, ninth session** (previous: eighth 2026-06-16, seventh 2026-06-15, sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#87 are MERGED to `main`.** PR #71 (film-pipeline robustness) merged after reconcile.
+**PRs #10–#92 are MERGED to `main`** (incl. #91 Grok OAuth worker rung, #92 Phase-0 role instrumentation).
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-16 (ninth session) — Grok OAuth worker rung LIVE + role-routing overhaul started
+
+### Grok Build CLI OAuth worker rung (PR #91, MERGED `9cfc354`) — LIVE, $0
+A second flat-rate OAuth worker rung, **Grok-first**: the live ladder is now
+`qwen3:8b → deepseek-coder-v2:16b → grok::grok-build → codex::gpt-5.5 → sonnet → opus` (grok before
+codex — abundant/weaker first, scarce/stronger second). Headless `grok -p -m grok-build
+--output-format json` authenticates via the cached `~/.grok/auth.json` OAuth token (operator's
+SuperGrok sub, matthew.t.a@hotmail.com) — **NO xAI API key, $0 marginal.** The earlier "no $0 headless
+path" worry was overturned by the May–June 2026 Grok Build update (headless/device-code OAuth;
+`XAI_API_KEY` is only a fallback). Setup done live: Grok Build CLI 0.2.54 installed
+(`irm https://x.ai/cli/install.ps1|iex`, binary `~/.grok/bin/grok.exe`), logged in via
+`grok login --device-auth`; a real `_call_grok` returned the exact `{"files":[...]}` contract at $0
+(~6.7s). worker.py: `_call_grok` (single-flight `_grok_call_lock` — xAI rotates the OAuth refresh
+token per use; isolated scratch cwd; UTF-8 forced), `_extract_grok_text` (unwraps the `.text`
+envelope), `_is_grok_unavailable` (a transient 429 throttle does NOT latch — unlike codex; only
+permanent auth/quota/exe failures latch). Enabled live in `harness/.env` (`GROK_CLI_ENABLED=true`).
+NB: the real model id is **`grok-build`** (not the plan's assumed `grok-build-0.1`).
+
+### Role-model routing overhaul — APPROVED PLAN, Phase 0 MERGED, phases 1–5 pending
+Plan (designed via 2 Codex design passes + a 2-round adversarial Codex review):
+`C:\Users\Tyler\.claude\plans\everything-should-be-set-idempotent-cupcake.md`. Philosophy: maximize
+local execution; exhaust free OAuth (Grok→Codex) before metered Anthropic; front-load reasoning into
+planning (difficulty-routed: `prototype→Haiku`, `mvp→Codex`, `production→Sonnet/Opus`) to REDUCE
+avoidable worker ambiguity (NOT eliminate Anthropic — environmental surprises survive any plan);
+distill each strong-model rescue into a reusable local lesson.
+- **Phase 0 (PR #92, MERGED `d2ddab1`)** — per-role instrumentation baseline in `cost.py`
+  (`record_role_event` → `cost_summary()["roles"]`: attempts/success/schema_fails/fallbacks/latency +
+  per-provider success ratios; `anthropic_avoided` = free-OAuth successes), wired into orchestrator /
+  CD / TA / final-review / worker (record-only, NO routing change), persisted to mission_control.json.
+  Suite 53 green. Gates all later phases via before/after metrics.
+- **Pending (one PR each, dependency-ordered — they share worker.py/orchestrator.py/config.py so
+  cannot be parallelized):** P1 learning-loop distillation (in-schema `lesson` field, strict
+  top-level-only boundary so it can't leak into a written file, techniques-before-warnings) → P2
+  `planning_call` helper (landed inert) → P3 CD/TA → Codex-first → P4 difficulty routing + per-role
+  Codex quotas (`CODEX_PLANNING_RESERVE`, hard non-lending sub-caps, decrement-on-start) +
+  `CodexOrchestrator` + evidence-gated Haiku→Grok triage → P5 cut INIT/DAG onto the router (last,
+  highest blast radius).
+- Per-cycle cost expectation: clean `mvp` ≈ $0 (Codex plans free, local executes); `production` ≈
+  $0.10–0.30 (paid planning only); problem-heavy ≈ $0.30–0.70, hard-capped ~$1 by
+  `MAX_PAID_WORKER_CALLS=15`.
 
 ---
 
