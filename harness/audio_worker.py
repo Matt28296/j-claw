@@ -1,45 +1,44 @@
-"""Audio generation worker — uses local Coqui TTS REST API.
+"""Audio generation worker — uses Piper TTS for local narration.
 
-Requires a running Coqui TTS server at COQUI_API_URL (default http://localhost:5002).
-Falls back to silent WAV placeholders when TTS is not running.
-No cloud API keys needed — fully local.
+Piper is a pre-compiled binary (no Python package, no GPU required).
+It runs at ~0.25x real-time on CPU: a 30-second narration clip generates
+in ~8 seconds.
+
+Falls back to silent WAV placeholders when the Piper binary is missing
+or the voice model is not found.
+
+Config (harness/.env or env vars):
+  PIPER_BINARY   — path to piper.exe
+  PIPER_VOICE    — path to the .onnx voice model
 """
 from __future__ import annotations
-import json
-import os
 import re
 import struct
+import subprocess
 import wave
-import urllib.request
-import urllib.error
 from pathlib import Path
 from rich.console import Console
 
-from config import COQUI_API_URL
+from config import PIPER_BINARY, PIPER_VOICE
 
 console = Console()
 
-_TTS_PATH = "/api/tts"
-
 
 def can_generate() -> bool:
-    """True when Coqui TTS server is reachable."""
-    try:
-        urllib.request.urlopen(f"{COQUI_API_URL}{_TTS_PATH}", timeout=2)
-        return True
-    except Exception:
-        return False
+    """True when the Piper binary and voice model are both present."""
+    return Path(PIPER_BINARY).exists() and Path(PIPER_VOICE).exists()
 
 
 def generate_audio(task, spec: dict, output_dir: Path) -> list[str]:
-    """
-    Generate audio files for an audio task via local Coqui TTS.
-    Returns list of written file paths (may be silent WAV placeholders if TTS unavailable).
+    """Generate audio files for an audio task via Piper TTS.
+
+    Returns list of written file paths (may be silent WAV placeholders
+    if Piper is unavailable).
     """
     if not can_generate():
         console.print(
-            f"  [yellow]Coqui TTS not reachable at {COQUI_API_URL} — writing silent WAV placeholders. "
-            "Start Coqui TTS server and set COQUI_API_URL in .env to enable real audio generation.[/yellow]"
+            f"  [yellow]Piper TTS not found at {PIPER_BINARY} — writing silent WAV "
+            "placeholders. Install Piper and set PIPER_BINARY / PIPER_VOICE in .env.[/yellow]"
         )
         return _write_all_placeholders(task, output_dir)
 
@@ -50,50 +49,68 @@ def generate_audio(task, spec: dict, output_dir: Path) -> list[str]:
         if ext not in (".wav", ".mp3", ".ogg"):
             continue
 
-        stem = Path(file_path).stem.replace("_", " ").replace("-", " ")
-        prompt = f"{task.objective}, {stem}"
-
-        brief = spec.get("creative_brief", {}) if spec else {}
-        audio_hints = " ".join(brief.get("audio_requirements", [])).lower()
-        speaker = "p229" if "male" in audio_hints else "p267"  # p229=male, p267=female
-
-        console.print(f"  [dim]Generating audio via Coqui TTS: {file_path}…[/dim]")
         dest = output_dir / file_path
         dest.parent.mkdir(parents=True, exist_ok=True)
 
+        narration_text = _build_narration(task, spec)
+        console.print(f"  [dim]Generating narration via Piper TTS: {file_path}…[/dim]")
+
         try:
-            payload = json.dumps({
-                "text": prompt[:500],
-                "speaker_id": speaker,
-                "style_wav": "",
-            }).encode("utf-8")
-
-            req = urllib.request.Request(
-                f"{COQUI_API_URL}{_TTS_PATH}",
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                audio_bytes = resp.read()
-
-            dest.write_bytes(audio_bytes)
-
-            # Duration control: parse task.objective for a duration hint (e.g. "15 second" or "30-second")
-            dur_match = re.search(r"(\d+)[\s-]second", task.objective, re.IGNORECASE)
-            if dur_match:
-                target_secs = int(dur_match.group(1))
-                _adjust_wav_duration(dest, target_secs)
-
+            _piper_synthesize(narration_text, dest)
             console.print(f"  [green]✓ Generated: {file_path}[/green]")
             written.append(file_path)
-
         except Exception as exc:
-            console.print(f"  [yellow]TTS generation failed for {file_path}: {exc} — using silent placeholder.[/yellow]")
+            console.print(
+                f"  [yellow]Piper TTS failed for {file_path}: {exc} — using silent placeholder.[/yellow]"
+            )
             _write_silent_wav(dest)
             written.append(file_path)
 
     return written
+
+
+def _piper_synthesize(text: str, dest: Path) -> None:
+    """Run Piper TTS, writing a WAV to dest.  Piper reads text from stdin."""
+    # Piper writes raw PCM to stdout when --output_file is omitted with
+    # --output_raw, but using --output_file is simpler and more reliable.
+    result = subprocess.run(
+        [
+            PIPER_BINARY,
+            "--model", PIPER_VOICE,
+            "--output_file", str(dest),
+        ],
+        input=text.encode("utf-8"),
+        capture_output=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace")[-400:]
+        raise RuntimeError(f"piper exited {result.returncode}: {stderr}")
+    if not dest.exists() or dest.stat().st_size < 44:
+        raise RuntimeError("piper produced no output file")
+
+
+def _build_narration(task, spec: dict) -> str:
+    """Build the narration text from the task objective and creative brief."""
+    brief = spec.get("creative_brief", {}) if spec else {}
+
+    # Prefer an explicit narration/voiceover field in the brief
+    narration = (
+        brief.get("narration")
+        or brief.get("voiceover")
+        or brief.get("dialogue")
+        or ""
+    )
+    if narration and isinstance(narration, str):
+        return narration.strip()
+
+    # Fall back to the task objective, cleaned up as spoken prose
+    text = task.objective or "Narrator speaks."
+    # Strip technical noise: file paths, brackets, parentheses
+    text = re.sub(r"\[.*?\]|\(.*?\)", "", text)
+    text = re.sub(r"\S+\.\w{2,4}\b", "", text)  # strip filenames
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or "Scene narrator."
 
 
 def _write_all_placeholders(task, output_dir: Path) -> list[str]:
@@ -107,59 +124,12 @@ def _write_all_placeholders(task, output_dir: Path) -> list[str]:
     return written
 
 
-def _adjust_wav_duration(dest: Path, target_secs: int) -> None:
-    """Truncate or pad a WAV file to the target duration in seconds."""
-    try:
-        with wave.open(str(dest), "rb") as wf:
-            params = wf.getparams()
-            frame_rate = wf.getframerate()
-            n_channels = wf.getnchannels()
-            sampwidth = wf.getsampwidth()
-            frames = wf.readframes(wf.getnframes())
-
-        target_frames = target_secs * frame_rate
-        bytes_per_frame = n_channels * sampwidth
-        current_frames = len(frames) // bytes_per_frame
-
-        if current_frames > target_frames:
-            frames = frames[:target_frames * bytes_per_frame]
-        elif current_frames < target_frames:
-            pad_frames = target_frames - current_frames
-            frames = frames + (b"\x00" * pad_frames * bytes_per_frame)
-
-        with wave.open(str(dest), "wb") as wf:
-            wf.setparams(params)
-            wf.writeframes(frames)
-    except Exception as exc:
-        console.print(f"  [yellow]Duration adjustment failed: {exc}[/yellow]")
-
-
-def _write_silent_wav(dest: Path) -> None:
-    """Write a minimal valid 44-byte WAV header with 0 data bytes so audio players don't crash."""
-    # WAV format: RIFF header (12 bytes) + fmt chunk (24 bytes) + data chunk (8 bytes) = 44 bytes
-    # num_channels=1 (mono), sample_rate=22050, bits_per_sample=16, data_size=0
-    num_channels = 1
+def _write_silent_wav(dest: Path, duration_seconds: int = 1) -> None:
+    """Write a minimal silent mono WAV."""
     sample_rate = 22050
-    bits_per_sample = 16
-    byte_rate = sample_rate * num_channels * bits_per_sample // 8
-    block_align = num_channels * bits_per_sample // 8
-    data_size = 0
-    chunk_size = 36 + data_size  # total RIFF chunk size minus 8 bytes for "RIFF" + size field
-
-    header = struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF",
-        chunk_size,
-        b"WAVE",
-        b"fmt ",
-        16,            # fmt chunk size (PCM)
-        1,             # audio format (PCM = 1)
-        num_channels,
-        sample_rate,
-        byte_rate,
-        block_align,
-        bits_per_sample,
-        b"data",
-        data_size,
-    )
-    dest.write_bytes(header)
+    n_frames = sample_rate * duration_seconds
+    with wave.open(str(dest), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(bytes(n_frames * 2))
