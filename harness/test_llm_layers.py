@@ -1018,6 +1018,33 @@ class TestCodexWorkerRung(unittest.TestCase):
         self.assertEqual(oauth.get("success", -1), 0,
                          "a failed codex invocation must NOT count as a success")
 
+    # ── 9. _call_codex must send stdin as UTF-8 (live-smoke-test regression) ────
+    def test_call_codex_sends_utf8_stdin(self):
+        """Regression for a bug found by the live smoke test: real worker prompts contain
+        non-ASCII glyphs (arrows, bullets, box chars). Windows text-mode subprocess defaults
+        to cp1252, and `codex exec` reads stdin strictly as UTF-8 → it rejected the prompt with
+        'input is not valid UTF-8'. _call_codex must pass encoding='utf-8' to subprocess.run."""
+        w = self._w
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.stdout = json.dumps({"files": []})
+        fake_proc.stderr = ""
+        captured = {}
+
+        def capture_run(cmd, **kwargs):
+            captured.update(kwargs)
+            return fake_proc
+
+        with patch.object(w.subprocess, "run", side_effect=capture_run), \
+             patch.object(w.shutil, "which", return_value="codex"):
+            # Prompt deliberately carries non-cp1252-safe characters.
+            w._call_codex("gpt-5.5", "system ▶ arrow → bullet •", "user 中文")
+
+        self.assertEqual(captured.get("encoding"), "utf-8",
+                         "_call_codex must pass encoding='utf-8' to subprocess.run")
+        self.assertEqual(captured.get("errors"), "replace",
+                         "_call_codex should tolerate stray output bytes via errors='replace'")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Runner
