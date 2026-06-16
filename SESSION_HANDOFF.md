@@ -5,7 +5,7 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#96 are MERGED to `main`** (incl. #91 Grok rung, #92 Phase-0 instrumentation, #94 Phase-1 learning-loop, #95 Phase-2 planning_call, #96 Phase-3 CD/TA Codex-first). Role-routing overhaul Phases 0–3 are merged; Phase 4 (difficulty routing + per-role quotas) is next.
+**PRs #10–#97 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective-fixes PR lands in this PR. Phase 4 (difficulty routing + per-role quotas) is next.
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
@@ -55,6 +55,17 @@ distill each strong-model rescue into a reusable local lesson.
   NB: this DROPS Haiku as the CD/TA primary — on the operator's box (Codex enabled) they now plan at
   $0 on Codex; if Codex is ever disabled they fall to Sonnet (pricier than the old Haiku, but more
   reliable for strict-schema planning — the documented trade-off). Suite 63 green.
+- **Review pass + corrective fixes (this PR)** — a 5-agent review team + an independent Codex
+  verification audited Phases 0–3 (Phases 1/2/3 + integration SOUND: learning-loop + telemetry chains
+  connected end-to-end, no circular import, groq confirmed dead, no dormant Phase 4/5 code). Fixed:
+  (1) `planning_call` now records real `latency_s` (was zeroed for CD/TA); (2) `CompositeOrchestrator`
+  no longer double-counts/phantom-successes the emergency hop (premature record dropped — the emergency
+  orchestrator records the real outcome); (3) CD/TA constructors no longer hard-require
+  `ANTHROPIC_API_KEY` (the old guard blocked key-free Codex-first planning) + dead
+  client/imports/`_strip_fences` removed. DEFERRED to Phase 4: the emergency-model override is
+  ineffective (`make_orchestrator` patches `config.ORCHESTRATOR_MODEL` but `Orchestrator.call` reads the
+  module import) — no-op today (both default to Sonnet), fixed when Phase 4 reworks orchestrator model
+  selection. Suite 64 green.
 - **Pending (one PR each, dependency-ordered — they share worker.py/orchestrator.py/config.py so
   cannot be parallelized):** P4 difficulty routing + per-role Codex quotas (`CODEX_PLANNING_RESERVE`,
   hard non-lending sub-caps, decrement-on-start) + `CodexOrchestrator` + evidence-gated Haiku→Grok

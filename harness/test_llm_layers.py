@@ -1538,6 +1538,22 @@ class TestPlanningCall(unittest.TestCase):
         ma.assert_called()
         self.assertTrue(out["ok"])
 
+    def test_planning_call_records_latency(self):
+        # Corrective fix: planning_call must pass latency_s to record_role_event (it was omitted,
+        # zeroing CD/TA latency telemetry that Phase 4 gates on).
+        w = self._w
+        calls = []
+
+        def rec(role, **kw):
+            calls.append(kw)
+
+        with patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "_call_codex", return_value=json.dumps({"ok": True})), \
+             patch.object(w, "record_role_event", side_effect=rec):
+            w.planning_call("s", "u", self._ok, role="creative")
+        self.assertTrue(calls, "record_role_event should be called")
+        self.assertIn("latency_s", calls[0], "planning_call must pass latency_s")
+
     def test_all_tiers_fail_raises(self):
         w = self._w
         with patch.object(w, "_reserve_oauth_call", return_value=True), \
@@ -1561,8 +1577,8 @@ class TestRoleCutover(unittest.TestCase):
             captured["validate_fn"] = validate_fn
             return brief
 
-        with patch.object(cd, "ANTHROPIC_API_KEY", "test-key"), \
-             patch.object(w, "planning_call", side_effect=fake_planning):
+        # No ANTHROPIC_API_KEY patch — the corrective fix lets CD construct key-free (Codex-first).
+        with patch.object(w, "planning_call", side_effect=fake_planning):
             out = cd.CreativeDirector().interpret("build me a site")
 
         self.assertEqual(out, brief)
@@ -1583,8 +1599,8 @@ class TestRoleCutover(unittest.TestCase):
             captured["role"] = role
             return spec
 
-        with patch.object(ta, "ANTHROPIC_API_KEY", "test-key"), \
-             patch.object(w, "planning_call", side_effect=fake_planning), \
+        # No ANTHROPIC_API_KEY patch — the corrective fix lets TA construct key-free (Codex-first).
+        with patch.object(w, "planning_call", side_effect=fake_planning), \
              patch.object(ta, "ProjectMemory") as mock_pm, \
              tempfile.TemporaryDirectory() as tmp:
             out = ta.TechnicalArchitect().review({"output_type": "web"}, "intent", Path(tmp))

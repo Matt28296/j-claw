@@ -1,18 +1,11 @@
 """Technical Architect — translates CREATIVE_BRIEF → TECH_SPEC and seeds project_memory/."""
 from __future__ import annotations
 import json
-import time
 from pathlib import Path
-import anthropic
 from rich.console import Console
 
-from config import (
-    ANTHROPIC_API_KEY, ORCHESTRATOR_MAX_TOKENS,
-    TECHNICAL_ARCHITECT_MODEL, TECHNICAL_ARCHITECT_PROMPT_PATH,
-)
+from config import TECHNICAL_ARCHITECT_PROMPT_PATH
 from project_memory import ProjectMemory
-from cache_telemetry import log_cache_usage
-from cost import record_usage, record_role_event
 
 console = Console()
 
@@ -27,9 +20,9 @@ class TechnicalArchitect:
     """Runs before the orchestrator INIT to own all technical decisions."""
 
     def __init__(self) -> None:
-        if not ANTHROPIC_API_KEY:
-            raise RuntimeError("ANTHROPIC_API_KEY is not set.")
-        self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        # No ANTHROPIC_API_KEY requirement: review() plans Codex-first ($0) via planning_call; the
+        # Anthropic fallback raises only if it is actually reached without a key (Codex-review fix:
+        # the old hard requirement blocked Codex-first planning when no Anthropic key was set).
         self._system_prompt = TECHNICAL_ARCHITECT_PROMPT_PATH.read_text(encoding="utf-8")
 
     def review(self, brief: dict, intent: str, output_dir: Path, max_retries: int = 2) -> dict:

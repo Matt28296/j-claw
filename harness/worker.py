@@ -1056,8 +1056,8 @@ def planning_call(
     fails on Codex quota — it always has the Anthropic fallback. Raises RuntimeError only if every
     tier fails validation.
 
-    INERT as of Phase 2 — landed + unit-tested but not yet wired to any role (Phase 3 routes CD/TA
-    through it; Phase 4 adds the per-role Codex sub-budget). Returns the validated dict.
+    Wired as of Phase 3 — Creative Director + Technical Architect route through this (Phase 4 adds
+    the per-role Codex sub-budget). Returns the validated dict.
     """
     global _codex_disabled
     last_err: Exception | None = None
@@ -1067,36 +1067,40 @@ def planning_call(
         for _attempt in range(2):
             if not _reserve_oauth_call("codex"):
                 break  # latched off or capacity exhausted → fall through to Anthropic
+            _t0 = time.monotonic()
             try:
                 raw = _call_codex(codex_model or CODEX_MODEL, system, user)
                 parsed = _loads_tolerant(_strip_fences(raw))
                 validate_fn(parsed)
                 record_role_event(role, provider="codex", model=codex_model or CODEX_MODEL,
-                                  success=True)
+                                  success=True, latency_s=time.monotonic() - _t0)
                 return parsed
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
                 if _is_codex_unavailable(exc):
                     with _oauth_lock:
                         _codex_disabled = True
-                    record_role_event(role, provider="codex", success=False)
+                    record_role_event(role, provider="codex", success=False,
+                                      latency_s=time.monotonic() - _t0)
                     break  # unavailable → stop retrying Codex, go to Anthropic
                 # capability/validation failure → record schema_fail and retry once at this tier
-                record_role_event(role, provider="codex",
-                                  model=codex_model or CODEX_MODEL, success=False, schema_fail=True)
+                record_role_event(role, provider="codex", model=codex_model or CODEX_MODEL,
+                                  success=False, schema_fail=True, latency_s=time.monotonic() - _t0)
 
     # Tier 2/3 — Anthropic Sonnet → Opus (paid), validated. fallback=True marks the cross-tier hop.
     for model in (sonnet_model, opus_model):
+        _t0 = time.monotonic()
         try:
             raw = _call_anthropic(model, system, user, label=role)
             parsed = _loads_tolerant(_strip_fences(raw))
             validate_fn(parsed)
-            record_role_event(role, provider="anthropic", model=model, success=True, fallback=True)
+            record_role_event(role, provider="anthropic", model=model, success=True,
+                              fallback=True, latency_s=time.monotonic() - _t0)
             return parsed
         except Exception as exc:  # noqa: BLE001
             last_err = exc
-            record_role_event(role, provider="anthropic", model=model,
-                              success=False, schema_fail=True, fallback=True)
+            record_role_event(role, provider="anthropic", model=model, success=False,
+                              schema_fail=True, fallback=True, latency_s=time.monotonic() - _t0)
             continue
 
     raise RuntimeError(f"planning_call({role}) exhausted all tiers. Last error: {last_err}") from last_err
