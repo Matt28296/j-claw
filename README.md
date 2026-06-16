@@ -6,7 +6,7 @@ Four layers of intelligence (each with a verified fallback path):
 - **Creative Director** (Claude Haiku) — interprets intent, determines output type, produces a creative brief *(WHAT)*
 - **Technical Architect** (Claude Haiku) — chooses stack, file structure, ADRs, seeds persistent project memory *(HOW)*
 - **Orchestrator** (Gemini 2.5 Flash, free tier — falls back flash→flash-lite with backoff; Anthropic Sonnet available as provider) — translates spec into a task DAG, drives the pipeline, self-heals
-- **Worker** (local Ollama ladder: `qwen3:8b → deepseek-coder-v2:16b`, escalating to `claude-sonnet-4-6` then `claude-opus-4-8` as a budget-capped last resort; an optional flat-rate `codex::gpt-5.5` OAuth rung can sit between local and Anthropic) — writes all code and runs all generation tasks, local-first
+- **Worker** (local-first ladder: `qwen3:8b → deepseek-coder-v2:16b` → two $0 flat-rate OAuth rungs `grok-build → codex::gpt-5.5` → `claude-sonnet-4-6` then `claude-opus-4-8` as a budget-capped last resort) — writes all code and runs all generation tasks, local-first; the free OAuth tiers (Grok via SuperGrok, Codex via ChatGPT) absorb escalations before any Anthropic dollars are spent
 
 ---
 
@@ -36,8 +36,8 @@ Four layers of intelligence (each with a verified fallback path):
             │   ├─ Code tasks      → Worker (Ollama) writes files + optional memory_patch.json
             │   ├─ DevOps tasks    → Worker writes Dockerfile, docker-compose, nginx, CI/CD
             │   ├─ Docs tasks      → Worker writes README, JSDoc, docstrings, CHANGELOG
-            │   ├─ Asset tasks     → Stable Diffusion WebUI (SD-enriched prompts from brief)
-            │   ├─ Audio tasks     → Coqui TTS (tone/speaker from brief)
+            │   ├─ Asset tasks     → ComfyUI + DirectML (style-aware checkpoint from brief)
+            │   ├─ Audio tasks     → Piper TTS (narration) + FluidSynth/MIDI (music)
             │   ├─ Video tasks     → video_worker (ffmpeg pipeline)
             │   └─ On failure      → EXECUTION_ERROR (Haiku) → retry
             │
