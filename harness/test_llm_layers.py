@@ -651,6 +651,62 @@ class TestExperienceLearning(unittest.TestCase):
         self.assertTrue(any("[escalation]" in l for l in lessons),
                         f"Expected escalation lesson in: {lessons}")
 
+    # ── Phase 1: log_escalation stores whitelisted rich lesson fields ─────────
+    def test_log_escalation_stores_lesson_fields(self):
+        self._el.log_escalation(
+            task_type="frontend", stack="vanilla",
+            failed_model="ollama/qwen3:8b", succeeded_model="codex/gpt-5.5",
+            error_summary="addEventListener lost this binding",
+            objective_summary="wire the submit handler",
+            lesson={
+                "solution_technique": "Bind class methods or use an arrow wrapper as listeners",
+                "prompt_hint": "Register listeners with an arrow wrapper to preserve `this`",
+                "anti_pattern": "passing this.handler unbound",
+                "verification_signal": "form submit no longer throws",
+                "confidence": "high",
+                "bogus_field": "should be dropped",
+            },
+        )
+        e = self._read_entries()[0]
+        self.assertTrue(e["solution_technique"].startswith("Bind "))
+        self.assertIn("arrow", e["prompt_hint"])
+        self.assertEqual(e["rescue_model"], "codex/gpt-5.5")
+        self.assertNotIn("bogus_field", e, "non-whitelisted lesson keys must be dropped")
+
+    # ── Phase 1: techniques rank before bare warnings in get_worker_hints ─────
+    def test_get_worker_hints_techniques_before_warnings(self):
+        self._el.log_escalation(  # a bare warning (no technique)
+            task_type="frontend", stack="vanilla",
+            failed_model="ollama/qwen3:8b", succeeded_model="anthropic/claude-sonnet-4-6",
+            error_summary="generic truncation somewhere", objective_summary="write the file",
+        )
+        self._el.log_escalation(  # a technique-bearing rescue
+            task_type="frontend", stack="vanilla",
+            failed_model="ollama/qwen3:8b", succeeded_model="codex/gpt-5.5",
+            error_summary="event listener binding broke", objective_summary="wire handler",
+            lesson={"prompt_hint": "Use an arrow wrapper to preserve `this`",
+                    "verification_signal": "submit works"},
+        )
+        hints = self._el.get_worker_hints("frontend", "vanilla", limit=3)
+        self.assertTrue(hints)
+        self.assertIn("Known successful technique", hints[0],
+                      f"a proven technique must rank before bare warnings: {hints}")
+        self.assertIn("arrow wrapper", hints[0])
+
+    # ── Phase 1: _parse_and_validate lesson boundary (top-level only, never a file) ──
+    def test_parse_and_validate_lesson_boundary(self):
+        import worker as w
+        raw = json.dumps({
+            "files": [{"path": "a.js", "content": "console.log('hello world');", "lesson": "LEAK"}],
+            "lesson": {"solution_technique": "do Y"},
+        })
+        result = w._parse_and_validate(raw)
+        # Top-level lesson is captured for the experience log…
+        self.assertEqual(result["lesson"]["solution_technique"], "do Y")
+        # …and each file entry is reduced to exactly {path, content}; the in-entry "lesson" is
+        # dropped, so learning metadata can never be written to disk as/inside a file.
+        self.assertEqual(set(result["files"][0].keys()), {"path", "content"})
+
     # ── execute_task hint injection: hint appears in user_message ─────────────
     def test_execute_task_injects_worker_hints(self):
         import worker as w
