@@ -5,8 +5,39 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#65 are MERGED to `main`.**
+**PRs #10–#68 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-15 (seventh session continued) — local Piper TTS + FluidSynth music (PR #68)
+
+### PR #68 — Replace Coqui TTS + MusicGen with Piper binary + algorithmic MIDI/FluidSynth
+
+**Problem:** The film stack had two placeholders in media generation:
+- `audio_worker.py` depended on a Coqui TTS HTTP server (`localhost:5002`) — not installed
+- `music_worker.py` depended on MusicGen/audiocraft — GPU-bound Python ML stack, not practical locally
+
+**`audio_worker.py`** — rewritten to use the pre-compiled Piper TTS binary (stdin → WAV, no GPU, ~0.26× realtime on CPU). `can_generate()` returns True when `PIPER_BINARY` and `PIPER_VOICE` both exist on disk. Narration text extracted from `creative_brief.narration/voiceover/dialogue`, falling back to a cleaned task objective. Smoke test: 195 KB WAV from "A detective walks through rain-slicked streets" in ~0.4s.
+
+**`music_worker.py`** — rewritten using pure-Python `midiutil` MIDI composition rendered via FluidSynth binary + FluidR3_GM.sf2 soundfont. Genre detection reads the creative brief for keywords → `jazz`/`horror`/`epic`/`romance`/`ambient`. Five genre composers, each producing a full MIDI arrangement:
+- `jazz` (120 BPM): walking bass (GM double_bass ch0) + sparse Cm7 piano comps (GM grand_piano ch1)
+- `horror` (60 BPM): tremolo strings cluster C2/C#2/D2 + pad swells every 8 beats
+- `epic` (140 BPM): brass C-major arpeggio + sustained strings + kick/snare/hihat drum kit
+- `romance` (72 BPM): strings C–Am–F–G progression + stepwise piano melody
+- `ambient` (80 BPM): long pad swells + sparse electric piano notes
+
+FluidSynth CLI argument fix: `-F`/`-r`/`-q` must precede the soundfont path. Smoke test: 5.5 MB jazz WAV (30s). Genre detection for "noir detective in 1940s Chicago" → `jazz` ✓.
+
+**`config.py`** — added `PIPER_BINARY`, `PIPER_VOICE`, `FLUIDSYNTH_BINARY`, `FLUIDSYNTH_SOUNDFONT` config entries.
+
+**Film stack is now fully local — no placeholders:**
+- ✅ Image frames: ComfyUI + DirectML + animagine-xl-3.1 (PR #67)
+- ✅ Narration audio: Piper TTS binary (this PR)
+- ✅ Background music: midiutil + FluidSynth + FluidR3_GM.sf2 (this PR)
+- ✅ Video assembly: ffmpeg 8.1.1 (on PATH from PR #15 era)
+
+**8/8 tests green.**
 
 ---
 
@@ -526,13 +557,15 @@ self-description (it says it routes to `qwen2.5-coder:14b` — actually the 3-ru
 
 ## 📋 WHAT'S LEFT TO FINALIZE (priority order, updated 2026-06-15 seventh session end)
 
-1. **Tony Montana v8 clean run** — use `/run Tony Montana Miami Vice fan site v8` (unique intent bypasses idempotency guard). Expected: DAG ~20–24 tasks, CSS split across named files (no `css/style.css`), sections with both `id` and `class` from the start (no post-hoc fix needed), dark mode CSS task as a declared dependency. Validates PRs #51–53 rules work for Ollama workers independently.
-2. **Factory rehearsal items #3–7** (binding acceptance test) — from Telegram only:
-   - **#3 `/run` a film** — aggregate push, real per-scene mp4s, probe-clean `final.mp4`
-   - **#4 impossible intent** — honest FAIL push
-   - **#5 kill Ollama mid-build** — crash push, pipeline recovers
-   - **#6 two queued builds** — strict FIFO, both complete and push
-   - **#7 reboot + repeat** — no interactive auth anywhere
+1. **Factory rehearsal test #4 — film run (~$0.10)** — film stack is now fully local (ComfyUI + Piper TTS + FluidSynth, PR #67 + #68). Run from Telegram:
+   ```
+   /run Make a 30 second noir film about a detective in 1940s Chicago
+   ```
+   Expected: genre detected as `jazz`, walking-bass MIDI score rendered, Piper narration generated, ComfyUI noir frames, ffmpeg assembly → `final.mp4`, aggregate Telegram push.
+2. **Factory rehearsal test #5 — impossible intent (revised)** — run the BCI/hologram prompt and let it complete rather than canceling. Expect honest FAIL verdict at PROJECT_REVIEW (not garbage PASS). If it passes, the Creative Director needs impossible-intent detection.
+3. **Factory rehearsal tests #6–#8** — kill Ollama mid-build, FIFO queue, reboot.
+4. **(Optional)** Better noir visual model — swap animagine-xl-3.1 for Realistic Vision V5.1 SDXL in ComfyUI for more cinematic frames.
+5. **(Optional)** Impossible-intent detection — Creative Director should detect physically-unbuildable requests and fail at INIT rather than generating a full DAG.
 3. **Carry-overs (not blocking):** native mobile CI runner; Playwright runner task type in the DAG; IPFS/on-chain CI deploy hook; LemonSqueezy / Stripe Connect prompts.
 4. **Optional hardening / polish:**
    - Worker-timeout hard bound: `shutdown(wait=False, cancel_futures=True)` (3.9+) + audit inner timeouts.

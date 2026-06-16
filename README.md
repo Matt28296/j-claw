@@ -82,7 +82,7 @@ Windows build box. A check that can't run (missing tool) is reported as an hones
 | `video-editor` | Browser-based clip editor — ffmpeg WASM + Canvas API | build | build |
 | `tauri` | Rust + WebView desktop apps — lighter than Electron | build | build |
 | `godot` | GDScript games | Godot headless syntax check | static |
-| `film` | Narrative film / animated explainer — ffmpeg + SD frames + Coqui narration | ffprobe + frame integrity + A/V sync | artifact |
+| `film` | Narrative film / animated explainer — ffmpeg + ComfyUI frames + Piper narration + FluidSynth music | ffprobe + frame integrity + A/V sync | artifact |
 | `socket-io` | Node.js + Socket.io real-time multiplayer | `npm install` | install |
 | `electron` | Electron desktop apps (contextIsolation + contextBridge) | `npm install` | install |
 | `websocket-sse` | Real-time dashboards and data streams | `npm install` | install |
@@ -106,8 +106,9 @@ All stacks also support:
 - **JWT auth** (full-stack): `auth.py`, User model, `/auth/register` + `/auth/login`, React `LoginForm`, `RegisterForm`, `PrivateRoute`
 - **DevOps tasks**: Dockerfile (multi-stage, non-root), `docker-compose.yml`, `nginx.conf`, `.github/workflows/ci.yml`, `.env.example`
 - **Documentation tasks**: `README.md`, JSDoc comments, Google-style Python docstrings, `CHANGELOG.md`
-- **Asset generation**: Stable Diffusion WebUI with Creative Director-enriched prompts (SVG fallback if SD not running)
-- **Audio generation**: Coqui TTS with tone/speaker from Creative Brief (silent WAV fallback)
+- **Asset generation**: ComfyUI (DirectML/CUDA) or A1111/Forge WebUI with Creative Director-enriched prompts (SVG/PNG fallback if offline)
+- **Audio generation**: Piper TTS binary with narration text from Creative Brief (silent WAV fallback when binary absent)
+- **Music generation**: algorithmic MIDI (midiutil, genre-matched: jazz/horror/epic/romance/ambient) rendered via FluidSynth + FluidR3_GM soundfont (silent WAV fallback)
 - **Security scanning**: `bandit` (Python) / `npm audit` (Node) — `verification: "security"` task type
 - **Lighthouse**: performance + accessibility checks for web projects — `verification: "lighthouse"` task type
 
@@ -246,9 +247,15 @@ copy harness\.env.example harness\.env
 | `WORKER_FALLBACKS` | openrouter free + `ollama::qwen3:8b` | Legacy fallback chain (used only when `WORKER_LADDER` is unset) |
 | `MAX_PARALLEL_WORKERS` | `4` | Concurrent Ollama workers (independent DAG branches) |
 | `ORCHESTRATOR_MAX_TOKENS` | `16384` | Raise to `32768` for very large full-stack DAGs |
-| `SD_API_URL` | `http://localhost:7860` | Stable Diffusion WebUI endpoint for asset tasks |
-| `ASSET_PROVIDER` | `sd` | `sd` or `none` |
-| `COQUI_API_URL` | `http://localhost:5002` | Coqui TTS endpoint for audio tasks |
+| `SD_API_URL` | `http://localhost:7860` | A1111/Forge WebUI endpoint (used when `ASSET_PROVIDER=sd`) |
+| `ASSET_PROVIDER` | `sd` | `comfyui` \| `sd` \| `none` |
+| `COMFYUI_API_URL` | `http://localhost:8188` | ComfyUI API endpoint (used when `ASSET_PROVIDER=comfyui`) |
+| `COMFYUI_CHECKPOINT` | auto-detect | ComfyUI checkpoint name; empty = use first installed model |
+| `COMFYUI_WIDTH` / `COMFYUI_HEIGHT` | `768` / `512` | Output image dimensions |
+| `PIPER_BINARY` | — | Path to `piper.exe` (download from github.com/rhasspy/piper) |
+| `PIPER_VOICE` | — | Path to `.onnx` voice model (e.g. `en_US-ryan-high.onnx`) |
+| `FLUIDSYNTH_BINARY` | — | Path to `fluidsynth.exe` for MIDI→WAV rendering |
+| `FLUIDSYNTH_SOUNDFONT` | — | Path to `.sf2` soundfont (e.g. `FluidR3_GM.sf2`, ~141 MB) |
 | `GODOT_PATH` | `godot` | Path to Godot 4 CLI binary (for headless verification) |
 | `DEPLOY_HOOK` | — | CLI command run after git commit (e.g. `vercel --prod --yes`) |
 | `JWT_SECRET` | random default | Secret key for generated apps that include auth |
@@ -366,25 +373,40 @@ OpenClaw's embedded agent acts as a thin **router** — it reads the j-claw SKIL
 
 ## Asset Generation
 
-Image assets (sprites, icons, backgrounds) are generated locally via Stable Diffusion WebUI:
+Image assets (sprites, icons, backgrounds) are generated locally via ComfyUI or AUTOMATIC1111/Forge:
 
-1. Start AUTOMATIC1111/Forge/ComfyUI with `--api` flag
-2. Run j-claw normally — asset tasks are routed to SD automatically
-3. If SD is not running, SVG color-block placeholders are written instead (pipeline continues unblocked)
+- **ComfyUI** (`ASSET_PROVIDER=comfyui`, default): async workflow API on port 8188. Supports DirectML (AMD) and CUDA. Auto-detects installed checkpoint. Start via `run_amd_gpu.bat` (DirectML) or standard launcher.
+- **A1111/Forge** (`ASSET_PROVIDER=sd`): sync API on port 7860.
+- **Disabled** (`ASSET_PROVIDER=none`) or backend unreachable: SVG/PNG color-block placeholders are written instead (pipeline continues unblocked).
 
-Configure the SD endpoint: `SD_API_URL=http://localhost:7860` in `.env`.
+Configure: `ASSET_PROVIDER`, `COMFYUI_API_URL`, `COMFYUI_WIDTH`, `COMFYUI_HEIGHT`, `COMFYUI_CHECKPOINT` in `.env`.
 
 ---
 
 ## Audio Generation
 
-Sound effects and TTS for game/app projects via Coqui TTS:
+Narration and voice-over for film/audio projects via Piper TTS (local binary, no GPU, no internet):
 
-1. Start a Coqui TTS server at `localhost:5002`
-2. Audio tasks are routed automatically
-3. Silent `.wav` placeholders are written if Coqui is not running
+1. Download the Piper binary for Windows from github.com/rhasspy/piper/releases
+2. Download an ONNX voice model (e.g. `en_US-ryan-high.onnx`)
+3. Set `PIPER_BINARY` and `PIPER_VOICE` in `.env`
+4. Audio tasks are routed automatically — ~0.26× realtime on CPU
+5. Silent `.wav` placeholders are written if the binary or voice model is absent
 
-Configure: `COQUI_API_URL=http://localhost:5002` in `.env`.
+Configure: `PIPER_BINARY`, `PIPER_VOICE` in `.env`.
+
+---
+
+## Music Generation
+
+Background music for film/audio projects via algorithmic MIDI composition rendered with FluidSynth:
+
+1. Download FluidSynth for Windows from github.com/FluidSynth/fluidsynth/releases
+2. Download the FluidR3_GM.sf2 soundfont (~141 MB General MIDI)
+3. `pip install midiutil` in the harness venv
+4. Set `FLUIDSYNTH_BINARY` and `FLUIDSYNTH_SOUNDFONT` in `.env`
+5. Genre is auto-detected from the creative brief: `jazz` (walking bass + piano), `horror` (tremolo strings + pad), `epic` (brass + drums), `romance` (strings + piano), `ambient` (pad)
+6. Silent `.wav` placeholders are written if FluidSynth or the soundfont is absent
 
 ---
 
@@ -539,12 +561,14 @@ Every project writes to `harness/projects/<slug>/`:
 | **Ollama connection error guard — no silent cloud escalation (PR #61, 2026-06-15):** `_is_ollama_unavailable(exc)` in `worker.py` distinguishes infrastructure failures (server unreachable: `ConnectionError`, `httpx.ConnectError`, "connection refused" patterns) from capability failures (bad output, wrong JSON). Infrastructure failure on an Ollama rung raises `RuntimeError` immediately — the worker ladder does NOT walk up to Sonnet/Opus. Discovered after a $0.50 build where all 23+ tasks silently escalated to Sonnet because Ollama was down. 32/32 tests green | ✅ |
 | **Worker quality rules (PR #63, 2026-06-15):** Three systematic gaps fixed after the NES portfolio rehearsal build. `orchestrator.txt`: Tailwind CDN changed from MANDATORY to CONDITIONAL (never add it for pixel-art/retro/custom-aesthetic projects); DOM event listener binding rule added (unbound method reference loses `this` — always use arrow wrapper or bind in constructor); contact form rule added (static vanilla projects must use `mailto:` placeholder, never `formspree.io/f/REPLACE_ME` which silently 404s). `harness/completeness.py`: `_missing_manifest_icons()` added — parses `manifest.json`, flags any declared `icons[].src` paths that don't exist on disk. 32/32 tests green | ✅ |
 | **CANCELED state on /cancel (PR #65, 2026-06-15):** `cmd_cancel` in `telegram_bot.py` killed the subprocess but never wrote a terminal state to `mission_control.json` — the killed process can't flush state itself. Added `_write_canceled_state()`, called immediately after kill: patches the JSON file directly from the bot process, sets `pipeline_state: "CANCELED"`, clears `active_agent`, writes the `terminal` block, marks running `agent_nodes` as canceled. Dashboard now flips to CANCELED terminal state immediately instead of hanging on the last EXECUTING snapshot | ✅ |
+| **ComfyUI DirectML backend (PR #67, 2026-06-15):** `asset_worker.py` rewritten with a ComfyUI backend: async SDXL workflow (`/prompt` → poll `/history/{id}` → `/view`), auto-detects installed checkpoint, configurable resolution. `ASSET_PROVIDER=comfyui` in `.env`. `run_amd_gpu.bat` fixed (`--cpu` → `--directml`) for AMD RX 9070 XT. A1111/Forge sync path preserved for `ASSET_PROVIDER=sd` | ✅ |
+| **Local Piper TTS + FluidSynth music (PR #68, 2026-06-15):** `audio_worker.py` rewritten — replaces Coqui TTS HTTP server with Piper binary subprocess (stdin→WAV, ~0.26× realtime CPU). `music_worker.py` rewritten — replaces MusicGen/audiocraft with `midiutil` MIDI composition rendered via FluidSynth + FluidR3_GM soundfont. Genre auto-detected from creative brief (jazz/horror/epic/romance/ambient); jazz uses walking bass + Cm7 piano comps at 120 BPM (correct for noir film test). Film stack is now fully local: ComfyUI frames ✅ + Piper narration ✅ + FluidSynth music ✅ + ffmpeg assembly ✅ | ✅ |
 
 ---
 
 ## Current Status & What's Left to Finalize
 
-**2026-06-15 (seventh session) — PRs #55–#65 merged; cancel state fix live; factory rehearsal 3/8 done.** PR #55: context-aware dashboard control buttons. PR #57: worker escalation learning loop. PR #58: roadmap notes. PR #59/#62: docs syncs. PR #60: Ollama token tracking in cost panel. PR #61 (critical): `_is_ollama_unavailable()` guard — unreachable Ollama fails immediately, no silent Sonnet escalation (saved $0.50 discovered live). PR #63: three worker quality rules — Tailwind CDN conditional (not mandatory for retro/pixel-art stacks), DOM event listener binding rule, contact form placeholder guard; + manifest icon existence check in `completeness.py`. Three factory rehearsal tests complete: #1 portfolio deploy ✅, #2 `/continue` fix flow ✅, #3 Tony Montana v8 clean run ✅. Remaining rehearsal tests #4–#8 pending (film run, impossible intent, kill-Ollama, FIFO queue, reboot).
+**2026-06-15 (seventh session) — PRs #55–#68 merged; film stack fully local; factory rehearsal 3/8 done.** PR #55: context-aware dashboard control buttons. PR #57: worker escalation learning loop. PR #60: Ollama token tracking in cost panel. PR #61 (critical): `_is_ollama_unavailable()` guard — unreachable Ollama fails immediately, no silent Sonnet escalation (saved $0.50 discovered live). PR #63: three worker quality rules — Tailwind CDN conditional, DOM event listener binding, contact form placeholder guard; + manifest icon existence check. PR #65: CANCELED state written to `mission_control.json` on `/cancel`. PR #67: ComfyUI DirectML backend (`--cpu` → `--directml` on AMD RX 9070 XT, SDXL async workflow). PR #68: Piper TTS narration + FluidSynth algorithmic music — film stack is now 100% local (no Coqui/MusicGen placeholders). Three factory rehearsal tests complete: #1 portfolio deploy ✅, #2 `/continue` fix flow ✅, #3 Tony Montana v8 clean run ✅. Next: factory rehearsal test #4 — film noir run.
 
 **2026-06-15 (sixth session end) — PRs #10–#54 all merged; unique file ownership enforced; completeness.py stripping order fixed; ID/class coordination + JS toggle class rules enforced; .git rmtree PermissionError fixed.** The target: Telegram is the only human interface; builds queue and run unattended; finished web builds auto-deploy to a reachable URL; the operator is contacted only on terminal outcome. All machinery for that is merged and hardened.
 
