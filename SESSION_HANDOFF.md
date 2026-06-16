@@ -19,6 +19,8 @@ Test #4 (the noir film run) had **two distinct failure modes**, both now fixed. 
 
 These complement PR #71 (RAM/ffmpeg-cwd/synthetic-render-guard). **#71 = pipeline completes; #86 = right project shape; #87 = it renders within the timeout.** Next step is a real end-to-end test #4 run (factory-rehearsal item #3).
 
+**Housekeeping (2026-06-16):** The #87 proof artifacts (`harness/_motion_proof/` — 2 input stills, the 6s noir render, extracted Ken-Burns/xfade frames) were validated, then **deleted as scratch**. A gitignore rule `/harness/_*` now covers underscore-prefixed scratch dirs/files under `harness/` (it rode upstream on `origin/main` via the PR #88 handoff-sync merge — a concurrent session scooped the chore commit into its branch, see [[feedback-concurrent-sessions]]). Also removed the stray `harness/_test4_noir.log`. Working tree clean, `main` = `origin/main`.
+
 ---
 
 ## ✅ DONE 2026-06-16 (eighth session continued) — Codex rung FULL live validation + UTF-8 stdin fix (PR #84, MERGED `527438e`)
