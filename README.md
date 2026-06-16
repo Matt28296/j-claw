@@ -510,8 +510,8 @@ Every project writes to `harness/projects/<slug>/`:
 | Experience tracker (JSONL fix-outcome log) | ✅ |
 | Orchestrator JSON truncation fix + FORMAT 5 bug fix | ✅ |
 | OpenClaw skill deployed + Telegram bot paired | ✅ |
-| Creative Director (Claude Opus) — WHAT layer | ✅ |
-| Technical Architect (Claude Sonnet) — HOW layer + ADRs | ✅ |
+| Creative Director (Codex-first; Sonnet→Opus fallback) — WHAT layer | ✅ |
+| Technical Architect (Codex-first; Sonnet→Opus fallback) — HOW layer + ADRs | ✅ |
 | Persistent project memory (project_memory/ + runtime_memory/) | ✅ |
 | Context Builder — deterministic ~4K token selection per task | ✅ |
 | Memory Patch System — operation-based, optimistic concurrency | ✅ |
