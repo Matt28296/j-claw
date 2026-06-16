@@ -5,18 +5,34 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#78 are MERGED to `main`.** PR #79 (Codex OAuth worker rung) is OPEN — see below.
+**PRs #10–#81 are MERGED to `main`.**
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
 
-## ✅ DONE 2026-06-16 (eighth session continued) — Codex CLI OAuth worker rung (PR #79, branch `feat/codex-worker-rung`)
+## ✅ DONE 2026-06-16 (eighth session continued) — Codex OAuth rung hardening per second-opinion review (PR #81, MERGED `ac63575`)
+
+Codex gave the merged PR #79 an independent second-opinion review: **verdict "the change looks solid"**, no correctness-breaking bug, three hardening items. All three applied + merged in PR #81:
+
+- **Medium (latch/reservation atomicity)** — `worker.py`: the `_codex_disabled` latch check now lives INSIDE `_reserve_oauth_call`, under the same `_oauth_lock` as the capacity bump. Previously the gate read the latch and reserved capacity as two separate steps, so under parallel workers one worker could read the latch False, another flip it True after an auth/quota failure, and the first still launch `codex exec`. Now atomic. The gate keeps only the cheap `CODEX_CLI_ENABLED` short-circuit (config constant, no race).
+- **Low (over-broad classifier)** — `_is_codex_unavailable` dropped the bare `"login"` substring (it could flag a genuine capability failure — e.g. a task writing a `LoginForm` echoed on a nonzero exit — as "unavailable" and wrongly skip the rung). Kept specific phrases: `"please run codex login"`, `"login required"`, `"run codex login"`, etc.
+- **Low (failure telemetry)** — `_call_codex` now records `success=False` on any failed invocation. `calls` = attempted invocations; `success` = how many returned — so the auth/quota failures that trip the latch are now visible in `cost_summary()["oauth"]` / the dashboard.
+
+**Also:** pinned `CODEX_CLI_ENABLED=True` in `TestCodexWorkerRung.setUp` — the suite previously depended on the operator's untracked `harness/.env` (a hermeticity gap the reviewer flagged in a separate, crashed pass: on a clean checkout/CI the flag defaults False, making the routing assertions vacuous). Added a bare-`"login"` false-positive test + a failed-call telemetry test. **Suite 40 green.**
+
+> ⚠️ **Review-tooling note (worth remembering):** the Codex rescue review had an orphaned-process bug — a job whose process died ~3.5 min in still reported `status: running` for 30+ min because the companion computes `elapsed` as now-minus-start and never noticed the exit (same failure class as the bot-restart orphan). When watching a Codex job, watch the **log file's write-time**, not the `elapsed` counter. Also: the rescue subagent launched TWO parallel passes on one shared runtime, which serialized them — prefer a single pass.
+
+**Still the one real gap:** the rung is fully unit-tested but `codex exec` has **never been run live**. Smoke-test it before trusting it in a build (enable, `codex login`, force one escalation through the codex rung, confirm valid file output).
+
+---
+
+## ✅ DONE 2026-06-16 (eighth session continued) — Codex CLI OAuth worker rung (PR #79, MERGED `18c228c`)
 
 **What:** an optional flat-rate worker rung that sits BETWEEN the strongest local Ollama rung and the paid Anthropic rungs. It bills against the operator's ChatGPT Plus/Pro subscription (OAuth, flat-rate) rather than per token — so escalations that would otherwise spend Anthropic dollars are caught for free first, and Anthropic becomes the true last resort.
 
 **Why this is the right shape:** the worker ladder already escalates capability failures local → cloud. The missing tier was a strong-but-free model. Codex (gpt-5.5) on a subscription is exactly that — stronger than the 16B local rung, $0 marginal cost.
 
-### Files changed (committed as `56be3c4`, pushed; PR #79 OPEN, mergeable/clean, full suite 39 green):
+### Files changed (PR #79 MERGED as squash `18c228c`; later hardened by PR #81 — see above):
 - **`config.py`** — `CODEX_CLI_ENABLED` (default `false`), `CODEX_HOME`, `CODEX_MODEL=gpt-5.5`, `CODEX_EFFORT`, `CODEX_CLI_MAX_CALLS=20`, `CODEX_TIMEOUT=300`. Default `WORKER_LADDER` gains a `codex::gpt-5.5` rung (inert unless enabled). New declarative provider-class sets: `METERED_PROVIDERS={anthropic,openrouter,groq}`, `OAUTH_PROVIDERS={codex}`.
 - **`worker.py`** —
   - `_call_codex(model, system, user) -> str` mirrors `_call_ollama`'s contract: shells `codex exec --skip-git-repo-check --ephemeral -s read-only -o <tmpfile> -m <model> -` with the combined prompt on stdin, reads the clean final message from the temp file, records $0 telemetry, bounded by `CODEX_TIMEOUT`.
