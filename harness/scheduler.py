@@ -125,6 +125,10 @@ class Scheduler:
     def _dispatch_batch(self, ready: list[Task]) -> None:
         """Run a batch of ready tasks under a per-batch timeout.
 
+        Asset tasks (ComfyUI) and code tasks (Ollama) are split into sequential
+        sub-batches when both are present in the same wave — they compete for the
+        same system RAM and cause OOM when run concurrently.
+
         ALL batches go through the timeout path — including single-task batches — so one hung
         worker cannot stall the pipeline indefinitely (the previous serial path had no timeout).
 
@@ -135,6 +139,18 @@ class Scheduler:
         own internal timeout — which they currently do (WORKER_TASK_TIMEOUT / request timeouts).
         Do not remove those inner timeouts assuming this wait alone bounds wall-clock.
         """
+        asset_tasks = [t for t in ready if _is_asset_task(t)]
+        other_tasks = [t for t in ready if not _is_asset_task(t)]
+        if asset_tasks and other_tasks:
+            # Run ComfyUI (asset) and Ollama (code) tasks in separate sub-batches to
+            # prevent concurrent RAM exhaustion on machines with limited system memory.
+            self._dispatch_sub_batch(asset_tasks)
+            self._dispatch_sub_batch(other_tasks)
+        else:
+            self._dispatch_sub_batch(ready)
+
+    def _dispatch_sub_batch(self, ready: list[Task]) -> None:
+        """Execute one concurrent sub-batch with a shared timeout."""
         workers = max(1, min(MAX_PARALLEL_WORKERS, len(ready)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(self._run_task, task): task for task in ready}
