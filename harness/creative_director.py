@@ -21,39 +21,25 @@ class CreativeDirector:
 
     def interpret(self, intent: str) -> dict:
         """
-        Send raw user intent to the Creative Director model.
+        Send raw user intent through the Codex-first planning ladder (Phase 3).
         Returns a validated CREATIVE_BRIEF dict.
-        """
-        _t0 = time.monotonic()
-        response = self._client.messages.create(
-            model=CREATIVE_DIRECTOR_MODEL,
-            max_tokens=2048,
-            system=[
-                {
-                    "type": "text",
-                    "text": self._system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[{"role": "user", "content": intent}],
-        )
-        log_cache_usage(response.usage, "creative")
-        record_usage(response.usage, CREATIVE_DIRECTOR_MODEL, "creative")
 
-        try:
-            text = response.content[0].text.strip()
-            text = _strip_fences(text)
-            brief = json.loads(text)
+        Routes through worker.planning_call: Codex (free OAuth) → one same-tier retry → Anthropic
+        Sonnet → Opus, gated by the required-field validation below (preserved as the fallback
+        boundary, not mere parse success). planning_call handles telemetry + fallback; Codex
+        unavailability/quota never hard-fails — it falls through to Anthropic.
+        """
+        from worker import planning_call
+
+        def _validate(brief):
+            if not isinstance(brief, dict):
+                raise ValueError("CREATIVE_BRIEF must be a JSON object")
             if "output_type" not in brief:
                 raise ValueError("CREATIVE_BRIEF missing required field: output_type")
             if not isinstance(brief.get("features"), list) or not brief["features"]:
                 raise ValueError("CREATIVE_BRIEF missing required field: features (non-empty array)")
-        except (json.JSONDecodeError, ValueError):
-            record_role_event("creative", provider="anthropic", model=CREATIVE_DIRECTOR_MODEL,
-                              success=False, schema_fail=True, latency_s=time.monotonic() - _t0)
-            raise
-        record_role_event("creative", provider="anthropic", model=CREATIVE_DIRECTOR_MODEL,
-                          success=True, latency_s=time.monotonic() - _t0)
+
+        brief = planning_call(self._system_prompt, intent, _validate, role="creative")
 
         console.print(
             f"[bold cyan]Creative Brief:[/bold cyan] "

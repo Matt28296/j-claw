@@ -39,54 +39,24 @@ class TechnicalArchitect:
         Raises RuntimeError if all retries fail.
         """
         user_message = json.dumps({"creative_brief": brief, "user_intent": intent})
-        last_error: Exception | None = None
 
-        for attempt in range(max_retries + 1):
-            try:
-                _t0 = time.monotonic()
-                response = self._client.messages.create(
-                    model=TECHNICAL_ARCHITECT_MODEL,
-                    max_tokens=ORCHESTRATOR_MAX_TOKENS,
-                    system=[{
-                        "type": "text",
-                        "text": self._system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }],
-                    messages=[{"role": "user", "content": user_message}],
-                )
-                log_cache_usage(response.usage, "architect")
-                record_usage(response.usage, TECHNICAL_ARCHITECT_MODEL, "architect")
-                text = response.content[0].text.strip()
-                text = _strip_fences(text)
-                tech_spec = json.loads(text)
-                _validate(tech_spec)
-                record_role_event("architect", provider="anthropic", model=TECHNICAL_ARCHITECT_MODEL,
-                                  success=True, latency_s=time.monotonic() - _t0)
+        # Phase 3: Codex-first planning ladder (Codex → one same-tier retry → Sonnet → Opus), gated
+        # by _validate (allowed-stack + required fields) as the fallback boundary — not mere parse
+        # success. planning_call owns retries, fallback, and telemetry; Codex unavailability/quota
+        # never hard-fails the run (falls through to Anthropic). `max_retries` is retained for
+        # signature compatibility but retry/fallback is now handled inside planning_call.
+        from worker import planning_call
+        tech_spec = planning_call(self._system_prompt, user_message, _validate, role="architect")
 
-                ProjectMemory(output_dir).initialize(tech_spec, intent)
+        ProjectMemory(output_dir).initialize(tech_spec, intent)
 
-                console.print(
-                    f"[bold cyan]Technical Architect:[/bold cyan] "
-                    f"stack=[green]{tech_spec['confirmed_stack']}[/green]  "
-                    f"files=[green]{len(tech_spec.get('file_structure', []))}[/green]  "
-                    f"ADRs=[green]{len(tech_spec.get('adrs_to_create', []))}[/green]"
-                )
-                return tech_spec
-
-            except (json.JSONDecodeError, ValueError) as exc:
-                last_error = exc
-                record_role_event("architect", provider="anthropic", model=TECHNICAL_ARCHITECT_MODEL,
-                                  success=False, schema_fail=True, latency_s=time.monotonic() - _t0)
-                if attempt < max_retries:
-                    console.print(
-                        f"[yellow]Technical Architect output invalid "
-                        f"(attempt {attempt + 1}/{max_retries + 1}): {exc} — retrying...[/yellow]"
-                    )
-                    time.sleep(1 + attempt)
-
-        raise RuntimeError(
-            f"TechnicalArchitect failed after {max_retries + 1} attempts: {last_error}"
-        ) from last_error
+        console.print(
+            f"[bold cyan]Technical Architect:[/bold cyan] "
+            f"stack=[green]{tech_spec['confirmed_stack']}[/green]  "
+            f"files=[green]{len(tech_spec.get('file_structure', []))}[/green]  "
+            f"ADRs=[green]{len(tech_spec.get('adrs_to_create', []))}[/green]"
+        )
+        return tech_spec
 
 
 def _validate(spec: dict) -> None:
