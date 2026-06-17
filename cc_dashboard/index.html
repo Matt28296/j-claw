@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Code Mission Control</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:       #0a0710;
+  --surface:  #130d20;
+  --surface-2:#1a1230;
+  --border:   #2a1f45;
+  --border-hi:#a06eff;
+  --text:     #ece6ff;
+  --muted:    #8a7caa;
+  --green:    #46e6a0;
+  --blue:     #6ab0ff;
+  --yellow:   #f5d76e;
+  --red:      #ff6b8a;
+  --amber:    #f5b76e;
+  --purple:   #b78cff;
+  --cyan:     #53f2c2;
+  --shadow:   rgba(160,110,255,0.28);
+}
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #0c0814; }
+::-webkit-scrollbar-thumb { background: #2f2350; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--purple); }
+
+body {
+  background:
+    radial-gradient(circle at 18% 6%, rgba(160,110,255,0.10), transparent 28%),
+    linear-gradient(180deg, #0a0710 0%, #0c0814 50%, #050309 100%);
+  color: var(--text);
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Header ── */
+.header {
+  background: linear-gradient(90deg, rgba(19,13,32,0.98), rgba(26,18,48,0.96));
+  border-bottom: 1px solid var(--border-hi);
+  padding: 10px 18px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  box-shadow: 0 0 20px rgba(160,110,255,0.10);
+}
+.logo {
+  font-size: 15px; font-weight: bold; color: var(--purple);
+  text-shadow: 0 0 12px var(--shadow);
+  white-space: nowrap;
+}
+.live-wrap { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+.live-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--green);
+  animation: pulse 2s ease-in-out infinite;
+  box-shadow: 0 0 8px rgba(70,230,160,0.9);
+}
+.live-dot.stale   { background: var(--amber); animation: none; box-shadow: 0 0 8px rgba(245,183,110,0.6); }
+.live-dot.stalled { background: var(--red);   animation: none; box-shadow: 0 0 9px rgba(255,107,138,0.7); }
+.live-dot.offline { background: #5f5870;       animation: none; box-shadow: none; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+.health-live { color: var(--green); }
+.health-idle { color: var(--blue); }
+.health-stale { color: var(--amber); }
+.health-stalled, .health-unreachable { color: var(--red); }
+
+.title-text { flex: 1; color: #c9bdf0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 10px; padding: 2px 9px; font-size: 11px; color: #c0b0e8;
+  white-space: nowrap;
+}
+.badge.model  { color: var(--purple); border-color: #4a3072; }
+.badge.branch { color: var(--green);  border-color: #1f5a3e; }
+.badge.mode   { color: var(--amber);  border-color: #5a4520; }
+
+/* ── Main grid ── */
+.main {
+  display: grid;
+  grid-template-columns: 320px 1fr 340px;
+  flex: 1;
+  overflow: hidden;
+}
+.col { display: flex; flex-direction: column; overflow: hidden; }
+.col.left   { border-right: 1px solid var(--border); }
+.col.right  { border-left: 1px solid var(--border); }
+
+.panel { padding: 12px 14px; overflow-y: auto; border-bottom: 1px solid var(--border); }
+.panel:last-child { border-bottom: none; }
+.panel-title {
+  font-size: 10px; font-weight: bold; letter-spacing: 1px;
+  color: var(--muted); text-transform: uppercase;
+  margin-bottom: 9px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 6px;
+}
+.panel-title .spacer { flex: 1; }
+
+/* ── Vitals ── */
+.kv { display: grid; grid-template-columns: 86px 1fr; gap: 4px 8px; font-size: 11px; }
+.kv .k { color: var(--muted); }
+.kv .v { color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kv .v.mono { font-variant-numeric: tabular-nums; }
+.kv .v.big { font-size: 16px; font-weight: bold; color: var(--green); }
+
+/* ── Timeline ── */
+.tl-flex { flex: 1; min-height: 0; }
+.tl-row {
+  display: flex; gap: 8px; padding: 5px 0;
+  border-bottom: 1px solid #1a1230; font-size: 11px;
+  align-items: flex-start;
+}
+.tl-icon { flex-shrink: 0; width: 18px; text-align: center; font-size: 12px; }
+.tl-body { min-width: 0; flex: 1; }
+.tl-head { display: flex; gap: 6px; align-items: baseline; }
+.tl-name { font-weight: bold; }
+.tl-name.user      { color: var(--blue); }
+.tl-name.assistant { color: var(--purple); }
+.tl-name.tool      { color: var(--amber); }
+.tl-name.result-ok { color: var(--green); }
+.tl-name.result-err{ color: var(--red); }
+.tl-name.agent     { color: var(--cyan); }
+.tl-ts { color: var(--muted); font-size: 9px; margin-left: auto; flex-shrink: 0; }
+.tl-text {
+  color: #cabbf0; margin-top: 2px; white-space: pre-wrap;
+  word-break: break-word; max-height: 64px; overflow: hidden;
+}
+.tl-text.dim { color: var(--muted); }
+
+/* ── Sub-agent fleet ── */
+.agent-card {
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; margin-bottom: 7px; background: rgba(19,13,32,.6);
+}
+.agent-card.done    { border-color: #1f5a3e; }
+.agent-card.running { border-color: var(--blue); box-shadow: 0 0 9px rgba(106,176,255,.16); }
+.agent-card-head { display: flex; align-items: center; gap: 6px; }
+.agent-type { font-weight: bold; color: var(--cyan); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-status { margin-left: auto; font-size: 9px; font-weight: bold; padding: 1px 6px; border-radius: 3px; flex-shrink: 0; }
+.agent-status.done    { background: #0d2418; color: var(--green); }
+.agent-status.running { background: #0d1a30; color: var(--blue); }
+.agent-status.launched{ background: #2a2010; color: var(--amber); }
+.agent-meta { font-size: 9px; color: var(--muted); margin-top: 3px; display: flex; gap: 8px; flex-wrap: wrap; }
+.agent-desc { font-size: 10px; color: #b8a8e0; margin-top: 3px; }
+.agent-result { font-size: 10px; color: #9a8cc0; margin-top: 3px; white-space: pre-wrap; word-break: break-word; max-height: 54px; overflow: hidden; }
+
+/* ── Tokens ── */
+.tok-big { font-size: 22px; font-weight: bold; color: var(--green); font-variant-numeric: tabular-nums; }
+.ctx-track { width: 100%; height: 7px; background: #1a1230; border-radius: 4px; overflow: hidden; margin: 6px 0 4px; }
+.ctx-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--cyan)); transition: width .4s; }
+.ctx-fill.warn { background: linear-gradient(90deg, var(--amber), var(--yellow)); }
+.ctx-fill.hot  { background: linear-gradient(90deg, var(--red), var(--amber)); }
+.tok-table { width: 100%; border-collapse: collapse; font-size: 10px; margin-top: 8px; }
+.tok-table td { padding: 3px 0; border-bottom: 1px solid #1a1230; }
+.tok-table td:first-child { color: var(--muted); }
+.tok-table td:last-child { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* ── Files / PRs ── */
+.pill-list { display: flex; flex-direction: column; gap: 2px; }
+.fpill { font-size: 10px; color: #c0b0e8; padding: 2px 0; border-bottom: 1px solid #160f28; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pr-link { color: var(--green); text-decoration: none; font-size: 11px; display: block; padding: 2px 0; }
+.pr-link:hover { text-decoration: underline; }
+
+.empty { color: var(--muted); font-size: 11px; font-style: italic; padding: 4px 0; }
+.toggle-btn {
+  background: var(--bg); border: 1px solid var(--border); color: var(--muted);
+  border-radius: 4px; padding: 1px 7px; font-size: 9px; cursor: pointer;
+  font-family: inherit;
+}
+.toggle-btn.on { color: var(--green); border-color: #1f5a3e; }
+
+@media (max-width: 1000px) {
+  body { height: auto; overflow: visible; }
+  .main { display: flex; flex-direction: column; overflow: visible; }
+  .col, .panel { overflow: visible; }
+  .col.left, .col.right { border: none; border-bottom: 1px solid var(--border); }
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <span class="logo">CLAUDE CODE · MISSION CONTROL</span>
+  <div class="live-wrap">
+    <span class="live-dot" id="live-dot"></span>
+    <span id="live-label">LIVE</span>
+  </div>
+  <span class="title-text" id="title-text">Waiting for session…</span>
+  <span class="badge model" id="badge-model" style="display:none"></span>
+  <span class="badge branch" id="badge-branch" style="display:none"></span>
+  <span class="badge mode" id="badge-mode" style="display:none"></span>
+</div>
+
+<div class="main">
+  <!-- LEFT: vitals + tokens + files/git -->
+  <div class="col left">
+    <div class="panel" style="flex-shrink:0">
+      <div class="panel-title">Session Vitals</div>
+      <div class="kv" id="vitals"><div class="empty">No session.</div></div>
+    </div>
+    <div class="panel" style="flex-shrink:0">
+      <div class="panel-title">Tokens &amp; Context</div>
+      <div id="tokens"><div class="empty">No usage yet.</div></div>
+    </div>
+    <div class="panel" style="flex:1; min-height:0">
+      <div class="panel-title">Files · Git · PRs</div>
+      <div id="files-git"><div class="empty">Nothing touched yet.</div></div>
+    </div>
+  </div>
+
+  <!-- CENTER: live timeline -->
+  <div class="col">
+    <div class="panel tl-flex" style="border-bottom:none">
+      <div class="panel-title">
+        Live Timeline
+        <span class="spacer"></span>
+        <button class="toggle-btn on" id="autoscroll-btn" onclick="toggleAutoscroll()" title="Pause/resume auto-scroll">⤓ AUTO-SCROLL</button>
+      </div>
+      <div id="timeline"><div class="empty">No activity yet.</div></div>
+    </div>
+  </div>
+
+  <!-- RIGHT: sub-agent fleet -->
+  <div class="col right">
+    <div class="panel" style="flex:1; min-height:0">
+      <div class="panel-title">Sub-agent Fleet</div>
+      <div id="fleet"><div class="empty">No sub-agents spawned.</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+let autoscroll = true;
+let lastFetchOk = Date.now();
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function fmtDur(s) {
+  if (s == null) return '—';
+  s = Math.max(0, Math.floor(s));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  if (h) return h + ':' + String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+  return m + ':' + String(sec).padStart(2, '0');
+}
+function fmtNum(n) {
+  n = Number(n || 0);
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+function shortModel(m) {
+  if (!m) return '—';
+  return String(m).split('/').pop();
+}
+function tsOf(epoch) {
+  if (!epoch) return '';
+  const d = new Date(epoch * 1000);
+  return String(d.getHours()).padStart(2, '0') + ':' +
+         String(d.getMinutes()).padStart(2, '0') + ':' +
+         String(d.getSeconds()).padStart(2, '0');
+}
+
+function toggleAutoscroll() {
+  autoscroll = !autoscroll;
+  document.getElementById('autoscroll-btn').classList.toggle('on', autoscroll);
+}
+
+// ── Health ──
+function setHealth(status, detail) {
+  const dot = document.getElementById('live-dot');
+  const label = document.getElementById('live-label');
+  dot.className = 'live-dot';
+  label.className = '';
+  if (status === 'IDLE')             { dot.classList.add('offline'); label.classList.add('health-idle'); }
+  else if (status === 'STALE')       { dot.classList.add('stale');   label.classList.add('health-stale'); }
+  else if (status === 'STALLED')     { dot.classList.add('stalled'); label.classList.add('health-stalled'); }
+  else if (status === 'UNREACHABLE') { dot.classList.add('offline'); label.classList.add('health-unreachable'); }
+  else                               { label.classList.add('health-live'); }
+  label.textContent = detail ? status + ' ' + detail : status;
+}
+
+// ── Render ──
+function render(d) {
+  const s = d.session || {};
+  const tk = d.tokens || {};
+
+  // Header badges
+  document.getElementById('title-text').textContent = s.title || s.id || 'Claude Code session';
+  setBadge('badge-model',  shortModel(s.model), s.model);
+  setBadge('badge-branch', s.git_branch, s.git_branch);
+  setBadge('badge-mode',   (s.permission_mode || s.mode), (s.permission_mode || s.mode));
+
+  // Vitals
+  const vitals = [
+    ['Session', s.id ? s.id.slice(0, 8) : '—'],
+    ['CWD', s.cwd || '—'],
+    ['Branch', s.git_branch || '—'],
+    ['Model', shortModel(s.model)],
+    ['Mode', (s.mode || '—') + (s.permission_mode ? ' / ' + s.permission_mode : '')],
+    ['Elapsed', fmtDur(s.elapsed_s)],
+    ['Last event', s.idle_s == null ? '—' : (s.idle_s + 's ago')],
+  ];
+  document.getElementById('vitals').innerHTML = vitals.map(([k, v]) =>
+    `<div class="k">${esc(k)}</div><div class="v ${k === 'Elapsed' ? 'mono' : ''}" title="${esc(v)}">${esc(v)}</div>`
+  ).join('');
+
+  renderTokens(tk);
+  renderFilesGit(d);
+  renderTimeline(d.timeline || []);
+  renderFleet(d.agents || []);
+}
+
+function setBadge(id, text, title) {
+  const el = document.getElementById(id);
+  if (text) { el.style.display = ''; el.textContent = text; el.title = title || text; }
+  else el.style.display = 'none';
+}
+
+function renderTokens(tk) {
+  const el = document.getElementById('tokens');
+  if (!tk.assistant_turns) { el.innerHTML = '<div class="empty">No usage yet.</div>'; return; }
+  const rawPct = tk.context_pct || 0;          // true fill (can exceed 100)
+  const pct = Math.min(100, rawPct);           // bar width clamps at 100
+  const cls = rawPct >= 90 ? 'hot' : (rawPct >= 70 ? 'warn' : '');
+  el.innerHTML = `
+    <div class="kv">
+      <div class="k">Cost tokens</div><div class="v big">${fmtNum(tk.cost_tokens)}</div>
+      <div class="k">Est. cost</div><div class="v mono">$${(tk.est_cost_usd || 0).toFixed(2)}</div>
+    </div>
+    <div style="margin-top:8px;font-size:9px;color:var(--muted);display:flex;justify-content:space-between">
+      <span>CONTEXT FILL</span><span>${fmtNum(tk.context_fill)} / ${fmtNum(tk.context_window)} · ${rawPct}%</span>
+    </div>
+    <div class="ctx-track"><div class="ctx-fill ${cls}" style="width:${pct}%"></div></div>
+    <table class="tok-table">
+      <tr><td>Input</td><td>${fmtNum(tk.input_tokens)}</td></tr>
+      <tr><td>Output</td><td>${fmtNum(tk.output_tokens)}</td></tr>
+      <tr><td>Cache write</td><td>${fmtNum(tk.cache_creation_tokens)}</td></tr>
+      <tr><td title="Billed separately at a reduced rate; NOT summed into cost tokens">Cache read*</td><td>${fmtNum(tk.cache_read_tokens)}</td></tr>
+      <tr><td>Assistant turns</td><td>${fmtNum(tk.assistant_turns)}</td></tr>
+    </table>`;
+}
+
+function renderFilesGit(d) {
+  const el = document.getElementById('files-git');
+  const files = d.files || [];
+  const prs = d.prs || [];
+  let html = '';
+  if (prs.length) {
+    html += '<div style="font-size:9px;color:var(--muted);margin-bottom:3px">PULL REQUESTS</div>';
+    html += prs.map(p => {
+      // Only hyperlink genuine https URLs — never let a non-https scheme
+      // (e.g. javascript:) from session data become a clickable anchor.
+      const safe = /^https:\/\//.test(String(p.url || ''));
+      return safe
+        ? `<a class="pr-link" href="${esc(p.url)}" target="_blank" rel="noopener">#${esc(p.number)} ↗</a>`
+        : `<span class="pr-link">#${esc(p.number)}</span>`;
+    }).join('');
+  }
+  html += `<div style="font-size:9px;color:var(--muted);margin:8px 0 3px">FILES TOUCHED (${files.length})</div>`;
+  if (files.length) {
+    html += '<div class="pill-list">' + files.map(f => {
+      const name = String(f).split(/[\\\/]/).pop();
+      return `<div class="fpill" title="${esc(f)}">${esc(name)}</div>`;
+    }).join('') + '</div>';
+  } else {
+    html += '<div class="empty">No files touched yet.</div>';
+  }
+  el.innerHTML = html;
+}
+
+function renderTimeline(tl) {
+  const el = document.getElementById('timeline');
+  if (!tl.length) { el.innerHTML = '<div class="empty">No activity yet.</div>'; return; }
+  // Cap rendered rows + clip each body (defense-in-depth: the server already
+  // bounds the timeline length and per-item text, but the client must not
+  // assume it — a huge value must never bloat the DOM). Oldest→newest; newest
+  // at the bottom so auto-scroll lands on the latest.
+  const clip = (v) => esc(String(v == null ? '' : v).slice(0, 2000));
+  el.innerHTML = tl.slice(-300).map(ev => {
+    let icon = '•', nameCls = '', name = ev.kind, body = '';
+    if (ev.kind === 'user') {
+      icon = '👤'; nameCls = 'user'; name = 'You';
+      body = `<div class="tl-text">${clip(ev.text)}</div>`;
+    } else if (ev.kind === 'assistant') {
+      icon = '✦'; nameCls = 'assistant'; name = 'Claude';
+      body = `<div class="tl-text">${clip(ev.text)}</div>`;
+    } else if (ev.kind === 'tool_use') {
+      icon = '⚙'; nameCls = 'tool'; name = ev.name || 'tool';
+      body = `<div class="tl-text dim">${clip(ev.summary)}</div>`;
+    } else if (ev.kind === 'agent_spawn') {
+      icon = '🛰'; nameCls = 'agent'; name = 'spawn · ' + (ev.subagent_type || 'Agent');
+      body = `<div class="tl-text dim">${clip(ev.summary)}</div>`;
+    } else if (ev.kind === 'tool_result') {
+      const ok = ev.ok;
+      icon = ev.interrupted ? '⛔' : (ok ? '✓' : '✗');
+      nameCls = ok ? 'result-ok' : 'result-err';
+      name = (ev.name || 'result') + (ev.interrupted ? ' (interrupted)' : (ok ? ' ✓' : ' ✗'));
+      body = ev.summary ? `<div class="tl-text dim">${clip(ev.summary)}</div>` : '';
+    }
+    return `<div class="tl-row">
+      <div class="tl-icon">${icon}</div>
+      <div class="tl-body">
+        <div class="tl-head"><span class="tl-name ${nameCls}">${esc(name)}</span><span class="tl-ts">${tsOf(ev.ts)}</span></div>
+        ${body}
+      </div>
+    </div>`;
+  }).join('');
+  if (autoscroll) el.scrollTop = el.scrollHeight;
+}
+
+function renderFleet(agents) {
+  const el = document.getElementById('fleet');
+  if (!agents.length) { el.innerHTML = '<div class="empty">No sub-agents spawned.</div>'; return; }
+  el.innerHTML = agents.slice().reverse().map(a => {
+    const st = a.status || 'launched';
+    return `<div class="agent-card ${st}">
+      <div class="agent-card-head">
+        <span class="agent-type" title="${esc(a.subagent_type || '')}">${esc(a.subagent_type || a.agentId || 'agent')}</span>
+        <span class="agent-status ${st}">${esc(st.toUpperCase())}</span>
+      </div>
+      <div class="agent-meta">
+        <span>${esc(shortModel(a.resolvedModel))}</span>
+        <span>${fmtDur(a.duration_s)}</span>
+        <span>${esc((a.agentId || '').slice(0, 9))}</span>
+      </div>
+      ${a.description ? `<div class="agent-desc">${esc(a.description)}</div>` : ''}
+      ${a.result ? `<div class="agent-result">${esc(a.result)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+// ── Poll ──
+async function poll() {
+  try {
+    const r = await fetch('/cc_state.json?t=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    lastFetchOk = Date.now();
+
+    const now = Date.now() / 1000;
+    const age = d.updated_at_epoch ? Math.max(0, Math.floor(now - d.updated_at_epoch)) : 999;
+    const idle = (d.session && d.session.idle_s != null) ? d.session.idle_s : null;
+
+    if (age >= 10)       setHealth('STALLED', age + 's');
+    else if (age >= 4)   setHealth('STALE', age + 's');
+    else if (idle != null && idle >= 60) setHealth('IDLE', 'idle ' + fmtDur(idle));
+    else                 setHealth('LIVE', '');
+
+    render(d);
+  } catch (e) {
+    const since = Math.floor((Date.now() - lastFetchOk) / 1000);
+    setHealth('UNREACHABLE', since + 's');
+  }
+}
+
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

@@ -4,6 +4,7 @@ projects/
 # Runtime pipeline state
 mission_control.json
 harness/mission_control.json
+cc_state.json
 orchestrator_input.json
 orchestrator_response.json
 sessions/
