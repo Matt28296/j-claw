@@ -223,6 +223,18 @@ GEMINI_QUOTA_FAILFAST: bool = os.getenv("GEMINI_QUOTA_FAILFAST", "true").lower()
 # worker rescue of Codex. The CodexOrchestrator stops drawing Codex once this many orchestrator
 # Codex calls have been made in the run and falls through to paid Sonnet/Opus instead.
 CODEX_PLANNING_RESERVE: int = int(os.getenv("CODEX_PLANNING_RESERVE", "6"))
+
+# Hard per-run sub-cap for WORKER RESCUE Codex calls: the capacity left in the Codex budget
+# after the orchestrator planning reserve is carved out. This is a computed constant (not an
+# env-var override) so the two reserves always sum to exactly CODEX_CLI_MAX_CALLS. No lending:
+# a planning overflow routes to Sonnet (not the worker budget); a worker overflow routes to
+# Sonnet (not the planning budget). The outer CODEX_CLI_MAX_CALLS bound still applies.
+CODEX_WORKER_RESERVE: int = CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE
+
+# Model id for the cheapest Anthropic orchestrator tier (difficulty="simple" routing).
+# Haiku is used when the creative brief signals a low-complexity prototype build where a
+# cheaper model is sufficient for planning/JSON orchestration. Override via HAIKU_MODEL.
+HAIKU_MODEL: str = os.getenv("HAIKU_MODEL", "claude-haiku-4-5-20251001")
 CREATIVE_DIRECTOR_PROMPT_PATH: Path = Path(__file__).parent.parent / "creative_director.txt"
 MAX_FORMAT5_DEPTH: int = int(os.getenv("MAX_FORMAT5_DEPTH", "3"))
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
