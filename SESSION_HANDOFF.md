@@ -29,11 +29,19 @@ with Codex → live-validated, in that order.
 - **Live smoke test (2026-06-17)** found `--safe-mode` is REJECTED by claude 2.1.179 despite being in
   `--help` (replaced with `--setting-sources ""`). Then confirmed: AUTH ✓ (API key scrubbed, call still
   succeeded → subscription), CONTRACT ✓ (clean `{"files":[...]}`, `is_error:false`, `num_turns:1`).
-- **Still ships INERT** (`CLAUDE_CLI_ENABLED=false`, not in the default ladder). Enable-gate documented
-  in `config.py`: usage-limit latch is unit-tested only (confirm in a real run); ToS is the operator's
-  call (a personal Max sub powering an automated build farm is a risk boundary — prefer Team/Enterprise
-  or Console API billing for commercial use). Shares the operator's interactive Max quota (cap=10, below
-  Codex/Grok). 7 mocked tests; suite 98 passed/1 skipped.
+- **Ships inert in the repo** (`CLAUDE_CLI_ENABLED=false`, not in the default `WORKER_LADDER`) — but
+  **ACTIVATED 2026-06-17 in the operator's `harness/.env`**: `CLAUDE_CLI_ENABLED=true` + `claude_cli::sonnet`
+  inserted into `WORKER_LADDER` at rung 4 (after `codex::gpt-5.5`, before the metered `anthropic::` rungs),
+  alongside the already-live Grok/Codex rungs. **Live-tested engaging end-to-end** via a forced-escalation
+  run through the real `execute_task` ladder: a task climbed deepseek→grok→codex→**claude_cli**, `claude -p`
+  ran live and returned a valid `{"files":[...]}` contract, **0 metered calls** (subscription billing),
+  oauth reservation/cap respected, real usage tokens recorded. NB it only engages on genuine escalation
+  (a task all four lower rungs failed) — rare on small builds, by design.
+- **Enable-gate caveats that remain the operator's watch:** the usage-limit latch is unit-tested only
+  (watch it trip cleanly on the first real limit hit); confirm the Max usage dashboard shows subscription
+  usage with **no metered API charge**; ToS is the operator's call (a personal Max sub powering an
+  automated build farm is a risk boundary — prefer Team/Enterprise or Console API billing for commercial
+  use). Shares the interactive Max quota (cap=10, placed below Codex/Grok). 7 mocked tests; suite 98/1.
 
 ---
 
