@@ -341,6 +341,33 @@ def _session_token_totals(agents: list[dict]) -> dict:
 _git_cache = {"ts": 0.0, "data": None}
 _git_lock = threading.Lock()
 
+# /api/agents payload cache. build_agents() re-reads every codex job JSON off disk on each call; a
+# short TTL (well under the client poll interval) coalesces rapid and multi-tab polls — which all hit
+# /api/agents every few seconds — into ONE filesystem sweep instead of one sweep per tab per poll. A
+# tab polling slower than the TTL still re-reads, so it sees fresh state; the win is multi-tab +
+# double-render coalescing. Mirrors the git_panel cache pattern above.
+_AGENTS_TTL_S = 2.0
+_agents_cache = {"ts": 0.0, "data": None}
+_agents_lock = threading.Lock()
+
+
+def _agents_payload() -> dict:
+    with _agents_lock:
+        if _agents_cache["data"] and (time.time() - _agents_cache["ts"]) < _AGENTS_TTL_S:
+            return _agents_cache["data"]
+        agents = build_agents(PATHS, REGISTRY)
+        data = {"agents": agents, "totals": _session_token_totals(agents),
+                "scope": PATHS.as_dict(), "generated_at": time.time()}
+        _agents_cache.update(ts=time.time(), data=data)
+        return data
+
+
+def _invalidate_agents_cache() -> None:
+    """Drop the /api/agents cache so the next poll reflects a just-applied control mutation
+    (cancel/kill) immediately, instead of serving the pre-action snapshot for up to the TTL."""
+    with _agents_lock:
+        _agents_cache.update(ts=0.0, data=None)
+
 
 def _run(cmd, cwd, timeout):
     try:
@@ -433,10 +460,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/agents":
-            agents = build_agents(PATHS, REGISTRY)
-            self._json(200, {"agents": agents,
-                             "totals": _session_token_totals(agents),
-                             "scope": PATHS.as_dict(), "generated_at": time.time()})
+            self._json(200, _agents_payload())
         elif path == "/api/git":
             self._json(200, git_panel(PATHS.repo))
         elif path == "/api/transcript":
@@ -485,9 +509,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._json(404, {"error": "unknown agent id", "code": "unknown_id"})
             return
         if entry["kind"] == "codex":
-            self._json(200, _cancel_codex(entry["job_id"]))
+            result = _cancel_codex(entry["job_id"])
+            _invalidate_agents_cache()  # next poll must reflect the cancel, not the cached snapshot
+            self._json(200, result)
         elif entry["kind"] == "task" and entry.get("pid") and _pid_alive(entry["pid"]):
             ok = _kill_pid(entry["pid"])
+            _invalidate_agents_cache()  # next poll must reflect the kill, not the cached snapshot
             self._json(200, {"canceled": ok, "method": "pid_kill", "verified": not _pid_alive(entry["pid"]),
                              "reason": "" if ok else "kill failed"})
         else:

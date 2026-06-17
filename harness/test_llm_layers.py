@@ -2153,6 +2153,82 @@ class TestCompositeChain(unittest.TestCase):
         emergency.call.assert_called_once()
 
 
+class TestLlmJson(unittest.TestCase):
+    """harness/llm_json.py — the shared parser must preserve BOTH tolerances the Codex tier's two
+    former call sites had (trailing prose AND literal newlines inside JSON strings) — #105 #6."""
+
+    def test_plain_object(self):
+        import llm_json
+        self.assertEqual(llm_json.loads_llm_json_object('{"files": []}'), {"files": []})
+
+    def test_strips_code_fences(self):
+        import llm_json
+        raw = '```json\n{"files": [{"path": "a", "content": "x"}]}\n```'
+        self.assertEqual(llm_json.loads_llm_json_object(raw),
+                         {"files": [{"path": "a", "content": "x"}]})
+
+    def test_tolerates_trailing_prose(self):
+        import llm_json
+        raw = '{"files": []}\n\nThat is the plan — let me know!'
+        self.assertEqual(llm_json.loads_llm_json_object(raw), {"files": []})
+
+    def test_repairs_literal_newlines_in_strings(self):
+        import llm_json
+        # A literal newline inside a string value breaks json.loads; the fix path must recover it.
+        raw = '{"files": [{"path": "a.txt", "content": "line1\nline2"}]}'
+        parsed = llm_json.loads_llm_json_object(raw)
+        self.assertEqual(parsed["files"][0]["content"], "line1\nline2")
+
+    def test_raises_when_no_object(self):
+        import llm_json
+        with self.assertRaises(ValueError):
+            llm_json.loads_llm_json_object("no json here at all")
+
+
+class TestSchemaFailTokenPersist(unittest.TestCase):
+    """#105 follow-up #4: a task that ultimately schema-fails must still PERSIST the tokens it spent
+    (the old ValueError path drained + discarded them, under-reporting failed-task usage)."""
+
+    def setUp(self):
+        import worker as w
+        self._w = w
+        self._orig_ladder = w.WORKER_LADDER
+        w.WORKER_LADDER = [("ollama", "qwen3:8b")]  # single rung → exactly one attempt, then ValueError
+        w.reset_paid_budget()
+
+    def tearDown(self):
+        self._w.WORKER_LADDER = self._orig_ladder
+        self._w.reset_paid_budget()
+
+    def _task(self):
+        t = MagicMock()
+        t.id = "tok-fail-1"; t.type = "frontend"; t.objective = "x"
+        t.files = ["index.html"]; t.dependencies = []; t.acceptance_criteria = []
+        t.verification = "none"; t.retry_count = 0
+        return t
+
+    def test_tokens_persisted_on_schema_fail(self):
+        w = self._w
+        spec = {"architecture": {"stack": "vanilla"}}
+
+        def fake_provider(provider, model, system, user):
+            w._set_call_tokens(11, 22)  # the model "spent" these before producing bad output
+            return "garbage"
+
+        with patch.object(w, "_call_provider", side_effect=fake_provider), \
+             patch.object(w, "_parse_and_validate", side_effect=ValueError("bad output")), \
+             patch.object(w, "route_task", return_value=0), \
+             patch("state_writer.writer") as mock_writer:
+            with self.assertRaises(ValueError):
+                w.execute_task(self._task(), spec, {})
+
+        mock_writer.on_task_tokens.assert_called_once()
+        task_id, tbm = mock_writer.on_task_tokens.call_args[0]
+        self.assertEqual(task_id, "tok-fail-1")
+        self.assertEqual(tbm.get("qwen3:8b"), {"input": 11, "output": 22},
+                         "the failed attempt's tokens must be recorded, not discarded")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Runner
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2178,6 +2254,8 @@ if __name__ == "__main__":
         TestGeminiQuotaFailfast,
         TestCodexOrchestrator,
         TestCompositeChain,
+        TestLlmJson,
+        TestSchemaFailTokenPersist,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 
