@@ -297,6 +297,8 @@ def git_commit_project(output_dir: Path, spec: dict) -> None:
         return r.returncode == 0
 
     try:
+        from permissions import observe
+        observe("git", detail="init/add/commit (local, no push)")  # roadmap #6: observe-only
         _run(["git", "init"])
         # Write a minimal .gitignore if none exists
         gi = output_dir / ".gitignore"
@@ -333,6 +335,8 @@ def deploy_project(output_dir: Path, spec: dict) -> tuple[str | None, str]:
         console.print(f"  [dim]⊘ {note}[/dim]")
         return None, note
     console.print(f"\n[bold]Running deployment hook: {DEPLOY_HOOK}[/bold]")
+    from permissions import observe
+    observe("deploy_hook", detail=DEPLOY_HOOK)  # roadmap #6: classify + log (observe-only)
     use_shell = sys.platform == "win32"
     cmd = DEPLOY_HOOK if use_shell else DEPLOY_HOOK.split()
     try:
