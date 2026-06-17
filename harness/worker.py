@@ -1474,8 +1474,9 @@ def _call_claude_cli(model: str, system: str, user: str) -> str:
     hard to behave as a pure generator:
       * --tools ""             disable ALL built-in agent tools (no Bash/Edit/Write/Read/Glob/…)
       * --strict-mcp-config    ignore operator/project MCP servers (none are passed in)
-      * --safe-mode            ignore user/project customizations, plugins, skills, hooks
+      * --setting-sources ""   load NO user/project/local settings (no hooks/plugins/customizations)
       * --disable-slash-commands
+      * --no-session-persistence  don't write session state to disk
       * --system-prompt-file   REPLACE Claude Code's coding-agent identity with j-claw's worker
                                prompt (a temp file — a huge --system-prompt argv would blow the
                                Windows command-line length limit); the task JSON is piped on stdin.
@@ -1497,8 +1498,9 @@ def _call_claude_cli(model: str, system: str, user: str) -> str:
         "--system-prompt-file", sysfile,   # replace the coding-agent identity with the worker prompt
         "--tools", "",                     # no built-in tools — pure generation
         "--strict-mcp-config",             # ignore any operator/project MCP servers
-        "--safe-mode",                     # ignore user/project customizations / plugins / hooks
+        "--setting-sources", "",           # load NO user/project/local settings (hooks/plugins/customizations)
         "--disable-slash-commands",
+        "--no-session-persistence",        # don't write session state to disk
     ]
     # Strip credentials that would override the subscription OAuth and silently meter the call.
     env = {k: v for k, v in os.environ.items() if k not in _CLAUDE_CLI_ENV_BLOCKLIST}

@@ -1556,11 +1556,14 @@ class TestClaudeCliWorkerRung(unittest.TestCase):
         self.assertIn("-p", cmd)
         self.assertIn("--output-format", cmd); self.assertIn("json", cmd)
         self.assertIn("--model", cmd); self.assertIn("sonnet", cmd)
-        # Hardened constraint posture (NOT a denylist): tools off, MCP off, safe-mode, no slash cmds.
+        # Hardened constraint posture (NOT a denylist), all live-verified in claude 2.1.179:
+        # tools off, MCP off, no settings loaded, no slash cmds, no session persistence.
         self.assertIn("--tools", cmd)
         self.assertIn("--strict-mcp-config", cmd)
-        self.assertIn("--safe-mode", cmd)
+        self.assertIn("--setting-sources", cmd)
         self.assertIn("--disable-slash-commands", cmd)
+        self.assertIn("--no-session-persistence", cmd)
+        self.assertNotIn("--safe-mode", cmd, "rejected by the CLI (unknown option) — must not be used")
         self.assertNotIn("--disallowedTools", cmd, "denylist replaced by the no-tools posture")
         self.assertNotIn("--dangerously-skip-permissions", cmd)
         # The worker system prompt goes via --system-prompt-file; stdin carries ONLY the task JSON.

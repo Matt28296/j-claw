@@ -108,17 +108,21 @@ GROK_TIMEOUT: int = int(os.getenv("GROK_TIMEOUT", "300"))  # seconds per grok -p
 # not a bare model call, so it is constrained hard (no tools, MCP off, safe-mode, worker system
 # prompt via --system-prompt-file) and its credentials env is scrubbed so it uses the subscription.
 #
-# LIVE-VALIDATION CHECKLIST — do ALL of these before setting CLAUDE_CLI_ENABLED=true (mirrors how the
-# Codex rung was validated in PR #84, which found a live-only UTF-8 bug):
-#   1. AUTH: confirm a `claude -p` call actually bills the Max SUBSCRIPTION, not the metered API
-#      (i.e. the env scrub works) — e.g. run with no ANTHROPIC_API_KEY and confirm it still answers.
-#   2. CONTRACT: confirm that with --tools "" + --safe-mode + the worker --system-prompt-file it emits
-#      a clean {"files":[...]} JSON object (no agent preamble, no tool attempts, no markdown fences).
-#   3. LATCH: confirm a usage-limit / 429 response trips _claude_cli_disabled and skips to the API rung.
-#   4. ToS: confirm this scale of automated subscription use is acceptable under Anthropic's current
-#      Consumer Terms (a personal Max sub powering an automated build farm is a risk boundary — for
-#      team/commercial use prefer Team/Enterprise or Console API billing).
-# Keep the rung OUT of the default WORKER_LADDER until the above pass.
+# LIVE-VALIDATION CHECKLIST (mirrors how the Codex rung was validated in PR #84, which found a
+# live-only bug — and this one found that --safe-mode is rejected by claude 2.1.179):
+#   1. AUTH — ✓ smoke-tested 2026-06-17: with ANTHROPIC_API_KEY scrubbed the call still succeeded
+#      (returncode 0), i.e. it used the subscription OAuth, not the metered API. (Claude Code still
+#      PRINTS an informational total_cost_usd estimate even on a subscription session — confirm on
+#      the Max usage dashboard that no metered API spend appears.)
+#   2. CONTRACT — ✓ smoke-tested 2026-06-17: with --tools "" + --setting-sources "" + the worker
+#      --system-prompt-file it returned a clean {"files":[...]} object, is_error=false, num_turns=1
+#      (no agent loop, no tool attempts, no markdown fences).
+#   3. LATCH — NOT exercised live (can't force a usage-limit on demand); classifier is unit-tested
+#      only. Confirm in a real run that a usage-limit response trips _claude_cli_disabled.
+#   4. ToS — operator decision: confirm this scale of automated subscription use is acceptable under
+#      Anthropic's current Consumer Terms (a personal Max sub powering an automated build farm is a
+#      risk boundary — for team/commercial use prefer Team/Enterprise or Console API billing).
+# Still ships INERT: enable + add to WORKER_LADDER only after you accept #4 and have seen #3 in a run.
 CLAUDE_CLI_ENABLED: bool = os.getenv("CLAUDE_CLI_ENABLED", "false").lower() == "true"
 CLAUDE_CLI_HOME: str = os.getenv("CLAUDE_CLI_HOME", "")  # empty = use claude's default config dir (sets CLAUDE_CONFIG_DIR)
 CLAUDE_CLI_MODEL: str = os.getenv("CLAUDE_CLI_MODEL", "sonnet")  # alias the Claude CLI accepts (sonnet|opus|haiku) or a full id
