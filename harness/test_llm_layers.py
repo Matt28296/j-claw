@@ -2041,7 +2041,7 @@ class TestCodexOrchestrator(unittest.TestCase):
     def test_validates_first_try(self):
         orch = self._make()
         with patch.object(self._w, "_call_codex", return_value=json.dumps(VALID_FORMAT2)) as mc, \
-             patch("orchestrator.record_role_event"):
+             patch("worker.record_role_event"):
             result = orch.call({"system_state": "SPEC_ACCEPTED"})
         self.assertEqual(result, VALID_FORMAT2)
         self.assertEqual(mc.call_count, 1)
@@ -2055,7 +2055,7 @@ class TestCodexOrchestrator(unittest.TestCase):
             r = outs[idx[0]]; idx[0] += 1
             return r
         with patch.object(self._w, "_call_codex", side_effect=codex) as mc, \
-             patch("orchestrator.console"), patch("orchestrator.record_role_event"):
+             patch("orchestrator.console"), patch("worker.record_role_event"):
             result = orch.call({"system_state": "SPEC_ACCEPTED"})
         self.assertEqual(result, VALID_FORMAT2)
         self.assertEqual(mc.call_count, 2, "one same-tier retry on a wrapping/truncation failure")
@@ -2064,7 +2064,7 @@ class TestCodexOrchestrator(unittest.TestCase):
     def test_two_bad_outputs_escalates(self):
         orch = self._make()
         with patch.object(self._w, "_call_codex", return_value="STILL NOT JSON") as mc, \
-             patch("orchestrator.console"), patch("orchestrator.record_role_event"):
+             patch("orchestrator.console"), patch("worker.record_role_event"):
             with self.assertRaises(RuntimeError):
                 orch.call({"system_state": "SPEC_ACCEPTED"})
         self.assertEqual(mc.call_count, 2, "exactly two attempts before escalating")
@@ -2074,7 +2074,7 @@ class TestCodexOrchestrator(unittest.TestCase):
         orch = self._make()
         with patch.object(self._w, "_call_codex",
                           side_effect=RuntimeError("not logged in")) as mc, \
-             patch("orchestrator.record_role_event"):
+             patch("worker.record_role_event"):
             with self.assertRaises(RuntimeError):
                 orch.call({"system_state": "INIT"})
         self.assertEqual(mc.call_count, 1, "unavailability stops retrying immediately")
