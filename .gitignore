@@ -38,3 +38,8 @@ Thumbs.db
 
 # Claude Code (local settings + temporary agent worktrees)
 .claude/
+
+# Worktree isolation staging directories (feat: worktree-isolation-per-worker)
+# NOTE: .jclaw_worktrees is created as a SIBLING of the repo root (one level
+# up) so it is never inside the git working tree.  A gitignore pattern here
+# would be inert.  The directory is outside the repo and git never tracks it.
