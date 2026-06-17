@@ -1,46 +1,50 @@
-<!doctype html>
-<!-- PLACEHOLDER dev-harness UI. Phase A replaces this with the Matrix digital-rain dashboard built
-     by the j-claw pipeline against the live /api contract below. -->
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Agent Mission Control (placeholder)</title>
-<style>
-  body { background:#000; color:#00ff66; font-family:Consolas,monospace; margin:0; padding:1rem; }
-  h1 { font-size:1rem; letter-spacing:.2em; }
-  .card { border:1px solid #0f6; border-radius:6px; padding:.5rem .75rem; margin:.4rem 0; background:#020; }
-  .running { border-color:#0f6; } .orphan { border-color:#fa0; color:#fa0; }
-  .done,.stale,.cancelled { border-color:#063; color:#5a7; }
-  .muted { color:#5a7; font-size:.8rem; }
-  button { background:#020; color:#0f6; border:1px solid #0f6; cursor:pointer; }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AGENT MISSION CONTROL</title>
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/components.css">
 </head>
 <body>
-<h1>AGENT MISSION CONTROL</h1>
-<div id="scope" class="muted"></div>
-<div id="agents"></div>
-<script>
-async function tick() {
-  try {
-    const r = await fetch('/api/agents'); const d = await r.json();
-    document.getElementById('scope').textContent =
-      `session ${d.scope.session_id || '?'} · ${d.agents.length} agents · ${new Date().toLocaleTimeString()}`;
-    document.getElementById('agents').innerHTML = d.agents.map(a => `
-      <div class="card ${a.status}">
-        <b>${a.kind}</b> · ${a.title} <span class="muted">[${a.status}${a.zombie ? ' · ZOMBIE' : ''}]</span>
-        <div class="muted">${a.status_reason || ''}${a.staleness_seconds != null ? ' · ' + a.staleness_seconds + 's' : ''}</div>
-        ${a.actions && a.actions.includes('cancel')
-          ? `<button onclick="cancelAgent('${a.id}')">cancel</button>` : ''}
-      </div>`).join('') || '<div class="muted">no live agents</div>';
-  } catch (e) { document.getElementById('scope').textContent = 'server unreachable'; }
-}
-async function cancelAgent(id) {
-  const r = await fetch('/api/cancel', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({id})});
-  const d = await r.json(); alert(JSON.stringify(d)); tick();
-}
-tick(); setInterval(tick, 3000);
-</script>
+  <canvas id="matrix-canvas"></canvas>
+
+  <div id="app">
+    <header id="status-bar">
+      <h1>AGENT MISSION CONTROL</h1>
+      <div class="status-info">
+        <span id="session-scope"></span>
+        <span id="agent-count"></span>
+        <span id="clock"></span>
+      </div>
+    </header>
+
+    <div id="unreachable-banner" hidden>Server unreachable — retrying…</div>
+
+    <main id="dashboard">
+      <section id="agent-panel">
+        <div id="agent-panel-header">
+          <h2>Agents</h2>
+          <div id="cancel-result"></div>
+        </div>
+        <section id="agent-list"></section>
+        <div id="empty-state" hidden>No live agents.</div>
+        <div id="session-totals" hidden></div>
+      </section>
+
+      <div id="git-panel"></div>
+    </main>
+  </div>
+
+  <div id="transcript-drawer">
+    <div id="transcript-drawer-header">
+      <button id="close-drawer" type="button">Close</button>
+    </div>
+    <div id="transcript-log"></div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
 </body>
 </html>

@@ -306,6 +306,37 @@ def _codex_tokens(job: dict) -> dict | None:
     return out or None
 
 
+def _session_token_totals(agents: list[dict]) -> dict:
+    """Roll up per-agent token counts into a per-model session total.
+
+    Each agent may carry a ``tokens`` dict with ``input_tokens``, ``output_tokens``,
+    ``total_tokens``, and/or ``tokens``.  The model key is taken from the agent's
+    ``label`` field (e.g. ``"codex"``, ``"rescue"``) falling back to the ``kind``.
+    Agents without any token data are silently skipped (tolerant per the plan).
+
+    Returns a dict keyed by model/label, e.g.::
+
+        {
+            "codex": {"input_tokens": 1200, "output_tokens": 800, "total_tokens": 2000},
+            "rescue": {"input_tokens": 400, "output_tokens": 300, "total_tokens": 700},
+        }
+
+    An empty dict is returned when no agents carry usage data.
+    """
+    totals: dict[str, dict] = {}
+    for agent in agents:
+        tok = agent.get("tokens")
+        if not tok or not isinstance(tok, dict):
+            continue
+        model_key = str(agent.get("label") or agent.get("kind") or "unknown")
+        bucket = totals.setdefault(model_key, {})
+        for k in ("input_tokens", "output_tokens", "total_tokens", "tokens"):
+            v = tok.get(k)
+            if isinstance(v, (int, float)):
+                bucket[k] = bucket.get(k, 0) + v
+    return totals
+
+
 # ── git/gh panel: cached, timed-out, off the hot path ────────────────────────────────────────────
 _git_cache = {"ts": 0.0, "data": None}
 _git_lock = threading.Lock()
@@ -402,7 +433,9 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/agents":
-            self._json(200, {"agents": build_agents(PATHS, REGISTRY),
+            agents = build_agents(PATHS, REGISTRY)
+            self._json(200, {"agents": agents,
+                             "totals": _session_token_totals(agents),
                              "scope": PATHS.as_dict(), "generated_at": time.time()})
         elif path == "/api/git":
             self._json(200, git_panel(PATHS.repo))

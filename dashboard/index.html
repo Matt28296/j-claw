@@ -268,6 +268,7 @@ body::before {
   padding: 1px 3px; flex-shrink: 0; letter-spacing: .3px;
 }
 .rung-badge.local  { background: rgba(50,255,126,.15); color: var(--green); }
+.rung-badge.oauth  { background: rgba(160,110,255,.18); color: #c084fc; }
 .rung-badge.sonnet { background: rgba(245,215,110,.15); color: var(--amber); }
 .rung-badge.opus   { background: rgba(255,94,94,.18);  color: var(--red); }
 
@@ -339,6 +340,7 @@ body::before {
 }
 .model-badge.local  { background: #0d2010; color: #3fb950; border: 1px solid #1a4020; }
 .model-badge.cloud  { background: #0d1b35; color: #4493f8; border: 1px solid #1a3060; }
+.model-badge.oauth  { background: #16082a; color: #c084fc; border: 1px solid #3a1060; }
 .retry-badge {
   background: #1a1200; color: var(--amber);
   border-radius: 3px; padding: 1px 5px; font-size: 10px;
@@ -874,11 +876,23 @@ function shortModel(model) {
 
 const ICONS = { done: '✓', running: '▶', failed: '✗', pending: '○', deprecated: '–' };
 
-const _CLOUD_PREFIXES = ['claude-', 'gpt-', 'gemini-', 'mistral-', 'openrouter/', 'anthropic/'];
+const _CLOUD_PREFIXES = ['claude-', 'gemini-', 'mistral-', 'openrouter/', 'anthropic/'];
+// $0 flat-rate OAuth providers: billed via subscription, not per-token metered API calls.
+const _OAUTH_PREFIXES = ['grok/', 'grok-', 'codex/', 'codex-', 'gpt-5.5', 'gpt-5.4'];
 function modelInfo(model) {
   if (!model) return null;
   const m = model.toLowerCase();
-  const isCloud = _CLOUD_PREFIXES.some(p => m.startsWith(p)) || m.includes('openrouter');
+  // Check OAuth ($0 flat-rate) tier first — grok and codex/gpt-5.5 are NOT metered cloud.
+  const isOAuth = _OAUTH_PREFIXES.some(p => m.startsWith(p))
+    || m === 'codex' || m === 'grok'
+    || m.startsWith('grok/') || m.startsWith('codex/');
+  if (isOAuth) {
+    const label = model.split('/').pop();
+    return { label, type: 'oauth', tag: '⬡ OAUTH $0' };
+  }
+  const isCloud = _CLOUD_PREFIXES.some(p => m.startsWith(p))
+    || m.includes('openrouter')
+    || m.startsWith('gpt-');  // gpt-4, gpt-4o etc. are metered cloud
   const label = model.split('/').pop(); // strip provider prefix
   return { label, type: isCloud ? 'cloud' : 'local', tag: isCloud ? '☁ CLOUD' : '⬡ LOCAL' };
 }
@@ -1207,8 +1221,9 @@ function renderAgentNetwork(d) {
     const rung = Number(n.rung ?? -1);
     const model = [n.provider, shortModel(n.model)].filter(v => v && v !== '-').join('/');
     const activeCls = !terminal && (n.active || n.status === 'running' || n.state === 'EXECUTING') ? ' active' : '';
-    const rungLabel = rung === 0 ? 'R0' : rung === 1 ? 'R1' : rung === 2 ? 'R2' : rung === 3 ? 'R3' : '';
-    const rungCls = rung <= 1 ? 'local' : rung === 2 ? 'sonnet' : 'opus';
+    const rungLabel = rung === 0 ? 'R0' : rung === 1 ? 'R1' : rung === 2 ? 'R2' : rung === 3 ? 'R3' : rung === 4 ? 'R4' : '';
+    // R0-R1 = local (ollama), R2-R3 = oauth ($0 flat-rate: grok, codex), R4 = sonnet, R5+ = opus
+    const rungCls = rung <= 1 ? 'local' : rung <= 3 ? 'oauth' : rung === 4 ? 'sonnet' : 'opus';
     const badge = rungLabel ? `<span class="rung-badge ${rungCls}" title="Worker ladder rung ${rung}">${rungLabel}</span>` : '';
     return `<div class="agent-node${activeCls}">
       <div class="agent-node-header">
@@ -1321,6 +1336,21 @@ function renderTaskDrawer() {
         <span>Tests</span><span>${esc(tests.length ? tests.map(t => t.passed ? 'PASS' : 'FAIL').join(', ') : '-')}</span>
         <span>Outputs</span><span>${esc(outputs.length)}</span>
       </div>
+      ${(() => {
+        const tbm = task.tokens_by_model;
+        if (!tbm || !Object.keys(tbm).length) return '';
+        const rows = Object.entries(tbm).map(([mdl, tok]) => {
+          const inp = (tok.input || 0).toLocaleString();
+          const out = (tok.output || 0).toLocaleString();
+          const mi = modelInfo(mdl);
+          const badge = mi ? `<span class="model-badge ${mi.type}" style="font-size:9px;padding:1px 4px">${mi.tag}</span>` : '';
+          return `<div style="display:flex;gap:6px;align-items:center;padding:2px 0;font-size:11px">
+            ${badge}<span style="color:var(--text);flex:1">${esc(mdl.split('/').pop())}</span>
+            <span style="color:var(--muted)">${inp} in / ${out} out</span>
+          </div>`;
+        }).join('');
+        return `<div class="drawer-label" style="margin-top:8px">Tokens by model</div>${rows}`;
+      })()}
       <div class="drawer-actions">
         ${task.status === 'failed' ? `<button class="copy-btn warn-btn" onclick="runControl('retry_failed_task', selectedTaskId)"${retryDisabled}>Retry This Task</button>` : ''}
       </div>
@@ -1431,6 +1461,35 @@ function renderCostPanel(d) {
     </table>`;
   } else {
     tableEl.innerHTML = '';
+  }
+
+  // Per-task per-LLM token rollup: aggregate tokens_by_model across all tasks
+  const taskTokenMap = {};
+  (d.tasks || []).forEach(t => {
+    const tbm = t.tokens_by_model;
+    if (!tbm) return;
+    Object.entries(tbm).forEach(([mdl, tok]) => {
+      if (!taskTokenMap[mdl]) taskTokenMap[mdl] = { input: 0, output: 0 };
+      taskTokenMap[mdl].input  += (tok.input  || 0);
+      taskTokenMap[mdl].output += (tok.output || 0);
+    });
+  });
+  const taskTokenRows = Object.entries(taskTokenMap);
+  if (taskTokenRows.length) {
+    const taskTokHtml = taskTokenRows.map(([mdl, tok]) => {
+      const mi = modelInfo(mdl);
+      const badge = mi ? `<span style="font-size:9px;font-weight:bold;color:${mi.type==='oauth'?'#c084fc':mi.type==='cloud'?'#4493f8':'#3fb950'}">${mi.tag}</span>` : '';
+      return `<tr style="opacity:.8">
+        <td title="${esc(mdl)}">${esc(mdl.split('/').pop())} ${badge}</td>
+        <td colspan="2" style="color:var(--muted)">${tok.input.toLocaleString()} in / ${tok.output.toLocaleString()} out</td>
+      </tr>`;
+    }).join('');
+    const existing = tableEl.innerHTML;
+    if (existing && existing.includes('<table')) {
+      tableEl.innerHTML = existing.replace('</tbody>', taskTokHtml + '</tbody>');
+    } else {
+      tableEl.innerHTML += `<table class="cost-table"><thead><tr><th colspan="3">Per-task tokens by model</th></tr></thead><tbody>${taskTokHtml}</tbody></table>`;
+    }
   }
 
   // Escalation counter: agent_nodes where rung > 1
