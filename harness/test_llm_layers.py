@@ -2315,19 +2315,48 @@ class TestInterpretationRisk(unittest.TestCase):
 
 
 class TestCodexWorkerReserve(unittest.TestCase):
-    """CODEX_WORKER_RESERVE = CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE."""
+    """CODEX_WORKER_RESERVE = max(0, CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE)."""
 
     def test_worker_reserve_equals_max_minus_planning(self):
         from config import CODEX_CLI_MAX_CALLS, CODEX_PLANNING_RESERVE, CODEX_WORKER_RESERVE
         self.assertEqual(
             CODEX_WORKER_RESERVE,
-            CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE,
-            "CODEX_WORKER_RESERVE must equal CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE"
+            max(0, CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE),
+            "CODEX_WORKER_RESERVE must equal max(0, CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE)"
         )
 
     def test_worker_reserve_non_negative(self):
         from config import CODEX_WORKER_RESERVE
         self.assertGreaterEqual(CODEX_WORKER_RESERVE, 0)
+
+    def test_worker_reserve_non_negative_when_planning_exceeds_max(self):
+        """CODEX_WORKER_RESERVE must never go negative under adversarial env-var configuration
+        where CODEX_PLANNING_RESERVE > CODEX_CLI_MAX_CALLS."""
+        import importlib
+        import os
+        orig_max = os.environ.get("CODEX_CLI_MAX_CALLS")
+        orig_plan = os.environ.get("CODEX_PLANNING_RESERVE")
+        try:
+            os.environ["CODEX_CLI_MAX_CALLS"] = "4"
+            os.environ["CODEX_PLANNING_RESERVE"] = "10"
+            import config as cfg
+            importlib.reload(cfg)
+            self.assertGreaterEqual(
+                cfg.CODEX_WORKER_RESERVE,
+                0,
+                "CODEX_WORKER_RESERVE must be >= 0 even when CODEX_PLANNING_RESERVE > CODEX_CLI_MAX_CALLS"
+            )
+        finally:
+            # Restore env vars
+            if orig_max is None:
+                os.environ.pop("CODEX_CLI_MAX_CALLS", None)
+            else:
+                os.environ["CODEX_CLI_MAX_CALLS"] = orig_max
+            if orig_plan is None:
+                os.environ.pop("CODEX_PLANNING_RESERVE", None)
+            else:
+                os.environ["CODEX_PLANNING_RESERVE"] = orig_plan
+            importlib.reload(cfg)
 
 
 class TestDifficultyRouting(unittest.TestCase):

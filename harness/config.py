@@ -229,7 +229,7 @@ CODEX_PLANNING_RESERVE: int = int(os.getenv("CODEX_PLANNING_RESERVE", "6"))
 # env-var override) so the two reserves always sum to exactly CODEX_CLI_MAX_CALLS. No lending:
 # a planning overflow routes to Sonnet (not the worker budget); a worker overflow routes to
 # Sonnet (not the planning budget). The outer CODEX_CLI_MAX_CALLS bound still applies.
-CODEX_WORKER_RESERVE: int = CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE
+CODEX_WORKER_RESERVE: int = max(0, CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE)
 
 # Model id for the cheapest Anthropic orchestrator tier (difficulty="simple" routing).
 # Haiku is used when the creative brief signals a low-complexity prototype build where a
