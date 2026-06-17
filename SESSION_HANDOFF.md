@@ -5,8 +5,35 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#105 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89, + CD validator hardening #103 + routing-review plan amendments #104, + orchestrator Gemini **per-day** quota latch + free-first Codex→Sonnet→Opus chain + offline Matrix agent-dashboard + j-claw OAuth-tier/token tracking **#105** (squash `3b71f54`, verified 136 passed/1 skipped)). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (interpretation-risk routing + per-role quotas) is next. **Open PRs: #73** (DRAFT operator WIP salvage — leave parked).
+**PRs #10–#107 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89, + CD validator hardening #103 + routing-review plan amendments #104, + orchestrator Gemini **per-day** quota latch + free-first Codex→Sonnet→Opus chain + offline Matrix agent-dashboard + j-claw OAuth-tier/token tracking **#105** (squash `3b71f54`), + **#107** optional inert Claude Max CLI OAuth worker rung `claude_cli` (squash `b4b7c62`, live-validated)). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (interpretation-risk routing + per-role quotas) is next. **Open PRs: #73** (DRAFT operator WIP salvage — leave parked).
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-17 (ninth session continued) — Claude Max CLI OAuth worker rung (PR #107, MERGED squash `b4b7c62`, INERT)
+
+Optional third $0 OAuth worker rung `claude_cli` mirroring the Codex/Grok rungs: headless `claude -p`
+under the operator's **Claude Max** subscription, serving the same Sonnet/Opus models otherwise reached
+via the metered Anthropic API. Changes **how** Claude-tier work is billed, not **when** a task escalates.
+In `worker.py` (`_call_claude_cli`, `_extract_claude_text`, `_is_claude_cli_unavailable`, reservation +
+`_claude_cli_disabled` latch) + `config.py` (`CLAUDE_CLI_*`, `OAUTH_PROVIDERS`). Built → reviewed/debated
+with Codex → live-validated, in that order.
+
+- **Codex review caught a critical bug:** the subprocess inherited `ANTHROPIC_API_KEY`, which Claude
+  Code's auth precedence puts AHEAD of the subscription OAuth non-interactively — so the "free" rung
+  would have silently billed the METERED API. Fixed: env scrubbed of `_CLAUDE_CLI_ENV_BLOCKLIST`.
+- **Hardened constraint posture** (not a denylist): `--tools "" --strict-mcp-config --setting-sources ""
+  --disable-slash-commands --no-session-persistence` + worker prompt via `--system-prompt-file` (the
+  task JSON on stdin alone). `claude -p` is ALWAYS the full Claude Code harness — there is no bare-model
+  path to the Max subscription — so it's constrained to behave as a pure generator.
+- **Live smoke test (2026-06-17)** found `--safe-mode` is REJECTED by claude 2.1.179 despite being in
+  `--help` (replaced with `--setting-sources ""`). Then confirmed: AUTH ✓ (API key scrubbed, call still
+  succeeded → subscription), CONTRACT ✓ (clean `{"files":[...]}`, `is_error:false`, `num_turns:1`).
+- **Still ships INERT** (`CLAUDE_CLI_ENABLED=false`, not in the default ladder). Enable-gate documented
+  in `config.py`: usage-limit latch is unit-tested only (confirm in a real run); ToS is the operator's
+  call (a personal Max sub powering an automated build farm is a risk boundary — prefer Team/Enterprise
+  or Console API billing for commercial use). Shares the operator's interactive Max quota (cap=10, below
+  Codex/Grok). 7 mocked tests; suite 98 passed/1 skipped.
 
 ---
 
