@@ -21,6 +21,7 @@ from config import (
     CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT, OAUTH_PROVIDERS, METERED_PROVIDERS,
     GROK_CLI_ENABLED, GROK_HOME, GROK_MODEL, GROK_MAX_CALLS, GROK_TIMEOUT,
     CLAUDE_CLI_ENABLED, CLAUDE_CLI_HOME, CLAUDE_CLI_MODEL, CLAUDE_CLI_MAX_CALLS, CLAUDE_CLI_TIMEOUT,
+    CODEX_WORKER_RESERVE,
 )
 from experience_log import get_worker_hints, log_escalation
 from cost import record_role_event
@@ -716,6 +717,15 @@ _codex_disabled = False
 _grok_disabled = False
 _claude_cli_disabled = False
 
+# Per-role Codex sub-caps (Phase 4). Codex capacity is shared between two caller roles:
+# - planning: Creative Director / Technical Architect calls via planning_call (bounded by
+#   CODEX_PLANNING_RESERVE in orchestrator.py's _codex_planning_calls counter, not here)
+# - worker: worker rescue Codex calls (bounded here by CODEX_WORKER_RESERVE)
+# No lending: a planning overflow routes to Sonnet (not the worker budget); a worker
+# overflow routes to Sonnet (not the planning budget). Both counters reset on reset_paid_budget().
+# The outer CODEX_CLI_MAX_CALLS cap in _reserve_oauth_call() remains as the shared guard.
+_codex_worker_calls = 0
+
 # Single-flight lock for Grok: xAI rotates the OAuth refresh token on each use, so concurrent
 # `grok -p` subprocesses would race and invalidate the cached ~/.grok/auth.json session. Serialize
 # Grok CLI calls behind this lock so only one runs at a time (Codex needs no such lock).
@@ -740,7 +750,7 @@ _CLAUDE_CLI_ENV_BLOCKLIST = frozenset({
 
 def reset_paid_budget() -> None:
     """Reset the per-project paid (cloud) worker-call counter. Call at project start."""
-    global _paid_calls_made, _codex_disabled, _grok_disabled, _claude_cli_disabled
+    global _paid_calls_made, _codex_disabled, _grok_disabled, _claude_cli_disabled, _codex_worker_calls
     with _paid_lock:
         _paid_calls_made = 0
     with _oauth_lock:
@@ -748,6 +758,7 @@ def reset_paid_budget() -> None:
         _codex_disabled = False
         _grok_disabled = False
         _claude_cli_disabled = False
+        _codex_worker_calls = 0
 
 
 def _reserve_paid_call() -> bool:
@@ -853,7 +864,7 @@ def execute_task(
     the legacy WORKER_PROVIDER + WORKER_FALLBACKS chain if WORKER_LADDER is unset.
     Raises ValueError immediately on bad JSON format so the scheduler can send EXECUTION_ERROR.
     """
-    global _codex_disabled, _grok_disabled, _claude_cli_disabled  # latched off when an OAuth rung hits auth/quota mid-run
+    global _codex_disabled, _grok_disabled, _claude_cli_disabled, _codex_worker_calls  # latched off when an OAuth rung hits auth/quota mid-run
     arch  = spec.get("architecture", {})
     stack = arch.get("stack", "vanilla")
     # For full-stack projects, pick the sub-stack based on task type
@@ -932,6 +943,19 @@ def execute_task(
             # Globally off? skip without touching capacity (config constant, no race).
             if not _oauth_enabled(provider):
                 continue
+            # Per-role worker sub-cap (Phase 4): worker rescue Codex calls are bounded by
+            # CODEX_WORKER_RESERVE (separate from the planning reserve used by CodexOrchestrator
+            # and planning_call). Check and increment atomically under _oauth_lock so parallel
+            # workers don't race the counter. No lending — overflow routes to next rung.
+            if provider == "codex":
+                with _oauth_lock:
+                    if _codex_worker_calls >= CODEX_WORKER_RESERVE:
+                        console.print(
+                            f"  [yellow]Codex worker reserve ({CODEX_WORKER_RESERVE}) exhausted "
+                            f"for this run — skipping codex worker rung, escalating to next.[/yellow]"
+                        )
+                        continue
+                    _codex_worker_calls += 1
             # The disable-latch check AND the capacity reservation happen atomically inside
             # _reserve_oauth_call, so a parallel worker can't launch the CLI after the latch
             # flips. A False here means "disabled or capacity exhausted" — either way skip.
@@ -940,6 +964,11 @@ def execute_task(
                     f"  [yellow]{provider} unavailable (auth/quota latch) or per-run capacity "
                     f"exhausted — skipping, escalating to next rung.[/yellow]"
                 )
+                if provider == "codex":
+                    # _reserve_oauth_call failed after we pre-incremented the worker counter;
+                    # undo the increment so we don't burn a worker slot on a failed reserve.
+                    with _oauth_lock:
+                        _codex_worker_calls = max(0, _codex_worker_calls - 1)
                 continue
         try:
             _t0 = time.monotonic()

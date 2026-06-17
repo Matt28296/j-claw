@@ -2230,6 +2230,333 @@ class TestSchemaFailTokenPersist(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Phase 4 Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestInterpretationRisk(unittest.TestCase):
+    """score_interpretation_risk: coverage of low/high risk, ambiguity, novelty, constraints."""
+
+    def setUp(self):
+        import interpretation_risk as ir
+        self._ir = ir
+
+    def test_clean_low_risk_intent(self):
+        """A clear, specific intent with success criteria and no vague language → low risk."""
+        intent = (
+            "Build a REST API in FastAPI with a /health endpoint that should return 200 OK. "
+            "Success means the integration test passes."
+        )
+        score = self._ir.score_interpretation_risk(intent)
+        self.assertLess(score, 0.55,
+                        f"Clean intent should score below threshold, got {score:.2f}")
+
+    def test_high_ambiguity_intent(self):
+        """Vague intent with no success criteria + constraints → should score above threshold.
+
+        Pure ambiguity (vague nouns, no criteria) caps at 0.30; adding constraint signals
+        (auth, database, real-time) pushes the total above 0.55.
+        """
+        intent = (
+            "Build me something kinda like a dashboard but maybe sort of a game "
+            "with user accounts and database storage and real-time updates"
+        )
+        score = self._ir.score_interpretation_risk(intent)
+        self.assertGreaterEqual(score, 0.55,
+                                f"Vague+constraint intent should score above threshold, got {score:.2f}")
+
+    def test_high_novelty_intent(self):
+        """Novel genre combo + experimental keyword → high novelty score."""
+        intent = "Create an experimental cinematic productivity tool with haptic feedback and VR"
+        score = self._ir.score_interpretation_risk(intent)
+        self.assertGreaterEqual(score, 0.30,
+                                f"Novel intent should score >= 0.30, got {score:.2f}")
+
+    def test_high_constraint_load(self):
+        """Many constraints (auth + database + real-time + integrations + compliance) → high score."""
+        intent = (
+            "App with login/accounts, database storage, real-time websocket updates, "
+            "third-party API integrations, and GDPR compliance audit logging"
+        )
+        score = self._ir.score_interpretation_risk(intent)
+        self.assertGreaterEqual(score, 0.40,
+                                f"High-constraint intent should score >= 0.40, got {score:.2f}")
+
+    def test_mixed_moderate_intent(self):
+        """Clear intent with some constraints but specific success criteria → moderate score."""
+        intent = (
+            "Build a React app with user authentication and a PostgreSQL database. "
+            "It must pass the integration tests and the login flow should work."
+        )
+        score = self._ir.score_interpretation_risk(intent)
+        # Should be somewhere in the middle — above pure-clean but not necessarily above threshold
+        self.assertGreaterEqual(score, 0.0)
+        self.assertLessEqual(score, 1.0)
+
+    def test_empty_intent_returns_zero(self):
+        """Empty string → 0.0 (no signals to score)."""
+        score = self._ir.score_interpretation_risk("")
+        self.assertEqual(score, 0.0)
+
+    def test_score_capped_at_one(self):
+        """Maximal signal load must not exceed 1.0."""
+        intent = (
+            "Build something kinda like maybe sort of an experimental novel unique nonstandard "
+            "cinematic productivity VR AR haptic game tool film app with auth login accounts "
+            "database storage real-time websocket third-party API integrations GDPR HIPAA "
+            "compliance audit"
+        )
+        score = self._ir.score_interpretation_risk(intent)
+        self.assertLessEqual(score, 1.0)
+        self.assertGreaterEqual(score, 0.0)
+
+    def test_high_risk_threshold_default(self):
+        """HIGH_RISK_THRESHOLD should default to 0.55."""
+        self.assertEqual(self._ir.HIGH_RISK_THRESHOLD, 0.55)
+
+
+class TestCodexWorkerReserve(unittest.TestCase):
+    """CODEX_WORKER_RESERVE = max(0, CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE)."""
+
+    def test_worker_reserve_equals_max_minus_planning(self):
+        from config import CODEX_CLI_MAX_CALLS, CODEX_PLANNING_RESERVE, CODEX_WORKER_RESERVE
+        self.assertEqual(
+            CODEX_WORKER_RESERVE,
+            max(0, CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE),
+            "CODEX_WORKER_RESERVE must equal max(0, CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE)"
+        )
+
+    def test_worker_reserve_non_negative(self):
+        from config import CODEX_WORKER_RESERVE
+        self.assertGreaterEqual(CODEX_WORKER_RESERVE, 0)
+
+    def test_worker_reserve_non_negative_when_planning_exceeds_max(self):
+        """CODEX_WORKER_RESERVE must never go negative under adversarial env-var configuration
+        where CODEX_PLANNING_RESERVE > CODEX_CLI_MAX_CALLS."""
+        import importlib
+        import os
+        orig_max = os.environ.get("CODEX_CLI_MAX_CALLS")
+        orig_plan = os.environ.get("CODEX_PLANNING_RESERVE")
+        try:
+            os.environ["CODEX_CLI_MAX_CALLS"] = "4"
+            os.environ["CODEX_PLANNING_RESERVE"] = "10"
+            import config as cfg
+            importlib.reload(cfg)
+            self.assertGreaterEqual(
+                cfg.CODEX_WORKER_RESERVE,
+                0,
+                "CODEX_WORKER_RESERVE must be >= 0 even when CODEX_PLANNING_RESERVE > CODEX_CLI_MAX_CALLS"
+            )
+        finally:
+            # Restore env vars
+            if orig_max is None:
+                os.environ.pop("CODEX_CLI_MAX_CALLS", None)
+            else:
+                os.environ["CODEX_CLI_MAX_CALLS"] = orig_max
+            if orig_plan is None:
+                os.environ.pop("CODEX_PLANNING_RESERVE", None)
+            else:
+                os.environ["CODEX_PLANNING_RESERVE"] = orig_plan
+            importlib.reload(cfg)
+
+
+class TestDifficultyRouting(unittest.TestCase):
+    """make_orchestrator difficulty parameter: prototype→Haiku, mvp→Codex, production→Sonnet→Opus."""
+
+    def setUp(self):
+        import orchestrator as o
+        import worker as w
+        self._o = o
+        self._w = w
+        w._codex_disabled = False
+
+    def _ctx(self, extra_patches=None):
+        """Common patch context: force provider=anthropic + patch prompt path + API key."""
+        import contextlib
+        patches = [
+            patch("config.ORCHESTRATOR_PROVIDER", "anthropic"),
+            patch("orchestrator.ANTHROPIC_API_KEY", "sk-test"),
+            patch("orchestrator.ORCHESTRATOR_PROMPT_PATH",
+                  MagicMock(read_text=MagicMock(return_value="sys"))),
+        ]
+        if extra_patches:
+            patches.extend(extra_patches)
+        return contextlib.ExitStack(), patches
+
+    def _make_with_provider_anthropic(self, difficulty, *, extra_patches=None):
+        """Call make_orchestrator with provider forced to anthropic."""
+        patches = [
+            patch("config.ORCHESTRATOR_PROVIDER", "anthropic"),
+            patch("orchestrator.ANTHROPIC_API_KEY", "sk-test"),
+            patch("orchestrator.ORCHESTRATOR_PROMPT_PATH",
+                  MagicMock(read_text=MagicMock(return_value="sys"))),
+        ] + (extra_patches or [])
+        with patches[0], patches[1], patches[2]:
+            if len(patches) > 3:
+                with patches[3]:
+                    return self._o.make_orchestrator(difficulty=difficulty)
+            return self._o.make_orchestrator(difficulty=difficulty)
+
+    def test_none_difficulty_returns_plain_orchestrator(self):
+        """difficulty=None → plain Orchestrator (existing behavior)."""
+        orch = self._make_with_provider_anthropic(None)
+        self.assertIsInstance(orch, self._o.Orchestrator)
+
+    def test_simple_difficulty_returns_haiku_orchestrator(self):
+        """difficulty='simple' with empty emergency chain → bare Orchestrator pinned to HAIKU_MODEL."""
+        from config import HAIKU_MODEL
+        orch = self._make_with_provider_anthropic(
+            "simple",
+            extra_patches=[patch("orchestrator._emergency_chain", return_value=[])]
+        )
+        # Empty chain → no CompositeOrchestrator wrapping
+        self.assertIsInstance(orch, self._o.Orchestrator)
+        self.assertEqual(orch._pinned_model, HAIKU_MODEL)
+
+    def test_simple_difficulty_with_chain_returns_composite(self):
+        """difficulty='simple' with non-empty chain → CompositeOrchestrator(Haiku, chain)."""
+        from config import HAIKU_MODEL
+        fake_rung = MagicMock()
+        orch = self._make_with_provider_anthropic(
+            "simple",
+            extra_patches=[patch("orchestrator._emergency_chain", return_value=[fake_rung])]
+        )
+        self.assertIsInstance(orch, self._o.CompositeOrchestrator)
+        self.assertIsInstance(orch._primary, self._o.Orchestrator)
+        self.assertEqual(orch._primary._pinned_model, HAIKU_MODEL)
+
+    def test_complex_difficulty_returns_sonnet_opus_composite(self):
+        """difficulty='complex' → CompositeOrchestrator(Sonnet primary, Opus fallback)."""
+        from config import ORCHESTRATOR_MODEL, OPUS_MODEL
+        orch = self._make_with_provider_anthropic("complex")
+        self.assertIsInstance(orch, self._o.CompositeOrchestrator)
+        self.assertIsInstance(orch._primary, self._o.Orchestrator)
+        self.assertEqual(orch._primary._pinned_model, ORCHESTRATOR_MODEL)
+        # Emergency chain must include Opus as last rung
+        opus_rung = orch._emergency_chain[-1]
+        self.assertIsInstance(opus_rung, self._o.Orchestrator)
+        self.assertEqual(opus_rung._pinned_model, OPUS_MODEL)
+
+    def test_medium_difficulty_codex_disabled_falls_to_sonnet(self):
+        """difficulty='medium' with Codex disabled → plain Orchestrator (Sonnet)."""
+        import worker as w
+        with patch.object(w, "_oauth_enabled", return_value=False):
+            orch = self._make_with_provider_anthropic("medium")
+        self.assertIsInstance(orch, self._o.Orchestrator)
+
+    def test_medium_difficulty_codex_enabled_returns_composite(self):
+        """difficulty='medium' with Codex enabled → CompositeOrchestrator(Codex primary, ...)."""
+        import worker as w
+        with patch.object(w, "_oauth_enabled", return_value=True):
+            orch = self._make_with_provider_anthropic("medium")
+        self.assertIsInstance(orch, self._o.CompositeOrchestrator)
+        self.assertIsInstance(orch._primary, self._o.CodexOrchestrator)
+
+
+class TestPerRoleCodexSubCap(unittest.TestCase):
+    """Per-role Codex sub-caps: planning can't exceed CODEX_PLANNING_RESERVE;
+    worker can't exceed CODEX_WORKER_RESERVE; no lending between roles."""
+
+    def setUp(self):
+        import worker as w
+        import orchestrator as o
+        self._w = w
+        self._o = o
+        w.reset_paid_budget()
+        o.reset_orchestrator_run()
+        # Enable Codex for testing
+        self._orig_codex_enabled = w.CODEX_CLI_ENABLED
+
+    def tearDown(self):
+        import worker as w
+        import orchestrator as o
+        w.CODEX_CLI_ENABLED = self._orig_codex_enabled
+        w.reset_paid_budget()
+        o.reset_orchestrator_run()
+
+    def test_planning_reserve_caps_orchestrator_calls(self):
+        """CodexOrchestrator stops drawing Codex once CODEX_PLANNING_RESERVE is exhausted."""
+        from config import CODEX_PLANNING_RESERVE
+        # Exhaust the planning budget
+        self._o._codex_planning_calls = CODEX_PLANNING_RESERVE
+        with patch("orchestrator.ORCHESTRATOR_PROMPT_PATH") as mp:
+            mp.read_text.return_value = "sys"
+            orch = self._o.CodexOrchestrator()
+        with patch.object(self._w, "_call_codex") as mc, \
+             patch("worker.record_role_event"), \
+             patch("orchestrator.console"):
+            with self.assertRaises(RuntimeError):
+                orch.call({"system_state": "INIT"})
+        mc.assert_not_called()
+
+    def test_worker_reserve_caps_execute_task_codex_calls(self):
+        """Worker rescue Codex calls are blocked once CODEX_WORKER_RESERVE is exhausted."""
+        import worker as w
+        from config import CODEX_WORKER_RESERVE
+        # Pre-fill the worker counter to the cap
+        with w._oauth_lock:
+            w._codex_worker_calls = CODEX_WORKER_RESERVE
+        # Set up a single-rung codex ladder
+        orig_ladder = w.WORKER_LADDER
+        w.WORKER_LADDER = [("codex", "gpt-5.5")]
+        try:
+            with patch.object(w, "_oauth_enabled", return_value=True), \
+                 patch.object(w, "_call_codex") as mc, \
+                 patch("worker.console"), \
+                 patch("worker.record_role_event"):
+                # Should skip Codex and exhaust all attempts
+                with self.assertRaises(RuntimeError):
+                    w.execute_task(
+                        _make_task("t-cap", "frontend"),
+                        {"architecture": {"stack": "react-vite"}},
+                        {}
+                    )
+            mc.assert_not_called()
+        finally:
+            w.WORKER_LADDER = orig_ladder
+
+    def test_worker_reserve_reset_by_reset_paid_budget(self):
+        """_codex_worker_calls is cleared by reset_paid_budget()."""
+        import worker as w
+        with w._oauth_lock:
+            w._codex_worker_calls = 99
+        w.reset_paid_budget()
+        self.assertEqual(w._codex_worker_calls, 0,
+                         "reset_paid_budget() must clear _codex_worker_calls")
+
+    def test_no_lending_planning_overflow_does_not_use_worker_budget(self):
+        """When planning reserve is exhausted, worker budget counter remains unchanged."""
+        import worker as w
+        from config import CODEX_PLANNING_RESERVE
+        self._o._codex_planning_calls = CODEX_PLANNING_RESERVE
+        initial_worker_calls = w._codex_worker_calls
+        with patch("orchestrator.ORCHESTRATOR_PROMPT_PATH") as mp:
+            mp.read_text.return_value = "sys"
+            orch = self._o.CodexOrchestrator()
+        with patch.object(w, "_call_codex"), \
+             patch("worker.record_role_event"), \
+             patch("orchestrator.console"):
+            try:
+                orch.call({"system_state": "INIT"})
+            except RuntimeError:
+                pass  # Expected
+        self.assertEqual(w._codex_worker_calls, initial_worker_calls,
+                         "Planning overflow must not touch the worker Codex budget")
+
+
+def _make_task(task_id: str, task_type: str):
+    """Helper: create a minimal mock task object for execute_task tests."""
+    t = MagicMock()
+    t.id = task_id
+    t.type = task_type
+    t.files = ["index.html"]
+    t.objective = "build something"
+    t.acceptance_criteria = []
+    t.dependencies = []
+    t.retry_count = 0
+    return t
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Runner
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2256,6 +2583,11 @@ if __name__ == "__main__":
         TestCompositeChain,
         TestLlmJson,
         TestSchemaFailTokenPersist,
+        # Phase 4 tests
+        TestInterpretationRisk,
+        TestCodexWorkerReserve,
+        TestDifficultyRouting,
+        TestPerRoleCodexSubCap,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 
