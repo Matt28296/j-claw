@@ -5,18 +5,21 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#104 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89, + CD validator hardening #103 + routing-review plan amendments #104). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (interpretation-risk routing + per-role quotas) is next. **Open PRs: #105** (this session — orchestrator Gemini quota latch + free-first Codex→Sonnet→Opus chain + offline Matrix agent-dashboard + j-claw OAuth-tier/token tracking; verified 134 passed/1 skipped) + **#73** (DRAFT operator WIP salvage — leave parked).
+**PRs #10–#105 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89, + CD validator hardening #103 + routing-review plan amendments #104, + orchestrator Gemini **per-day** quota latch + free-first Codex→Sonnet→Opus chain + offline Matrix agent-dashboard + j-claw OAuth-tier/token tracking **#105** (squash `3b71f54`, verified 136 passed/1 skipped)). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (interpretation-risk routing + per-role quotas) is next. **Open PRs: #73** (DRAFT operator WIP salvage — leave parked).
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
 
-## ✅ DONE 2026-06-17 (ninth session continued) — orchestrator quota latch + free-first chain + offline dashboards (PR #105, OPEN)
+## ✅ DONE 2026-06-17 (ninth session continued) — orchestrator quota latch + free-first chain + offline dashboards (PR #105, MERGED squash `3b71f54`)
 
 A two-team in-session agent swarm implemented three changes; after a rate-limit reset I verified them
 directly (ran the full suites rather than re-spawning), caught and fixed the one regression the
 verification team would have flagged, and wired the one integration gap the implementers self-flagged.
-All committed on `feat/agent-mission-control` → **PR #105** (open, base `main`). Consulted Codex on the
-sequencing/structure (it concurred). Verified locally: **134 passed, 1 skipped** across all four suites.
+All committed on `feat/agent-mission-control` → **PR #105, MERGED** to `main` (squash `3b71f54`).
+Reviewed (high-effort multi-agent) + Codex-debated post-merge; three fixes landed with it (quota-class
+429 narrowed to per-day only so transient per-minute throttles don't latch; Codex planning reserve
+made resettable; hardcoded Opus id → `config.OPUS_MODEL`). Verified: **136 passed, 1 skipped** across
+all four suites.
 
 ### Orchestrator — Gemini quota latch + free-first Codex→Sonnet→Opus chain (`orchestrator.py`, `worker.py`, `config.py`, `main.py`)
 - Quota-class 429 detection (`_is_quota_class_429`): a daily `RESOURCE_EXHAUSTED` latches Gemini off for
