@@ -1,12 +1,65 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-16, ninth session** (previous: eighth 2026-06-16, seventh 2026-06-15, sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-16/17, ninth session** (previous: eighth 2026-06-16, seventh 2026-06-15, sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#99 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs sync #99, + dead-`groq`-config removal #89). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (difficulty routing + per-role quotas) is next. Only open PR: #73 (DRAFT operator WIP salvage — leave parked).
+**PRs #10–#102 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (difficulty routing + per-role quotas) is next. **Open PRs: #103** (CD validator hardening — proposal item #1, see below) + **#73** (DRAFT operator WIP salvage — leave parked).
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-16/17 (ninth session continued) — CD validator hardening (PR #103) + routing review captured as plan amendments
+
+A routing-design thread (my analysis) plus a **critical Codex second opinion** produced one shipped
+change and a set of revised plan amendments. Nothing here changes runtime routing yet except the
+validator; #2–#5 are written into the plan doc for Phase 4 / Phase 5 to implement.
+
+### PR #103 (OPEN, branch `fix/cd-validator-hardening`) — harden `CreativeDirector._validate`
+Proposal item #1, the one piece with no reason to wait (self-contained to `creative_director.py`, no
+cost/API surface change). The CD validator was the **only** gate on the CREATIVE_BRIEF contract the
+Technical Architect consumes (downstream Python never branches on `output_type` by name — it's a
+prompt-enforced soft contract), yet it only checked that `output_type` existed + `features` was
+non-empty. A malformed brief passed silently and mis-routed the whole build.
+- `_validate` lifted to a module-level pure function (mirrors `technical_architect._validate`).
+- Enforces, against `creative_director.txt`'s declared contract: `output_type ∈
+  {film,game,app,website,code}`; `scale ∈ {prototype,mvp,production}`; `features` count band (1–30);
+  non-empty `visual_identity` for non-`code` outputs (code prompts are explicitly exempt per the
+  prompt's minimal-defaults allowance).
+- A failing check raises `ValueError` → `planning_call`'s existing fallback boundary (Codex → retry →
+  Sonnet → Opus).
+- **Two corrections to the proposal as written:** (1) the enum is `website`, NOT `web` — the proposal
+  and two old tests had it wrong; verified against `creative_director.txt`. (2) **Intentional
+  tightening:** a brief omitting `scale` now *escalates* (was: silent `mvp` default) — required
+  because Phase 4 difficulty routing keys on `scale`.
+- Tests: new `TestCreativeDirectorValidator` (11 cases incl. enum, count boundary, code-exempt) +
+  updated two `TestRoleCutover` cases off the stale `"web"` value. **Suite 75 passed / 1 skipped.**
+
+### Routing review → plan amendments (in `everything-should-be-set-idempotent-cupcake.md`, "Amendments")
+Codex verdict: **sound-with-caveats** — the role split is directionally right, but product-scale is
+too blunt as a CD routing signal and the proposal underweights semantic cross-checks between
+artifacts. Decisions (REVISED from the original proposal; the plan's original target table is kept as
+the decision trail):
+- **#2 (REVISED)** — route CD by **interpretation-risk**, not product-scale. Codex's decisive
+  counterexample: a "prototype" (cinematic command-center incident-response tool) is a harder
+  *interpretation* than a "production" CRUD dashboard — scale routes those backward. **Structural
+  blocker found:** the existing difficulty rating is computed *after* CD (`main.py:249`) from CD's own
+  `scale`, so it cannot route CD — a NEW **pre-CD signal from raw intent** is required. Committed shape
+  for Phase 4: a cheap **deterministic** risk heuristic ($0, no LLM, testable like the validator)
+  scoring ambiguity / novelty / constraint-load; `scale` becomes one feature, not the axis.
+- **#3 (REVISED)** — Opus-CD as an *escalation* on high-ambiguity / low-confidence, not just a
+  validator fallback (validators catch shape, never strategically-poor-but-valid briefs).
+- **#4 (REVISED)** — TA stays Codex-first, but escalate on architecture-risk signals (auth /
+  persistence / RBAC / real-time / compliance) the allowed-stacks validator can't catch.
+- **#5 (REVISED)** — Opus production-orchestrator (Phase 5), but gate the spend on upstream semantic
+  checks passing first; drop "production = uniformly harder to orchestrate."
+- **#6 (NEW, DEFERRED → telemetry-gated "Phase 6")** — LLM risk classifier + **cross-artifact
+  semantic checks** (prompt↔brief↔spec↔DAG) + explicit `assumptions` fields + a semantic-vs-schema
+  telemetry split. The semantic-check layer is an LLM-judge that needs its own failure-mode design
+  before it gates anything; parked behind Phase-0 evidence.
+- **Principle refinement:** "upstream beats downstream" — the artifacts form a chain; don't spend Opus
+  late to paper over an upstream semantic defect.
 
 ---
 
