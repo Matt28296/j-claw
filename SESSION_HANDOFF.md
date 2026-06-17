@@ -1,11 +1,11 @@
 # Session Handoff — J-Claw + OpenClaw
 
-Date: **2026-06-16/17, ninth session** (previous: eighth 2026-06-16, seventh 2026-06-15, sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
+Date: **2026-06-17, tenth session** (previous: ninth 2026-06-16/17, eighth 2026-06-16, seventh 2026-06-15, sixth 2026-06-14/15, fifth 2026-06-13/14, fourth 2026-06-13, third 2026-06-12, second + morning 2026-06-12, first 2026-06-04). Operator: Matthew (Windows acct "Tyler"/GitHub TylerBeats).
 Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#121 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89, + CD validator hardening #103 + routing-review plan amendments #104, + orchestrator Gemini **per-day** quota latch + free-first Codex→Sonnet→Opus chain + offline Matrix agent-dashboard + j-claw OAuth-tier/token tracking **#105** (squash `3b71f54`), + **#107** Claude Max CLI OAuth worker rung `claude_cli` (squash `b4b7c62`, live-validated; ships inert in-repo but **now enabled in the operator's `harness/.env`**), + **#111** PR-#105 follow-up cleanups (squash `e78a62d`); **#106/#108/#109/#110/#112/#113/#117/#119** are docs syncs; **#114** recorded the approved Claude-Code-upgrades roadmap; + the Claude-Code-upgrades **Milestone-1** feature PRs **#115** (roadmap #5 append-only session log, `harness/session_log.py`, `b4544c6`) + **#116** (roadmap #6 observe-only action-risk classifier, `harness/permissions.py`, logging-only, `b97d670`); + a read-only **Claude Code session Mission Control dashboard** **#118** (`cc_dashboard.py` + `cc_dashboard/index.html`, port 8766, observe-only; tails the live session JSONL; specialty-reviewed + XSS-clean, `ed8ce5b`); + **#120** docs sync; + **#121** dashboard per-model $Cost column + TOTAL row in BY MODEL table (`063da2e`); + **this PR** (`0187742`) cc_dashboard workflow-agent scanning). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (interpretation-risk routing + per-role quotas) **OPEN as PR #123** (`feat/phase4-difficulty-routing`), 124/1 tests, minor env-guard fix pending. **Open PRs: #73** (DRAFT operator WIP salvage — leave parked), **#122** (Claude-Code-upgrade #3 worktree isolation, cosmetic gitignore fix pending), **#123** (Phase 4 difficulty routing + interpretation-risk CD + per-role Codex quotas).
+**PRs #10–#124 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89, + CD validator hardening #103 + routing-review plan amendments #104, + orchestrator Gemini **per-day** quota latch + free-first Codex→Sonnet→Opus chain + offline Matrix agent-dashboard + j-claw OAuth-tier/token tracking **#105** (squash `3b71f54`), + **#107** Claude Max CLI OAuth worker rung `claude_cli` (squash `b4b7c62`, live-validated; ships inert in-repo but **now enabled in the operator's `harness/.env`**), + **#111** PR-#105 follow-up cleanups (squash `e78a62d`); **#106/#108/#109/#110/#112/#113/#117/#119** are docs syncs; **#114** recorded the approved Claude-Code-upgrades roadmap; + the Claude-Code-upgrades **Milestone-1** feature PRs **#115** (roadmap #5 append-only session log, `harness/session_log.py`, `b4544c6`) + **#116** (roadmap #6 observe-only action-risk classifier, `harness/permissions.py`, logging-only, `b97d670`); + a read-only **Claude Code session Mission Control dashboard** **#118** (`cc_dashboard.py` + `cc_dashboard/index.html`, port 8766, observe-only; tails the live session JSONL; specialty-reviewed + XSS-clean, `ed8ce5b`); + **#120/#124** docs syncs; + **#121** dashboard per-model $Cost column + TOTAL row in BY MODEL table + cc_dashboard workflow-agent scanning (`063da2e`); + **#122** Claude-Code-upgrade #3 git worktree isolation per task (`WorktreeManager` + scheduler wiring, 45 tests); + **#123** Phase 4 difficulty routing + interpretation-risk CD + per-role Codex quotas (124 tests)). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. **No open PRs** — #73 (DRAFT operator WIP salvage) closed without merging (diff removed needed FAILED/CANCELED state handling).
 Direct push to `main` is intentionally blocked — land changes via PR.
 
 ---
@@ -18,7 +18,7 @@ Order most→least important:
 1. **#5 Append-only replayable session log** — FIRST. The observability substrate; you can't safely gate/tune an unattended system you can't replay. ✅ **MERGED PR #115** (`b4544c6`, `harness/session_log.py`).
 2. **#6 Action-risk classification + enforcement gateway** — one choke point scoring every dangerous op (install/deploy/git/delete) by blast radius. ✅ **observe-only/logging-only half MERGED PR #116** (`b97d670`, `harness/permissions.py`: `classify_action` blast-radius taxonomy + non-blocking `observe()` via `StateWriter.on_action`, wired at the deploy hook + local git commit). ⏭️ **The ENFORCEMENT-gateway half is still ahead** — evidence-gated (see below) and ships as one vertical slice with #1.
 3. **#1 Permission modes** — `read_only`/`ask_before_write`/`auto_safe`/`dangerous_skip`; a *separate policy layer* over #6 (ship together, design apart).
-4. **#3 Git-worktree isolation per worker** — robustness/verify-before-merge, NOT core safety. *(Independent of the safety-layer evidence gate — can go anytime.)* ⏭️ **OPEN as PR #122** (`feat/worktree-isolation-per-worker`): `WorktreeManager` + scheduler wiring + tests (23/23). Cosmetic gitignore-path comment fix pending before merge.
+4. **#3 Git-worktree isolation per worker** — robustness/verify-before-merge, NOT core safety. *(Independent of the safety-layer evidence gate — can go anytime.)* ✅ **MERGED PR #122** (`feat/worktree-isolation-per-worker`): `WorktreeManager` + scheduler wiring + tests (45 total).
 5. **#2 Hybrid patch editing** — strong rungs only; full-file stays default for weak Ollama workers (a global migration would fight the local-first reliability principle).
 6. **#4 Connector capability-registry** — a small internal registry first, NOT full MCP (a trap for a single-operator system). *(Waits for the #6 gateway.)*
 
@@ -27,10 +27,9 @@ Order most→least important:
 
 ---
 
-## ⏭️ OPEN 2026-06-17 (tenth session) — Phase 4 difficulty routing + interpretation-risk CD (PR #123, branch `feat/phase4-difficulty-routing`)
+## ✅ DONE 2026-06-17 (tenth session) — Phase 4 difficulty routing + interpretation-risk CD (PR #123, MERGED)
 
-Multi-agent team (9 agents, 124/1 tests). One minor fix pending before merge:
-- `CODEX_WORKER_RESERVE = CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE` needs `max(0, ...)` guard in `config.py` — if env sets `CODEX_PLANNING_RESERVE` > `CODEX_CLI_MAX_CALLS`, the reserve goes negative and worker Codex is immediately blocked.
+Multi-agent team (9 agents, 124/1 tests). All fixes applied and merged.
 
 Changes shipped:
 - `config.py`: `CODEX_WORKER_RESERVE` (computed sub-cap) + `HAIKU_MODEL`
@@ -42,10 +41,9 @@ Changes shipped:
 
 ---
 
-## ⏭️ OPEN 2026-06-17 (tenth session) — Claude-Code-upgrade #3 worktree isolation (PR #122, branch `feat/worktree-isolation-per-worker`)
+## ✅ DONE 2026-06-17 (tenth session) — Claude-Code-upgrade #3 worktree isolation (PR #122, MERGED)
 
-Multi-agent team (8 agents, 23+22=45 tests). One cosmetic fix pending:
-- `.gitignore` entry `/.jclaw_worktrees/` covers the wrong path — worktrees go to `repo.parent/.jclaw_worktrees` (outside the repo), so no gitignore entry is actually needed. Entry is inert (no real risk) but misleading.
+Multi-agent team (8 agents, 45 tests total). `.gitignore` comment clarified (worktrees are siblings of repo root, entry is inert). All fixes applied and merged.
 
 Changes shipped:
 - `harness/worktree_manager.py` (new): `WorktreeManager` with `create/merge_and_remove/remove` + `_merge_lock` serializing concurrent merges + `git worktree prune` in cleanup
