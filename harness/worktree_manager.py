@@ -107,9 +107,11 @@ class WorktreeManager:
         branch = f"wt-{task_id}-{suffix}"
         wt_path = self._base / task_id
 
-        # Remove stale worktree dir if it exists from a previous crashed run.
+        # Remove stale worktree dir if it exists from a previous crashed run, and
+        # prune the corresponding git admin entry so the next add can succeed cleanly.
         if wt_path.exists():
             shutil.rmtree(wt_path, ignore_errors=True)
+            _run(["git", "worktree", "prune"], cwd=self.repo, check=False)
 
         self._base.mkdir(parents=True, exist_ok=True)
 
@@ -160,6 +162,10 @@ class WorktreeManager:
                 check=False,
             )
             original_branch = head_result.stdout.strip() if head_result.returncode == 0 else None
+            # "HEAD" means the repo is in detached-HEAD state — there is no branch
+            # name to restore, so skip the checkout-restore at the end.
+            if original_branch == "HEAD":
+                original_branch = None
 
             # Check out the target branch before merging.
             checkout = _run(
@@ -204,7 +210,8 @@ class WorktreeManager:
         if task_id not in self._worktrees:
             return
         wt_path, branch = self._worktrees[task_id]
-        self._cleanup_worktree(task_id, wt_path, branch)
+        with self._merge_lock:
+            self._cleanup_worktree(task_id, wt_path, branch)
 
     # ── internal ──────────────────────────────────────────────────────────────
 

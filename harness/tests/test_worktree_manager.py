@@ -273,6 +273,28 @@ class TestWorktreeManagerMergeAndRemove(unittest.TestCase):
         wt = WorktreeManager(self._repo)
         self.assertIsInstance(wt._merge_lock, type(threading.Lock()))
 
+    def test_detached_head_does_not_restore_branch(self):
+        """Bug-1 regression: when HEAD is detached, git checkout 'HEAD' must NOT be called."""
+        self._register_task("task_detached", "wt-task_detached-00001111")
+
+        checkouts_seen = []
+
+        def _side_effect(args, cwd, check=True):
+            if args[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                # Simulate detached HEAD: git returns the literal string "HEAD".
+                return _ok(stdout="HEAD\n")
+            if args[:2] == ["git", "checkout"]:
+                checkouts_seen.append(args[2])
+            return _ok()
+
+        with patch("worktree_manager._run", side_effect=_side_effect):
+            self._wt.merge_and_remove("task_detached", into_branch="main")
+
+        # The checkout to *into_branch* is expected.
+        self.assertIn("main", checkouts_seen)
+        # But "HEAD" (the detached-state sentinel) must NEVER be checked out.
+        self.assertNotIn("HEAD", checkouts_seen, "must not git checkout 'HEAD' in detached state")
+
 
 # ---------------------------------------------------------------------------
 # WorktreeManager.remove
@@ -334,6 +356,28 @@ class TestWorktreeManagerRemove(unittest.TestCase):
         all_args = [c.args[0] for c in mock_run.call_args_list]
         prune_calls = [a for a in all_args if a[:3] == ["git", "worktree", "prune"]]
         self.assertTrue(prune_calls, "git worktree prune must be called during cleanup")
+
+    def test_remove_acquires_merge_lock(self):
+        """Bug-3 regression: remove() must hold _merge_lock to prevent concurrent git corruption."""
+        self._register_task("task_lock_check", "wt-task_lock_check-11223344")
+
+        lock_held_during_cleanup = []
+
+        def _side_effect(args, cwd, check=True):
+            # Check if the lock is held at the moment git commands run inside remove().
+            lock_held_during_cleanup.append(not self._wt._merge_lock.acquire(blocking=False))
+            if not lock_held_during_cleanup[-1]:
+                # We acquired it ourselves (lock was free) — release immediately.
+                self._wt._merge_lock.release()
+            return _ok()
+
+        with patch("worktree_manager._run", side_effect=_side_effect):
+            self._wt.remove("task_lock_check")
+
+        self.assertTrue(
+            any(lock_held_during_cleanup),
+            "_merge_lock must be held during remove() cleanup git calls",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +442,26 @@ class TestWorktreeManagerDegradation(unittest.TestCase):
         no_git_dir.mkdir()
         with self.assertRaises(ValueError):
             WorktreeManager(no_git_dir)
+
+    def test_create_prunes_after_removing_stale_dir(self):
+        """Bug-4 regression: if a stale wt_path directory exists, git worktree prune is called
+        after removing it so the crashed run's admin entry doesn't block the new add."""
+        wt = WorktreeManager(self._repo)
+        # Create a fake stale directory that looks like a leftover from a crashed run.
+        stale_path = self._repo.parent / ".jclaw_worktrees" / "task_stale"
+        stale_path.mkdir(parents=True, exist_ok=True)
+
+        prune_calls = []
+
+        def _side_effect(args, cwd, check=True):
+            if args[:3] == ["git", "worktree", "prune"]:
+                prune_calls.append(args)
+            return _ok()
+
+        with patch("worktree_manager._run", side_effect=_side_effect):
+            wt.create("task_stale")
+
+        self.assertTrue(prune_calls, "git worktree prune must be called after removing a stale dir")
 
 
 if __name__ == "__main__":
