@@ -5,8 +5,35 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#109 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89, + CD validator hardening #103 + routing-review plan amendments #104, + orchestrator Gemini **per-day** quota latch + free-first Codex→Sonnet→Opus chain + offline Matrix agent-dashboard + j-claw OAuth-tier/token tracking **#105** (squash `3b71f54`), + **#107** Claude Max CLI OAuth worker rung `claude_cli` (squash `b4b7c62`, live-validated; ships inert in-repo but **now enabled in the operator's `harness/.env`**); **#106/#108/#109** are docs syncs). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (interpretation-risk routing + per-role quotas) is next. **Open PRs: #73** (DRAFT operator WIP salvage — leave parked).
+**PRs #10–#109 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89, + CD validator hardening #103 + routing-review plan amendments #104, + orchestrator Gemini **per-day** quota latch + free-first Codex→Sonnet→Opus chain + offline Matrix agent-dashboard + j-claw OAuth-tier/token tracking **#105** (squash `3b71f54`), + **#107** Claude Max CLI OAuth worker rung `claude_cli` (squash `b4b7c62`, live-validated; ships inert in-repo but **now enabled in the operator's `harness/.env`**), + **#111** PR-#105 follow-up cleanups (squash `e78a62d`); **#106/#108/#109/#110** are docs syncs). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (interpretation-risk routing + per-role quotas) is next. **Open PRs: #73** (DRAFT operator WIP salvage — leave parked).
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-17 (ninth session continued) — PR-#105 follow-up cleanups (PR #111, MERGED squash `e78a62d`)
+
+The four deferred follow-ups from the PR #105 review, implemented after a Codex second opinion +
+a Codex implementation review (verdict: SAFE TO MERGE):
+- **#6 (Codex-tier dedup)** — `CodexOrchestrator` and `worker.planning_call` duplicated the whole
+  Codex protocol and had drifted on JSON parsing. Extracted a NEW `harness/llm_json.py`
+  (`strip_fences` / `fix_json_strings` / `loads_tolerant` / `loads_llm_json_object` — the last
+  preserves BOTH tolerances: trailing prose AND in-string literal newlines) and `worker._codex_tier`
+  (shared Codex-only tier raising `_CodexTierUnavailable` / `_CodexTierInvalid`; `planning_call`
+  catches → Anthropic, `CodexOrchestrator` converts → RuntimeError). A `reserve_attempt` callback
+  preserves the exact check→reserve→increment order for `CODEX_PLANNING_RESERVE`.
+- **#4** — worker schema-fail (`ValueError`) path now persists tokens (was drain+discard) so a
+  task that ultimately schema-fails no longer under-reports usage.
+- **#7** — 2s TTL cache on `/api/agents` (`_agents_payload`, mirrors `git_panel`) + an
+  `_invalidate_agents_cache()` on the cancel/kill paths so a control action isn't masked by the
+  cached snapshot.
+- **#8** — five near-identical `apiClient.js` fetchers collapsed into one `_request()`.
+- Tests: +5 `llm_json` parser tests + 1 schema-fail token-persist regression; `TestCodexOrchestrator`
+  telemetry patch repointed to `worker.record_role_event`. Suites pass SEPARATELY (the repo's way):
+  `test_llm_layers` 104/1, `harness/tests` 13, `test_agent_dashboard` 24, `test_mission_control` 8.
+- **Known latent gap (NOT fixed, own follow-up):** running `test_llm_layers.py` *combined* with
+  `harness/tests/` in one pytest process trips a pre-existing `TestRoleCutover` prompt-path
+  FileNotFound (CWD pollution); reproduces on the unchanged tree. Run suites separately; fix later
+  with a conftest CWD guard / absolute prompt paths.
 
 ---
 
