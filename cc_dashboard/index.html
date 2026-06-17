@@ -163,6 +163,8 @@ body {
 .tok-table td { padding: 3px 0; border-bottom: 1px solid #1a1230; }
 .tok-table td:first-child { color: var(--muted); }
 .tok-table td:last-child { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+.tok-table th { color: var(--muted); font-weight: normal; padding: 3px 0; border-bottom: 1px solid #1a1230; font-size: 9px; text-transform: uppercase; }
+.tok-table th:not(:first-child), .tok-table td.num { text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
 
 /* ── Files / PRs ── */
 .pill-list { display: flex; flex-direction: column; gap: 2px; }
@@ -329,16 +331,76 @@ function setBadge(id, text, title) {
   else el.style.display = 'none';
 }
 
+const MODEL_PRICES = [
+  { prefix: 'claude-fable-5',  in: 10, out: 50, cw: 12.50, cr: 1.00 },
+  { prefix: 'claude-mythos-5', in: 10, out: 50, cw: 12.50, cr: 1.00 },
+  { prefix: 'claude-opus-4',   in: 5,  out: 25, cw: 6.25,  cr: 0.50 },
+  { prefix: 'claude-sonnet-4', in: 3,  out: 15, cw: 3.75,  cr: 0.30 },
+  { prefix: 'claude-haiku-4',  in: 1,  out: 5,  cw: 1.25,  cr: 0.10 },
+];
+function modelPrices(name) {
+  const n = String(name || '').toLowerCase();
+  for (const p of MODEL_PRICES) { if (n.startsWith(p.prefix)) return p; }
+  return null;
+}
+function calcCost(m) {
+  const p = modelPrices(m.model);
+  if (!p) return null;
+  return ((m.input || 0) * p.in + (m.output || 0) * p.out +
+          (m.cache_creation || 0) * p.cw + (m.cache_read || 0) * p.cr) / 1e6;
+}
+function fmtCost(usd) {
+  if (usd == null) return '—';
+  if (usd < 0.001) return '<$0.001';
+  if (usd < 1) return '$' + usd.toFixed(3);
+  return '$' + usd.toFixed(2);
+}
+
 function renderTokens(tk) {
   const el = document.getElementById('tokens');
   if (!tk.assistant_turns) { el.innerHTML = '<div class="empty">No usage yet.</div>'; return; }
   const rawPct = tk.context_pct || 0;          // true fill (can exceed 100)
   const pct = Math.min(100, rawPct);           // bar width clamps at 100
   const cls = rawPct >= 90 ? 'hot' : (rawPct >= 70 ? 'warn' : '');
+  const byModel = tk.tokens_by_model || [];
+  const modelRows = byModel.length
+    ? byModel.map(m => {
+        const cost = calcCost(m);
+        return `<tr>
+          <td title="${esc(m.model)}">${esc(shortModel(m.model))}</td>
+          <td class="num">${fmtNum(m.cost_tokens)}</td>
+          <td class="num">${fmtNum(m.input)}</td>
+          <td class="num">${fmtNum(m.output)}</td>
+          <td class="num">${fmtNum(m.cache_creation)}</td>
+          <td class="num">${fmtNum(m.cache_read)}</td>
+          <td class="num">${fmtCost(cost)}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="7" style="color:var(--muted)">—</td></tr>';
+  const totalRow = byModel.length > 1 ? (() => {
+    const t = byModel.reduce((acc, m) => {
+      acc.cost_tokens += m.cost_tokens || 0;
+      acc.input += m.input || 0;
+      acc.output += m.output || 0;
+      acc.cache_creation += m.cache_creation || 0;
+      acc.cache_read += m.cache_read || 0;
+      const c = calcCost(m);
+      if (c != null) acc.cost += c;
+      return acc;
+    }, { cost_tokens: 0, input: 0, output: 0, cache_creation: 0, cache_read: 0, cost: 0 });
+    return `<tr style="border-top:1px solid var(--border-hi);font-weight:bold">
+      <td style="color:var(--muted)">TOTAL</td>
+      <td class="num">${fmtNum(t.cost_tokens)}</td>
+      <td class="num">${fmtNum(t.input)}</td>
+      <td class="num">${fmtNum(t.output)}</td>
+      <td class="num">${fmtNum(t.cache_creation)}</td>
+      <td class="num">${fmtNum(t.cache_read)}</td>
+      <td class="num">${fmtCost(t.cost)}</td>
+    </tr>`;
+  })() : '';
   el.innerHTML = `
     <div class="kv">
       <div class="k">Cost tokens</div><div class="v big">${fmtNum(tk.cost_tokens)}</div>
-      <div class="k">Est. cost</div><div class="v mono">$${(tk.est_cost_usd || 0).toFixed(2)}</div>
     </div>
     <div style="margin-top:8px;font-size:9px;color:var(--muted);display:flex;justify-content:space-between">
       <span>CONTEXT FILL</span><span>${fmtNum(tk.context_fill)} / ${fmtNum(tk.context_window)} · ${rawPct}%</span>
@@ -350,6 +412,14 @@ function renderTokens(tk) {
       <tr><td>Cache write</td><td>${fmtNum(tk.cache_creation_tokens)}</td></tr>
       <tr><td title="Billed separately at a reduced rate; NOT summed into cost tokens">Cache read*</td><td>${fmtNum(tk.cache_read_tokens)}</td></tr>
       <tr><td>Assistant turns</td><td>${fmtNum(tk.assistant_turns)}</td></tr>
+    </table>
+    <div style="margin-top:10px;font-size:9px;color:var(--muted)">BY MODEL</div>
+    <table class="tok-table" style="margin-top:4px">
+      <thead><tr>
+        <th style="text-align:left">Model</th>
+        <th>Cost tok</th><th>In</th><th>Out</th><th>CW</th><th>CR</th><th>$Cost</th>
+      </tr></thead>
+      <tbody>${modelRows}${totalRow}</tbody>
     </table>`;
 }
 

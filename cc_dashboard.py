@@ -49,13 +49,6 @@ _MAX_TEXT = 600            # truncate long strings before they reach the browser
 _FILES_CAP = 200           # bound the touched-files dict over a long session
 _TERMINAL_STOPS = {"end_turn", "stop", "max_tokens"}  # sub-agent done signals
 
-# Per-million-token pricing (Opus-class, USD). Used only for a rough estimate;
-# cache-read is billed at a fraction of the input rate.
-_PRICE_INPUT = 5.0
-_PRICE_OUTPUT = 25.0
-_PRICE_CACHE_WRITE = 6.25
-_PRICE_CACHE_READ = 0.50
-
 _STATE_LOCK = threading.Lock()
 
 
@@ -129,6 +122,18 @@ def _find_session_file(session_id=None):
     return Path(max(files, key=os.path.getmtime))
 
 
+def _add_tokens(by_model, model, inp, out, cw, cr):
+    """Accumulate per-model token usage into a {model: {...}} dict."""
+    if not model:
+        return
+    m = by_model.setdefault(
+        model, {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0})
+    m["input"] += inp
+    m["output"] += out
+    m["cache_creation"] += cw
+    m["cache_read"] += cr
+
+
 # ── Tailer ─────────────────────────────────────────────────────────────────
 
 
@@ -169,6 +174,7 @@ class Tailer:
         self.cache_creation_tokens = 0
         self.last_ctx = 0          # last assistant turn's context-window fill
         self.assistant_turns = 0
+        self.tokens_by_model = {}  # main-session per-model token usage
 
     # -- file selection / rotation ------------------------------------------
 
@@ -282,6 +288,7 @@ class Tailer:
             self.cache_creation_tokens += cw
             self.cache_read_tokens += cr
             self.cost_tokens += inp + out + cw
+            _add_tokens(self.tokens_by_model, msg.get("model"), inp, out, cw, cr)
             # Context-window fill = the LAST turn's input + cache_read +
             # cache_creation (NOT a running sum).
             self.last_ctx = inp + cr + cw
@@ -451,7 +458,7 @@ class Tailer:
         last_ts = None
         last_text = None
         last_stop = None
-        running = False
+        a_in = a_out = a_cw = a_cr = 0
         with open(jsonl, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
@@ -471,6 +478,11 @@ class Tailer:
                 if rec.get("type") == "assistant":
                     msg = rec.get("message") or {}
                     last_stop = msg.get("stop_reason")
+                    u = msg.get("usage") or {}
+                    a_in += int(u.get("input_tokens") or 0)
+                    a_out += int(u.get("output_tokens") or 0)
+                    a_cw += int(u.get("cache_creation_input_tokens") or 0)
+                    a_cr += int(u.get("cache_read_input_tokens") or 0)
                     content = msg.get("content")
                     if isinstance(content, list):
                         parts = [b.get("text") for b in content
@@ -496,6 +508,8 @@ class Tailer:
             info["status"] = "done"
         else:
             info["status"] = "running"
+        info["tokens"] = {"input": a_in, "output": a_out,
+                          "cache_creation": a_cw, "cache_read": a_cr}
         if last_text:
             info["result"] = _truncate(last_text, 240)
 
@@ -506,13 +520,24 @@ class Tailer:
         idle_s = int(now - self.last_event_epoch) if self.last_event_epoch else None
         elapsed_s = int((self.last_event_epoch or now) - self.started_epoch) \
             if self.started_epoch else 0
-        est_cost = (
-            self.input_tokens / 1e6 * _PRICE_INPUT
-            + self.output_tokens / 1e6 * _PRICE_OUTPUT
-            + self.cache_creation_tokens / 1e6 * _PRICE_CACHE_WRITE
-            + self.cache_read_tokens / 1e6 * _PRICE_CACHE_READ
-        )
         agents = [self.agents[a] for a in self.agent_order]
+        # Per-model token usage = main session + each sub-agent (by its resolved
+        # model). Sub-agent tokens are recomputed fresh each poll, so merge here
+        # rather than accumulating (avoids double-counting across polls).
+        by_model = {m: dict(v) for m, v in self.tokens_by_model.items()}
+        for a in agents:
+            tok = a.get("tokens") or {}
+            _add_tokens(by_model, a.get("resolvedModel"),
+                        tok.get("input", 0), tok.get("output", 0),
+                        tok.get("cache_creation", 0), tok.get("cache_read", 0))
+        tokens_by_model = sorted(
+            [{"model": m,
+              "cost_tokens": v["input"] + v["output"] + v["cache_creation"],
+              "input": v["input"], "output": v["output"],
+              "cache_creation": v["cache_creation"], "cache_read": v["cache_read"]}
+             for m, v in by_model.items()],
+            key=lambda x: -x["cost_tokens"],
+        )
         return {
             "updated_at_epoch": now,
             "session": {
@@ -541,7 +566,7 @@ class Tailer:
                 "context_window": _CONTEXT_WINDOW,
                 "context_pct": round(self.last_ctx / _CONTEXT_WINDOW * 100, 1),
                 "assistant_turns": self.assistant_turns,
-                "est_cost_usd": round(est_cost, 2),
+                "tokens_by_model": tokens_by_model,
             },
             "prs": [{"number": k, "url": v} for k, v in self.prs.items()],
             "files": sorted(self.files.keys(), key=lambda p: -(self.files[p] or 0))[:60],
