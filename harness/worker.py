@@ -20,6 +20,7 @@ from config import (
     CODEX_CLI_ENABLED, CODEX_HOME, CODEX_MODEL, CODEX_EFFORT, OPUS_MODEL,
     CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT, OAUTH_PROVIDERS, METERED_PROVIDERS,
     GROK_CLI_ENABLED, GROK_HOME, GROK_MODEL, GROK_MAX_CALLS, GROK_TIMEOUT,
+    CLAUDE_CLI_ENABLED, CLAUDE_CLI_HOME, CLAUDE_CLI_MODEL, CLAUDE_CLI_MAX_CALLS, CLAUDE_CLI_TIMEOUT,
 )
 from experience_log import get_worker_hints, log_escalation
 from cost import record_role_event
@@ -713,22 +714,40 @@ _oauth_calls_made: dict[str, int] = {}
 _oauth_lock = threading.Lock()
 _codex_disabled = False
 _grok_disabled = False
+_claude_cli_disabled = False
 
 # Single-flight lock for Grok: xAI rotates the OAuth refresh token on each use, so concurrent
 # `grok -p` subprocesses would race and invalidate the cached ~/.grok/auth.json session. Serialize
 # Grok CLI calls behind this lock so only one runs at a time (Codex needs no such lock).
 _grok_call_lock = threading.Lock()
 
+# Single-flight lock for the Claude Max CLI: serialize `claude -p` calls so parallel workers can't
+# burn the operator's shared interactive Max usage pool before the usage-limit latch propagates to
+# future reservations, and can't race Claude Code's local session/config state.
+_claude_cli_call_lock = threading.Lock()
+
+# Credentials scrubbed from the `claude -p` subprocess env. Claude Code's auth precedence puts an
+# API key / Bedrock / Vertex routing AHEAD of the subscription OAuth in non-interactive mode, so if
+# this repo's metered-rung ANTHROPIC_API_KEY (or a cloud-routing var) leaks into the call, the
+# "free" Max rung silently becomes a METERED API call — defeating the whole rung. Stripped so
+# `claude -p` falls back to the subscription OAuth (or a dedicated CLAUDE_CLI_HOME config dir).
+_CLAUDE_CLI_ENV_BLOCKLIST = frozenset({
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_BEARER_TOKEN_BEDROCK",
+})
+
 
 def reset_paid_budget() -> None:
     """Reset the per-project paid (cloud) worker-call counter. Call at project start."""
-    global _paid_calls_made, _codex_disabled, _grok_disabled
+    global _paid_calls_made, _codex_disabled, _grok_disabled, _claude_cli_disabled
     with _paid_lock:
         _paid_calls_made = 0
     with _oauth_lock:
         _oauth_calls_made.clear()
         _codex_disabled = False
         _grok_disabled = False
+        _claude_cli_disabled = False
 
 
 def _reserve_paid_call() -> bool:
@@ -752,12 +771,16 @@ def _reserve_oauth_call(provider: str) -> bool:
         cap = CODEX_CLI_MAX_CALLS
     elif provider == "grok":
         cap = GROK_MAX_CALLS
+    elif provider == "claude_cli":
+        cap = CLAUDE_CLI_MAX_CALLS
     else:
         cap = 0
     with _oauth_lock:
         if provider == "codex" and _codex_disabled:
             return False
         if provider == "grok" and _grok_disabled:
+            return False
+        if provider == "claude_cli" and _claude_cli_disabled:
             return False
         made = _oauth_calls_made.get(provider, 0)
         if made >= cap:
@@ -773,6 +796,8 @@ def _oauth_enabled(provider: str) -> bool:
         return CODEX_CLI_ENABLED
     if provider == "grok":
         return GROK_CLI_ENABLED
+    if provider == "claude_cli":
+        return CLAUDE_CLI_ENABLED
     return False
 
 
@@ -828,7 +853,7 @@ def execute_task(
     the legacy WORKER_PROVIDER + WORKER_FALLBACKS chain if WORKER_LADDER is unset.
     Raises ValueError immediately on bad JSON format so the scheduler can send EXECUTION_ERROR.
     """
-    global _codex_disabled, _grok_disabled  # latched off when an OAuth rung hits auth/quota mid-run
+    global _codex_disabled, _grok_disabled, _claude_cli_disabled  # latched off when an OAuth rung hits auth/quota mid-run
     arch  = spec.get("architecture", {})
     stack = arch.get("stack", "vanilla")
     # For full-stack projects, pick the sub-stack based on task type
@@ -989,6 +1014,8 @@ def execute_task(
                         _codex_disabled = True
                     elif provider == "grok":
                         _grok_disabled = True
+                    elif provider == "claude_cli":
+                        _claude_cli_disabled = True
                 console.print(
                     f"  [yellow]{provider} unavailable (auth/quota) — disabling {provider} rung "
                     f"for this run, escalating to next rung.[/yellow]"
@@ -1066,6 +1093,25 @@ def _is_grok_unavailable(exc: Exception) -> bool:
     ))
 
 
+def _is_claude_cli_unavailable(exc: Exception) -> bool:
+    """True when the Claude Max CLI rung is unavailable for this run (exe missing, not logged in,
+    or — the common case — the subscription's usage limit has been reached / a rate limit hit /
+    the subprocess timed out). All of these mean "latch off, skip to the metered API rung", NOT a
+    capability failure. Hitting the Max usage limit must latch (unlike a transient API 429) because
+    the limit is a rolling window that won't clear within a build — and crucially it's the SAME pool
+    the operator's interactive session uses, so we stop hammering it. A bad-output ValueError is
+    handled elsewhere and returns False here."""
+    if isinstance(exc, (FileNotFoundError, subprocess.TimeoutExpired)):
+        return True
+    msg = str(exc).lower()
+    return any(k in msg for k in (
+        "not logged in", "please run /login", "run /login", "login required",
+        "unauthorized", "401", "403", "429", "rate limit",
+        "usage limit", "reached your usage", "limit reached", "quota",
+        "out of credits", "subscription",
+    ))
+
+
 def _oauth_unavailable(provider: str, exc: Exception) -> bool:
     """Dispatch an OAuth-rung failure to the provider's availability classifier. True → latch the
     rung off + skip to next rung; False → treat as a normal capability failure (escalate)."""
@@ -1073,6 +1119,8 @@ def _oauth_unavailable(provider: str, exc: Exception) -> bool:
         return _is_codex_unavailable(exc)
     if provider == "grok":
         return _is_grok_unavailable(exc)
+    if provider == "claude_cli":
+        return _is_claude_cli_unavailable(exc)
     return False
 
 
@@ -1160,6 +1208,8 @@ def _call_provider(provider: str, model: str, system: str, user: str) -> str:
         return _call_codex(model, system, user)
     if provider == "grok":
         return _call_grok(model, system, user)
+    if provider == "claude_cli":
+        return _call_claude_cli(model, system, user)
     raise ValueError(f"Unknown worker provider: {provider!r}")
 
 
@@ -1381,6 +1431,115 @@ def _call_grok(model: str, system: str, user: str) -> str:
         raise
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _extract_claude_text(stdout: str) -> tuple[str, int, int]:
+    """Pull the final assistant message (and token counts) out of `claude -p --output-format json`.
+
+    The print-mode envelope is a single JSON object: {"type":"result","subtype":"success",
+    "is_error":false,"result":"<text>","usage":{"input_tokens":N,"output_tokens":M},...}. Returns
+    (text, input_tokens, output_tokens). Falls back defensively to other text keys, then the raw
+    stdout, since downstream _parse_and_validate hunts for the {"files":[...]} contract anyway.
+    Raises RuntimeError when the envelope reports is_error (a model-level failure on a 0 exit)."""
+    s = (stdout or "").strip()
+    if not s:
+        return "", 0, 0
+    try:
+        obj = json.loads(s)
+    except (json.JSONDecodeError, ValueError):
+        return s, 0, 0  # plain text — let _parse_and_validate find the contract
+    if isinstance(obj, dict):
+        usage = obj.get("usage") if isinstance(obj.get("usage"), dict) else {}
+        inp = int(usage.get("input_tokens") or 0)
+        out = int(usage.get("output_tokens") or 0)
+        if obj.get("is_error"):
+            raise RuntimeError(f"claude -p reported an error: {str(obj.get('result'))[:300]}")
+        # If structured output is ever enabled (--json-schema), it already IS the contract shape —
+        # prefer it over the free-text result so validation is part of the transport.
+        so = obj.get("structured_output")
+        if isinstance(so, (dict, list)):
+            return json.dumps(so), inp, out
+        for key in ("result", "text", "response", "message", "output", "final"):
+            v = obj.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip(), inp, out
+    return s, 0, 0
+
+
+def _call_claude_cli(model: str, system: str, user: str) -> str:
+    """Run a one-shot headless `claude -p` under the operator's Claude Max subscription ($0 marginal).
+
+    Mirrors _call_ollama's (model, system, user) -> str contract. CRITICAL: `claude -p` is ALWAYS the
+    full Claude Code agent (there is no bare-model path to the Max subscription), so it is constrained
+    hard to behave as a pure generator:
+      * --tools ""             disable ALL built-in agent tools (no Bash/Edit/Write/Read/Glob/…)
+      * --strict-mcp-config    ignore operator/project MCP servers (none are passed in)
+      * --setting-sources ""   load NO user/project/local settings (no hooks/plugins/customizations)
+      * --disable-slash-commands
+      * --no-session-persistence  don't write session state to disk
+      * --system-prompt-file   REPLACE Claude Code's coding-agent identity with j-claw's worker
+                               prompt (a temp file — a huge --system-prompt argv would blow the
+                               Windows command-line length limit); the task JSON is piped on stdin.
+    The subprocess env is SCRUBBED of API-key / Bedrock / Vertex credentials (_CLAUDE_CLI_ENV_BLOCKLIST)
+    so Claude Code uses the subscription OAuth and not the metered API. Serialized behind
+    _claude_cli_call_lock; runs in an isolated scratch cwd; UTF-8 forced (non-cp1252 glyphs, as Codex).
+    CLAUDE_CLI_TIMEOUT bounds the call.
+    NOTE: ships inert (CLAUDE_CLI_ENABLED=false). The constraint flags + the agent's ability to emit
+    the clean {"files":[...]} contract MUST be confirmed by a live smoke test before enabling — see the
+    live-validation checklist in config.py's CLAUDE_CLI block."""
+    exe = shutil.which("claude") or shutil.which("claude.cmd") or "claude"
+    scratch = tempfile.mkdtemp(prefix="claude_cwd_")
+    sysfd, sysfile = tempfile.mkstemp(suffix=".txt", prefix="claude_sys_")
+    os.close(sysfd)
+    with open(sysfile, "w", encoding="utf-8") as fh:
+        fh.write(system)
+    cmd = [
+        exe, "-p", "--output-format", "json", "--model", (model or CLAUDE_CLI_MODEL),
+        "--system-prompt-file", sysfile,   # replace the coding-agent identity with the worker prompt
+        "--tools", "",                     # no built-in tools — pure generation
+        "--strict-mcp-config",             # ignore any operator/project MCP servers
+        "--setting-sources", "",           # load NO user/project/local settings (hooks/plugins/customizations)
+        "--disable-slash-commands",
+        "--no-session-persistence",        # don't write session state to disk
+    ]
+    # Strip credentials that would override the subscription OAuth and silently meter the call.
+    env = {k: v for k, v in os.environ.items() if k not in _CLAUDE_CLI_ENV_BLOCKLIST}
+    if CLAUDE_CLI_HOME:
+        env["CLAUDE_CONFIG_DIR"] = CLAUDE_CLI_HOME
+
+    from cost import record_oauth_usage
+    start = time.monotonic()
+    try:
+        with _claude_cli_call_lock:  # serialize: protect the shared Max pool + local session state
+            result = subprocess.run(
+                cmd,
+                input=user,            # the task JSON only; the worker prompt is the system-prompt-file
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=CLAUDE_CLI_TIMEOUT,
+                env=env,
+                cwd=scratch,
+            )
+        if result.returncode != 0:
+            tail = ((result.stderr or "") + (result.stdout or ""))[-300:]
+            raise RuntimeError(f"claude -p exited {result.returncode}: ...{tail}")
+        text, inp, out = _extract_claude_text(result.stdout or "")
+        record_oauth_usage("claude_cli", success=True, latency_s=time.monotonic() - start,
+                            tokens=inp + out)
+        # Unlike Codex/Grok, claude -p DOES expose usage — record real counts when present.
+        _set_call_tokens(inp, out)
+        return text
+    except BaseException:
+        record_oauth_usage("claude_cli", success=False, latency_s=time.monotonic() - start, tokens=0)
+        raise
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+        try:
+            os.remove(sysfile)
+        except OSError:
+            pass
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -96,12 +96,46 @@ GROK_MODEL: str = os.getenv("GROK_MODEL", "grok-build")  # agentic coding model 
 GROK_MAX_CALLS: int = int(os.getenv("GROK_MAX_CALLS", "40"))
 GROK_TIMEOUT: int = int(os.getenv("GROK_TIMEOUT", "300"))  # seconds per grok -p subprocess
 
+# Claude (Max subscription) CLI worker rung — a third flat-rate OAuth escalation tier. Headless
+# `claude -p` runs the same Sonnet/Opus models you'd otherwise reach via the metered Anthropic API,
+# but billed against the operator's Claude Max subscription ($0 marginal). It sits in WORKER_LADDER
+# ABOVE the metered `anthropic` rungs so Claude-tier escalations are caught for free first, with the
+# paid API rung kept only as the overflow safety net. CRITICAL OPERATIONAL NOTE: unlike Codex/Grok
+# (separate subscriptions), this draws on the SAME Max usage pool as the operator's interactive
+# Claude Code — a heavy build can throttle interactive use and vice-versa. So it's placed BELOW
+# Codex/Grok and its per-run cap defaults LOW. Shelled out in non-interactive mode (see
+# worker._call_claude_cli). Ships INERT (disabled by default); `claude -p` is the Claude Code AGENT,
+# not a bare model call, so it is constrained hard (no tools, MCP off, safe-mode, worker system
+# prompt via --system-prompt-file) and its credentials env is scrubbed so it uses the subscription.
+#
+# LIVE-VALIDATION CHECKLIST (mirrors how the Codex rung was validated in PR #84, which found a
+# live-only bug — and this one found that --safe-mode is rejected by claude 2.1.179):
+#   1. AUTH — ✓ smoke-tested 2026-06-17: with ANTHROPIC_API_KEY scrubbed the call still succeeded
+#      (returncode 0), i.e. it used the subscription OAuth, not the metered API. (Claude Code still
+#      PRINTS an informational total_cost_usd estimate even on a subscription session — confirm on
+#      the Max usage dashboard that no metered API spend appears.)
+#   2. CONTRACT — ✓ smoke-tested 2026-06-17: with --tools "" + --setting-sources "" + the worker
+#      --system-prompt-file it returned a clean {"files":[...]} object, is_error=false, num_turns=1
+#      (no agent loop, no tool attempts, no markdown fences).
+#   3. LATCH — NOT exercised live (can't force a usage-limit on demand); classifier is unit-tested
+#      only. Confirm in a real run that a usage-limit response trips _claude_cli_disabled.
+#   4. ToS — operator decision: confirm this scale of automated subscription use is acceptable under
+#      Anthropic's current Consumer Terms (a personal Max sub powering an automated build farm is a
+#      risk boundary — for team/commercial use prefer Team/Enterprise or Console API billing).
+# Still ships INERT: enable + add to WORKER_LADDER only after you accept #4 and have seen #3 in a run.
+CLAUDE_CLI_ENABLED: bool = os.getenv("CLAUDE_CLI_ENABLED", "false").lower() == "true"
+CLAUDE_CLI_HOME: str = os.getenv("CLAUDE_CLI_HOME", "")  # empty = use claude's default config dir (sets CLAUDE_CONFIG_DIR)
+CLAUDE_CLI_MODEL: str = os.getenv("CLAUDE_CLI_MODEL", "sonnet")  # alias the Claude CLI accepts (sonnet|opus|haiku) or a full id
+# Per-run capacity cap — deliberately LOW because this shares the operator's interactive Max quota.
+CLAUDE_CLI_MAX_CALLS: int = int(os.getenv("CLAUDE_CLI_MAX_CALLS", "10"))
+CLAUDE_CLI_TIMEOUT: int = int(os.getenv("CLAUDE_CLI_TIMEOUT", "300"))  # seconds per claude -p subprocess
+
 # Provider-class sets that make the worker's budget logic declarative. METERED providers bill
 # per token and consume the dollar budget MAX_PAID_WORKER_CALLS; OAUTH providers are flat-rate
 # subscriptions that consume a SEPARATE per-run capacity counter (CODEX_CLI_MAX_CALLS) instead,
 # so they never draw down the dollar budget but are still bounded against quota exhaustion.
 METERED_PROVIDERS: set[str] = {"anthropic", "openrouter"}
-OAUTH_PROVIDERS: set[str] = {"codex", "grok"}
+OAUTH_PROVIDERS: set[str] = {"codex", "grok", "claude_cli"}
 
 # Maximum tasks to run in parallel (1 = sequential, 2-4 = parallel)
 MAX_PARALLEL_WORKERS: int = int(os.getenv("MAX_PARALLEL_WORKERS", "4"))
