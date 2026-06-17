@@ -23,10 +23,12 @@ import glob
 import http.server
 import json
 import os
+import re
 import sys
 import threading
 import time
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -44,6 +46,8 @@ _REQUEST_TIMEOUT_S = 10
 _CONTEXT_WINDOW = 200_000  # ~200K context window for the fill-% gauge
 _TIMELINE_CAP = 400        # keep the timeline bounded in memory / on disk
 _MAX_TEXT = 600            # truncate long strings before they reach the browser
+_FILES_CAP = 200           # bound the touched-files dict over a long session
+_TERMINAL_STOPS = {"end_turn", "stop", "max_tokens"}  # sub-agent done signals
 
 # Per-million-token pricing (Opus-class, USD). Used only for a rough estimate;
 # cache-read is billed at a fraction of the input rate.
@@ -94,8 +98,6 @@ def _epoch_from_iso(ts):
         return None
     try:
         clean = ts.replace("Z", "+00:00")
-        from datetime import datetime
-
         return datetime.fromisoformat(clean).timestamp()
     except Exception:
         return None
@@ -138,6 +140,7 @@ class Tailer:
         self.path = None
         self.offset = 0
         self.partial = ""          # buffered trailing partial line
+        self.waiting_for = None    # pinned session id that doesn't exist yet
         self.reset_state()
 
     def reset_state(self):
@@ -172,7 +175,11 @@ class Tailer:
     def _select_file(self):
         path = _find_session_file(self.pinned_session)
         if path is None:
+            # A pinned session that doesn't exist yet → surface it so the UI
+            # shows "waiting for <id>" rather than a silent blank dashboard.
+            self.waiting_for = self.pinned_session
             return
+        self.waiting_for = None
         if self.path != path:
             # New active session: start fresh.
             self.path = path
@@ -397,12 +404,14 @@ class Tailer:
         snap = rec.get("snapshot")
         # snapshot is a stringified dict; extract any plausible file paths.
         text = snap if isinstance(snap, str) else json.dumps(snap, default=str)
-        import re
-
         for m in re.finditer(r"[A-Za-z]:\\\\[^'\"]+|/[^'\"]+\.[A-Za-z0-9]+", text):
             path = m.group(0)
             if len(path) < 256 and ("." in path):
                 self.files[path] = ts_epoch
+        # Bound growth over a long session: keep only the newest paths by epoch.
+        if len(self.files) > _FILES_CAP:
+            keep = sorted(self.files, key=lambda p: -(self.files[p] or 0))[:_FILES_CAP]
+            self.files = {p: self.files[p] for p in keep}
 
     def _push(self, event):
         self.timeline.append(event)
@@ -471,17 +480,20 @@ class Tailer:
                             last_text = joined
         if first_ts and last_ts:
             info["duration_s"] = max(0, int(last_ts - first_ts))
-        # Heuristic: the agent file's mtime stops advancing once it finishes; a
-        # final assistant turn with a stop_reason indicates completion.
+        # Done-detection: a terminal stop_reason on the agent's final assistant
+        # turn is the authoritative signal. mtime is fragile (any touch resets
+        # it, and tool gaps can exceed a short idle window), so use a long idle
+        # only as a FALLBACK for a transcript that never produced a terminal
+        # stop_reason (e.g. a crashed/orphaned agent).
         try:
             mtime = jsonl.stat().st_mtime
         except OSError:
             mtime = None
-        idle = (time.time() - mtime) if mtime else 0
-        if last_stop and idle > 8:
+        idle = (time.time() - mtime) if mtime else None
+        if last_stop in _TERMINAL_STOPS:
             info["status"] = "done"
-        elif last_stop:
-            info["status"] = "running"
+        elif idle is not None and idle > 30:
+            info["status"] = "done"
         else:
             info["status"] = "running"
         if last_text:
@@ -515,6 +527,7 @@ class Tailer:
                 "elapsed_s": elapsed_s,
                 "idle_s": idle_s,
                 "last_event_epoch": self.last_event_epoch,
+                "waiting_for": self.waiting_for,
             },
             "timeline": self.timeline[-_TIMELINE_CAP:],
             "agents": agents,

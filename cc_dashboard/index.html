@@ -332,15 +332,16 @@ function setBadge(id, text, title) {
 function renderTokens(tk) {
   const el = document.getElementById('tokens');
   if (!tk.assistant_turns) { el.innerHTML = '<div class="empty">No usage yet.</div>'; return; }
-  const pct = Math.min(100, tk.context_pct || 0);
-  const cls = pct >= 90 ? 'hot' : (pct >= 70 ? 'warn' : '');
+  const rawPct = tk.context_pct || 0;          // true fill (can exceed 100)
+  const pct = Math.min(100, rawPct);           // bar width clamps at 100
+  const cls = rawPct >= 90 ? 'hot' : (rawPct >= 70 ? 'warn' : '');
   el.innerHTML = `
     <div class="kv">
       <div class="k">Cost tokens</div><div class="v big">${fmtNum(tk.cost_tokens)}</div>
       <div class="k">Est. cost</div><div class="v mono">$${(tk.est_cost_usd || 0).toFixed(2)}</div>
     </div>
     <div style="margin-top:8px;font-size:9px;color:var(--muted);display:flex;justify-content:space-between">
-      <span>CONTEXT FILL</span><span>${fmtNum(tk.context_fill)} / ${fmtNum(tk.context_window)} · ${pct}%</span>
+      <span>CONTEXT FILL</span><span>${fmtNum(tk.context_fill)} / ${fmtNum(tk.context_window)} · ${rawPct}%</span>
     </div>
     <div class="ctx-track"><div class="ctx-fill ${cls}" style="width:${pct}%"></div></div>
     <table class="tok-table">
@@ -359,7 +360,14 @@ function renderFilesGit(d) {
   let html = '';
   if (prs.length) {
     html += '<div style="font-size:9px;color:var(--muted);margin-bottom:3px">PULL REQUESTS</div>';
-    html += prs.map(p => `<a class="pr-link" href="${esc(p.url)}" target="_blank" rel="noopener">#${esc(p.number)} ↗</a>`).join('');
+    html += prs.map(p => {
+      // Only hyperlink genuine https URLs — never let a non-https scheme
+      // (e.g. javascript:) from session data become a clickable anchor.
+      const safe = /^https:\/\//.test(String(p.url || ''));
+      return safe
+        ? `<a class="pr-link" href="${esc(p.url)}" target="_blank" rel="noopener">#${esc(p.number)} ↗</a>`
+        : `<span class="pr-link">#${esc(p.number)}</span>`;
+    }).join('');
   }
   html += `<div style="font-size:9px;color:var(--muted);margin:8px 0 3px">FILES TOUCHED (${files.length})</div>`;
   if (files.length) {
@@ -376,27 +384,31 @@ function renderFilesGit(d) {
 function renderTimeline(tl) {
   const el = document.getElementById('timeline');
   if (!tl.length) { el.innerHTML = '<div class="empty">No activity yet.</div>'; return; }
-  // Oldest→newest; newest at the bottom so auto-scroll lands on the latest.
-  el.innerHTML = tl.map(ev => {
+  // Cap rendered rows + clip each body (defense-in-depth: the server already
+  // bounds the timeline length and per-item text, but the client must not
+  // assume it — a huge value must never bloat the DOM). Oldest→newest; newest
+  // at the bottom so auto-scroll lands on the latest.
+  const clip = (v) => esc(String(v == null ? '' : v).slice(0, 2000));
+  el.innerHTML = tl.slice(-300).map(ev => {
     let icon = '•', nameCls = '', name = ev.kind, body = '';
     if (ev.kind === 'user') {
       icon = '👤'; nameCls = 'user'; name = 'You';
-      body = `<div class="tl-text">${esc(ev.text || '')}</div>`;
+      body = `<div class="tl-text">${clip(ev.text)}</div>`;
     } else if (ev.kind === 'assistant') {
       icon = '✦'; nameCls = 'assistant'; name = 'Claude';
-      body = `<div class="tl-text">${esc(ev.text || '')}</div>`;
+      body = `<div class="tl-text">${clip(ev.text)}</div>`;
     } else if (ev.kind === 'tool_use') {
       icon = '⚙'; nameCls = 'tool'; name = ev.name || 'tool';
-      body = `<div class="tl-text dim">${esc(ev.summary || '')}</div>`;
+      body = `<div class="tl-text dim">${clip(ev.summary)}</div>`;
     } else if (ev.kind === 'agent_spawn') {
       icon = '🛰'; nameCls = 'agent'; name = 'spawn · ' + (ev.subagent_type || 'Agent');
-      body = `<div class="tl-text dim">${esc(ev.summary || '')}</div>`;
+      body = `<div class="tl-text dim">${clip(ev.summary)}</div>`;
     } else if (ev.kind === 'tool_result') {
       const ok = ev.ok;
       icon = ev.interrupted ? '⛔' : (ok ? '✓' : '✗');
       nameCls = ok ? 'result-ok' : 'result-err';
       name = (ev.name || 'result') + (ev.interrupted ? ' (interrupted)' : (ok ? ' ✓' : ' ✗'));
-      body = ev.summary ? `<div class="tl-text dim">${esc(ev.summary)}</div>` : '';
+      body = ev.summary ? `<div class="tl-text dim">${clip(ev.summary)}</div>` : '';
     }
     return `<div class="tl-row">
       <div class="tl-icon">${icon}</div>
