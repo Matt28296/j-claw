@@ -398,63 +398,33 @@ class CodexOrchestrator:
 
     def call(self, payload: dict, max_retries: int = 2) -> dict:
         import worker
-        from config import CODEX_MODEL
-        global _codex_planning_calls
         state = payload.get("system_state", "INIT")
         user_message = json.dumps(payload)
-        model = self._model or CODEX_MODEL
-        last_error: Exception | None = None
 
-        if not worker._oauth_enabled("codex"):
-            raise RuntimeError("CodexOrchestrator unavailable — Codex CLI not enabled")
-
-        for attempt in range(2):  # one same-tier retry for wrapping/truncation
+        def reserve_attempt():
+            # Preserve the exact original order: check the planning reserve, THEN reserve shared OAuth
+            # capacity, THEN increment — so a failed OAuth reserve doesn't burn a planning slot.
+            global _codex_planning_calls
             if _codex_planning_calls >= CODEX_PLANNING_RESERVE:
-                raise RuntimeError(
-                    "CodexOrchestrator skipped — CODEX_PLANNING_RESERVE "
-                    f"({CODEX_PLANNING_RESERVE}) exhausted for this run"
-                )
-            # Shared OAuth reservation + latch: a latched-off or capacity-exhausted rung returns
-            # False, so we fall through to the next emergency rung instead of probing again.
+                raise worker._CodexTierUnavailable(
+                    f"CODEX_PLANNING_RESERVE ({CODEX_PLANNING_RESERVE}) exhausted for this run")
             if not worker._reserve_oauth_call("codex"):
-                raise RuntimeError(
-                    "CodexOrchestrator unavailable — Codex latched off or OAuth capacity exhausted"
-                )
+                raise worker._CodexTierUnavailable(
+                    "Codex latched off or OAuth capacity exhausted")
             _codex_planning_calls += 1
-            _t0 = time.monotonic()
-            try:
-                raw = worker._call_codex(model, self._system_prompt, user_message)
-                text = _strip_fences(raw.strip())
-                text = _fix_json_strings(text)
-                parsed = json.loads(text)
-                validate_response(state, parsed)
-                record_role_event(f"orch:{state}", provider="codex", model=model,
-                                  success=True, latency_s=time.monotonic() - _t0)
-                return parsed
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                if worker._is_codex_unavailable(exc):
-                    # Auth/quota/exe outage — latch the shared rung off and stop retrying Codex.
-                    with worker._oauth_lock:
-                        worker._codex_disabled = True
-                    record_role_event(f"orch:{state}", provider="codex", model=model,
-                                      success=False, latency_s=time.monotonic() - _t0)
-                    raise RuntimeError(
-                        f"CodexOrchestrator unavailable: {exc}"
-                    ) from exc
-                # capability / validation failure → record schema_fail and retry once at this tier
-                record_role_event(f"orch:{state}", provider="codex", model=model,
-                                  success=False, schema_fail=True,
-                                  latency_s=time.monotonic() - _t0)
-                if attempt < 1:
-                    console.print(
-                        f"[yellow]CodexOrchestrator output invalid (attempt {attempt + 1}/2): "
-                        f"{exc} — retrying once...[/yellow]"
-                    )
 
-        raise RuntimeError(
-            f"CodexOrchestrator failed validation after 2 attempts: {last_error}"
-        ) from last_error
+        # Delegate the Codex protocol (reserve, one retry, parse, validate, latch, telemetry) to the
+        # shared worker._codex_tier; convert its outcomes into the RuntimeError CompositeOrchestrator
+        # expects so the emergency chain falls through to the next (paid) rung.
+        try:
+            return worker._codex_tier(
+                self._system_prompt, user_message,
+                lambda parsed: validate_response(state, parsed),
+                role=f"orch:{state}", model=self._model, reserve_attempt=reserve_attempt)
+        except worker._CodexTierUnavailable as exc:
+            raise RuntimeError(f"CodexOrchestrator unavailable: {exc}") from exc
+        except worker._CodexTierInvalid as exc:
+            raise RuntimeError(f"CodexOrchestrator failed validation: {exc}") from exc
 
 
 class CompositeOrchestrator:

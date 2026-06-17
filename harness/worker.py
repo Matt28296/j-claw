@@ -988,7 +988,20 @@ def execute_task(
         except ValueError:
             record_role_event("worker", provider=provider, model=model, success=False,
                               schema_fail=True, latency_s=time.monotonic() - _t0)
-            _get_call_tokens()  # drain thread-local on schema-fail before raising
+            # Persist the tokens spent so far (this attempt + any prior failed attempts) before the
+            # bad-output ValueError propagates to the scheduler. _accum_tokens drains the thread-local
+            # (so it can't leak into the next call) AND records the count — otherwise a task that
+            # ultimately schema-fails under-reports its token usage in the dashboard (#105 follow-up #4).
+            label_fail = model if provider == "ollama" else f"{provider}/{model}"
+            _accum_tokens(label_fail)
+            if tokens_by_model:
+                task_id = getattr(task, "id", None)
+                if task_id:
+                    try:
+                        from state_writer import writer as _sw
+                        _sw.on_task_tokens(task_id, tokens_by_model)
+                    except Exception:  # noqa: BLE001
+                        pass  # telemetry failure must never mask the real ValueError
             raise  # Bad output format — let scheduler handle via EXECUTION_ERROR
 
         except Exception as exc:  # noqa: BLE001
@@ -1124,6 +1137,67 @@ def _oauth_unavailable(provider: str, exc: Exception) -> bool:
     return False
 
 
+class _CodexTierUnavailable(Exception):
+    """The Codex tier could not run / must be skipped: not enabled, latched off, OAuth capacity (or a
+    caller-supplied reserve gate) exhausted, or an auth/quota/exe failure. Callers decide what to do
+    with it (planning_call falls through to Anthropic; CodexOrchestrator converts it to RuntimeError)."""
+
+
+class _CodexTierInvalid(Exception):
+    """Codex produced output that failed validation on both attempts (a capability failure)."""
+
+
+def _codex_tier(system: str, user: str, validate_fn, *, role: str,
+                model: str | None = None, reserve_attempt=None) -> dict:
+    """Run the Codex ($0 OAuth) tier — the protocol SHARED by planning_call and CodexOrchestrator:
+    up to 2 attempts (one same-tier retry for output-wrapping/truncation), each reserving capacity,
+    shelling to `codex exec`, parsing via llm_json.loads_llm_json_object (which preserves BOTH the
+    trailing-prose and the in-string-escape tolerances the two call sites previously did differently),
+    and gating on validate_fn. Returns the validated dict.
+
+    Raises `_CodexTierUnavailable` when Codex is disabled / latched / capacity-exhausted or hits an
+    auth/quota/exe failure (latching `_codex_disabled` in that last case); raises `_CodexTierInvalid`
+    when output fails validation on both attempts. `reserve_attempt()` is called once per attempt
+    BEFORE the call and must reserve capacity, raising `_CodexTierUnavailable` if it can't — it
+    defaults to a plain `_reserve_oauth_call('codex')`. Codex-only: never falls back to Anthropic
+    (the caller owns escalation)."""
+    from llm_json import loads_llm_json_object
+    global _codex_disabled
+
+    if not _oauth_enabled("codex"):
+        raise _CodexTierUnavailable("Codex CLI not enabled")
+
+    if reserve_attempt is None:
+        def reserve_attempt():
+            if not _reserve_oauth_call("codex"):
+                raise _CodexTierUnavailable("Codex latched off or OAuth capacity exhausted")
+
+    _model = model or CODEX_MODEL
+    last_err: Exception | None = None
+    for _attempt in range(2):
+        reserve_attempt()  # may raise _CodexTierUnavailable (capacity / caller-supplied gate)
+        _t0 = time.monotonic()
+        try:
+            raw = _call_codex(_model, system, user)
+            parsed = loads_llm_json_object(raw)
+            validate_fn(parsed)
+            record_role_event(role, provider="codex", model=_model, success=True,
+                              latency_s=time.monotonic() - _t0)
+            return parsed
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            if _is_codex_unavailable(exc):
+                with _oauth_lock:
+                    _codex_disabled = True
+                record_role_event(role, provider="codex", model=_model, success=False,
+                                  latency_s=time.monotonic() - _t0)
+                raise _CodexTierUnavailable(str(exc)) from exc
+            # capability / validation failure → record schema_fail and retry once at this tier
+            record_role_event(role, provider="codex", model=_model, success=False,
+                              schema_fail=True, latency_s=time.monotonic() - _t0)
+    raise _CodexTierInvalid(f"Codex failed validation after 2 attempts: {last_err}")
+
+
 def planning_call(
     system: str,
     user: str,
@@ -1150,33 +1224,14 @@ def planning_call(
     Wired as of Phase 3 — Creative Director + Technical Architect route through this (Phase 4 adds
     the per-role Codex sub-budget). Returns the validated dict.
     """
-    global _codex_disabled
     last_err: Exception | None = None
 
-    # Tier 1 — Codex (free OAuth), with one same-tier retry for truncation / output-wrapping.
+    # Tier 1 — Codex (free OAuth), with one same-tier retry, via the shared Codex-tier helper.
     if _oauth_enabled("codex"):
-        for _attempt in range(2):
-            if not _reserve_oauth_call("codex"):
-                break  # latched off or capacity exhausted → fall through to Anthropic
-            _t0 = time.monotonic()
-            try:
-                raw = _call_codex(codex_model or CODEX_MODEL, system, user)
-                parsed = _loads_tolerant(_strip_fences(raw))
-                validate_fn(parsed)
-                record_role_event(role, provider="codex", model=codex_model or CODEX_MODEL,
-                                  success=True, latency_s=time.monotonic() - _t0)
-                return parsed
-            except Exception as exc:  # noqa: BLE001
-                last_err = exc
-                if _is_codex_unavailable(exc):
-                    with _oauth_lock:
-                        _codex_disabled = True
-                    record_role_event(role, provider="codex", success=False,
-                                      latency_s=time.monotonic() - _t0)
-                    break  # unavailable → stop retrying Codex, go to Anthropic
-                # capability/validation failure → record schema_fail and retry once at this tier
-                record_role_event(role, provider="codex", model=codex_model or CODEX_MODEL,
-                                  success=False, schema_fail=True, latency_s=time.monotonic() - _t0)
+        try:
+            return _codex_tier(system, user, validate_fn, role=role, model=codex_model)
+        except (_CodexTierUnavailable, _CodexTierInvalid) as exc:
+            last_err = exc  # Codex unavailable or failed validation → fall through to Anthropic
 
     # Tier 2/3 — Anthropic Sonnet → Opus (paid), validated. fallback=True marks the cross-tier hop.
     for model in (sonnet_model, opus_model):
