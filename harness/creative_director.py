@@ -5,6 +5,56 @@ from config import CREATIVE_DIRECTOR_PROMPT_PATH
 
 console = Console()
 
+# The CREATIVE_BRIEF contract the Technical Architect consumes downstream (creative_director.txt).
+# These mirror the prompt's declared enums; kept module-level (like technical_architect._ALLOWED_STACKS)
+# so the validator is a pure, directly-testable function.
+_ALLOWED_OUTPUT_TYPES = {"film", "game", "app", "website", "code"}
+_ALLOWED_SCALES = {"prototype", "mvp", "production"}
+# An over-inflated brief (LLM run-on) should escalate for a tighter interpretation, not poison the DAG.
+_MAX_FEATURES = 30
+
+
+def _validate(brief: dict) -> None:
+    """Fallback boundary for the Codex-first planning ladder.
+
+    A thin or malformed brief must escalate (Codex → one retry → Sonnet → Opus) rather than pass
+    silently and mis-route the whole downstream build. The Technical Architect keys its TECH_SPEC on
+    output_type + scale, and Phase 4 difficulty routing keys on scale — so both are validated against
+    their enums here, not merely checked for presence.
+    """
+    if not isinstance(brief, dict):
+        raise ValueError("CREATIVE_BRIEF must be a JSON object")
+
+    output_type = brief.get("output_type")
+    if output_type not in _ALLOWED_OUTPUT_TYPES:
+        raise ValueError(
+            f"CREATIVE_BRIEF output_type {output_type!r} not in {sorted(_ALLOWED_OUTPUT_TYPES)}"
+        )
+
+    scale = brief.get("scale")
+    if scale not in _ALLOWED_SCALES:
+        raise ValueError(
+            f"CREATIVE_BRIEF scale {scale!r} not in {sorted(_ALLOWED_SCALES)}"
+        )
+
+    features = brief.get("features")
+    if not isinstance(features, list) or not features:
+        raise ValueError("CREATIVE_BRIEF missing required field: features (non-empty array)")
+    if len(features) > _MAX_FEATURES:
+        raise ValueError(
+            f"CREATIVE_BRIEF features count {len(features)} exceeds {_MAX_FEATURES} "
+            "(over-inflated brief — escalate for a tighter interpretation)"
+        )
+
+    # Non-code outputs feed the asset/visual pipeline, which reads visual_identity. Code prompts are
+    # explicitly allowed minimal defaults by the prompt (creative_director.txt), so they are exempt.
+    if output_type != "code":
+        visual = brief.get("visual_identity")
+        if not isinstance(visual, dict) or not visual:
+            raise ValueError(
+                "CREATIVE_BRIEF missing non-empty 'visual_identity' for non-code output_type"
+            )
+
 
 class CreativeDirector:
     def __init__(self) -> None:
@@ -25,14 +75,6 @@ class CreativeDirector:
         unavailability/quota never hard-fails — it falls through to Anthropic.
         """
         from worker import planning_call
-
-        def _validate(brief):
-            if not isinstance(brief, dict):
-                raise ValueError("CREATIVE_BRIEF must be a JSON object")
-            if "output_type" not in brief:
-                raise ValueError("CREATIVE_BRIEF missing required field: output_type")
-            if not isinstance(brief.get("features"), list) or not brief["features"]:
-                raise ValueError("CREATIVE_BRIEF missing required field: features (non-empty array)")
 
         brief = planning_call(self._system_prompt, intent, _validate, role="creative")
 
