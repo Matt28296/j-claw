@@ -131,6 +131,14 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
         title="J-Claw Continuation"
     ))
 
+    # A continuation is a fresh orchestration pass on a new intent: reset the per-run
+    # paid-call budget and the Gemini quota latch so neither leaks in from a prior run
+    # if this is ever driven in-process (harmless no-op under the subprocess-per-run model).
+    from worker import reset_paid_budget
+    from orchestrator import reset_orchestrator_run
+    reset_paid_budget()
+    reset_orchestrator_run()
+
     orch = make_orchestrator()
 
     sw.on_project_start(new_intent, str(project_dir))
@@ -219,7 +227,9 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
 
     # Reset the per-project paid (cloud) worker-call budget for this run.
     from worker import reset_paid_budget
+    from orchestrator import reset_orchestrator_run
     reset_paid_budget()
+    reset_orchestrator_run()  # clear the Gemini quota latch so it can't persist across runs
     reset_costs()
 
     # Mutable holder so the failure handoff below can report the phase the

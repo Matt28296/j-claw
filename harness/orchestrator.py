@@ -12,6 +12,7 @@ from config import (
     ORCHESTRATOR_MAX_TOKENS, EXECUTION_ERROR_MODEL, ORCHESTRATOR_TIMEOUT,
     GOOGLE_API_KEY, GEMINI_ORCHESTRATOR_MODEL,
     ORCHESTRATOR_EMERGENCY_PROVIDER, EMERGENCY_ORCHESTRATOR_MODEL,
+    GEMINI_QUOTA_FAILFAST, CODEX_PLANNING_RESERVE,
 )
 from validator import validate_response, OrchestratorOutputError
 from cache_telemetry import log_cache_usage
@@ -22,6 +23,60 @@ console = Console()
 
 _RESPONSE_FILE = Path("orchestrator_response.json")
 _INPUT_FILE = Path("orchestrator_input.json")
+
+
+# ── Run-level Gemini quota latch ──────────────────────────────────────────────
+# A quota-class 429 (daily RESOURCE_EXHAUSTED, not a transient per-minute throttle) means Gemini
+# is out for the rest of the run. Mirrors the worker's _codex_disabled / _grok_disabled pattern:
+# the first quota hit raises fast AND latches this flag so every subsequent orchestrator call skips
+# Gemini and falls straight to the emergency chain instead of re-discovering the outage (and re-
+# burning the 30-60s retryDelay) on each of the ~6-8 calls in a build. Reset in reset_orchestrator_run().
+_gemini_quota_disabled = False
+
+
+# Quota-class signatures: a daily/lifetime exhaustion that won't clear within the run, as opposed
+# to a transient per-minute rate-limit (which keeps today's retry/backoff behaviour). Kept narrow so
+# an ordinary burst throttle is NOT misclassified as a hard quota outage.
+_QUOTA_CLASS_MARKERS = (
+    "resource_exhausted",
+    "quota",
+    "daily limit",
+    "per day",
+    "/ day",
+    "exceeded your current quota",
+    "free_tier",
+    "free tier",
+    "billing",
+)
+
+
+def _is_quota_class_429(exc: Exception) -> bool:
+    """True when a Gemini 429/rate-limit error is a QUOTA-class outage (daily RESOURCE_EXHAUSTED /
+    free-tier exhaustion) rather than a transient per-minute throttle. Inspects both the exception
+    text and, when present, the structured error body (Google nests a QuotaFailure /
+    RESOURCE_EXHAUSTED status in error.status / error.details)."""
+    blob = str(exc).lower()
+    try:
+        body = exc.response.json()
+        err = body.get("error", {})
+        status = str(err.get("status", "")).lower()
+        if "resource_exhausted" in status:
+            return True
+        for detail in err.get("details", []):
+            t = str(detail.get("@type", "")).lower()
+            r = str(detail.get("reason", "")).lower()
+            if "quotafailure" in t or "resource_exhausted" in r or "quota" in r:
+                return True
+        blob += " " + json.dumps(body).lower()
+    except Exception:
+        pass
+    return any(m in blob for m in _QUOTA_CLASS_MARKERS)
+
+
+def reset_orchestrator_run() -> None:
+    """Reset per-run orchestrator latches. Call at project start, alongside worker.reset_paid_budget()."""
+    global _gemini_quota_disabled
+    _gemini_quota_disabled = False
 
 
 class ManualOrchestrator:
@@ -63,11 +118,14 @@ class ManualOrchestrator:
 
 
 class Orchestrator:
-    def __init__(self) -> None:
+    def __init__(self, model: str | None = None) -> None:
         if not ANTHROPIC_API_KEY:
             raise RuntimeError("ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in.")
         self._client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         self._system_prompt = ORCHESTRATOR_PROMPT_PATH.read_text(encoding="utf-8")
+        # Optional pin: an emergency-chain rung forces a specific model (e.g. Sonnet then Opus)
+        # rather than the module default. None = use the default ORCHESTRATOR_MODEL / per-state model.
+        self._pinned_model = model
 
     def call(self, payload: dict, max_retries: int = 2) -> dict:
         """
@@ -80,7 +138,8 @@ class Orchestrator:
 
         for attempt in range(max_retries + 1):
             try:
-                _model = EXECUTION_ERROR_MODEL if state == "EXECUTION_ERROR" else ORCHESTRATOR_MODEL
+                _model = (self._pinned_model
+                          or (EXECUTION_ERROR_MODEL if state == "EXECUTION_ERROR" else ORCHESTRATOR_MODEL))
                 _t0 = time.monotonic()
                 response = self._client.messages.create(
                     model=_model,
@@ -160,12 +219,25 @@ class _OpenAICompatOrchestrator:
         self._model_chain = model_chain
         self._system_prompt = ORCHESTRATOR_PROMPT_PATH.read_text(encoding="utf-8")
         self._provider_name = "openai-compat"
+        # Only the Gemini subclass opts into quota fail-fast + the run latch; other OpenAI-compat
+        # providers (OpenRouter) keep the legacy chain-walk + backoff behaviour untouched.
+        self._quota_failfast = False
 
     def call(self, payload: dict, max_retries: int = 3) -> dict:
         from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
+        global _gemini_quota_disabled
         state = payload.get("system_state", "INIT")
         user_message = json.dumps(payload)
         last_error: Exception | None = None
+
+        # Run-level latch: once Gemini's daily quota is exhausted, every later orchestrator call
+        # raises immediately so CompositeOrchestrator falls straight to the emergency chain — no
+        # re-probe, no retryDelay sleep. Cost-neutral when quota is healthy (flag stays False).
+        if self._quota_failfast and GEMINI_QUOTA_FAILFAST and _gemini_quota_disabled:
+            raise RuntimeError(
+                f"{type(self).__name__} skipped — Gemini quota latched off for this run "
+                "(prior RESOURCE_EXHAUSTED)"
+            )
 
         model_chain = self._model_chain
         current_model = model_chain[0]
@@ -200,7 +272,24 @@ class _OpenAICompatOrchestrator:
                 # try the next fallback model, then back off. Gemini free tier in
                 # particular throws intermittent 503s and can hang past the timeout.
                 last_error = exc
-                # Try next fallback model before waiting
+
+                # QUOTA-class 429 (daily RESOURCE_EXHAUSTED, not a transient throttle): the outage
+                # won't clear within the run, so walking the chain + sleeping the 30-60s retryDelay
+                # only stalls the build. Latch Gemini off for the rest of the run and raise NOW so
+                # CompositeOrchestrator falls through to the free-first emergency chain on attempt 1.
+                if (self._quota_failfast and GEMINI_QUOTA_FAILFAST
+                        and isinstance(exc, RateLimitError) and _is_quota_class_429(exc)):
+                    _gemini_quota_disabled = True
+                    console.print(
+                        f"[bold red]Gemini quota exhausted (RESOURCE_EXHAUSTED) — latching it off "
+                        f"for this run and failing fast to the emergency chain (no retry sleep).[/bold red]"
+                    )
+                    raise RuntimeError(
+                        f"{type(self).__name__} quota exhausted (quota-class 429): {exc}"
+                    ) from exc
+
+                # Transient (non-quota) rate-limit / 5xx / timeout — unchanged:
+                # try next fallback model before waiting
                 model_idx += 1
                 if model_idx < len(model_chain):
                     current_model = model_chain[model_idx]
@@ -257,6 +346,85 @@ class GeminiOrchestrator(_OpenAICompatOrchestrator):
             model_chain=[GEMINI_ORCHESTRATOR_MODEL, "gemini-2.5-flash-lite"],
         )
         self._provider_name = "gemini"
+        self._quota_failfast = True
+
+
+class CodexOrchestrator:
+    """Free-first ($0 OAuth) orchestrator rung: wraps worker._call_codex + validate_response with
+    ONE same-tier retry. Codex CLI has no response_format, so the single retry covers output-
+    wrapping / truncation (the same reason worker.planning_call retries Codex once). Draws the
+    SHARED OAuth reservation + disable-latch (worker._reserve_oauth_call / _codex_disabled) so it
+    never bypasses the run's Codex quota, and is additionally bounded by CODEX_PLANNING_RESERVE so
+    a long planning/heal run can't starve worker rescue. Records role telemetry like the other
+    orchestrators. Raises RuntimeError (so CompositeOrchestrator falls through) when Codex is
+    unavailable / capacity-reserved-out / fails validation on both attempts."""
+
+    def __init__(self, model: str | None = None) -> None:
+        self._model = model
+        self._system_prompt = ORCHESTRATOR_PROMPT_PATH.read_text(encoding="utf-8")
+        self._provider_name = "codex"
+        # Per-run count of orchestrator Codex calls, bounded by CODEX_PLANNING_RESERVE so planning
+        # can't drain the shared worker-rescue Codex capacity. Reset via reset_orchestrator_run().
+        self._planning_calls = 0
+
+    def call(self, payload: dict, max_retries: int = 2) -> dict:
+        import worker
+        from config import CODEX_MODEL
+        state = payload.get("system_state", "INIT")
+        user_message = json.dumps(payload)
+        model = self._model or CODEX_MODEL
+        last_error: Exception | None = None
+
+        if not worker._oauth_enabled("codex"):
+            raise RuntimeError("CodexOrchestrator unavailable — Codex CLI not enabled")
+
+        for attempt in range(2):  # one same-tier retry for wrapping/truncation
+            if self._planning_calls >= CODEX_PLANNING_RESERVE:
+                raise RuntimeError(
+                    "CodexOrchestrator skipped — CODEX_PLANNING_RESERVE "
+                    f"({CODEX_PLANNING_RESERVE}) exhausted for this run"
+                )
+            # Shared OAuth reservation + latch: a latched-off or capacity-exhausted rung returns
+            # False, so we fall through to the next emergency rung instead of probing again.
+            if not worker._reserve_oauth_call("codex"):
+                raise RuntimeError(
+                    "CodexOrchestrator unavailable — Codex latched off or OAuth capacity exhausted"
+                )
+            self._planning_calls += 1
+            _t0 = time.monotonic()
+            try:
+                raw = worker._call_codex(model, self._system_prompt, user_message)
+                text = _strip_fences(raw.strip())
+                text = _fix_json_strings(text)
+                parsed = json.loads(text)
+                validate_response(state, parsed)
+                record_role_event(f"orch:{state}", provider="codex", model=model,
+                                  success=True, latency_s=time.monotonic() - _t0)
+                return parsed
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if worker._is_codex_unavailable(exc):
+                    # Auth/quota/exe outage — latch the shared rung off and stop retrying Codex.
+                    with worker._oauth_lock:
+                        worker._codex_disabled = True
+                    record_role_event(f"orch:{state}", provider="codex", model=model,
+                                      success=False, latency_s=time.monotonic() - _t0)
+                    raise RuntimeError(
+                        f"CodexOrchestrator unavailable: {exc}"
+                    ) from exc
+                # capability / validation failure → record schema_fail and retry once at this tier
+                record_role_event(f"orch:{state}", provider="codex", model=model,
+                                  success=False, schema_fail=True,
+                                  latency_s=time.monotonic() - _t0)
+                if attempt < 1:
+                    console.print(
+                        f"[yellow]CodexOrchestrator output invalid (attempt {attempt + 1}/2): "
+                        f"{exc} — retrying once...[/yellow]"
+                    )
+
+        raise RuntimeError(
+            f"CodexOrchestrator failed validation after 2 attempts: {last_error}"
+        ) from last_error
 
 
 class CompositeOrchestrator:
@@ -270,28 +438,68 @@ class CompositeOrchestrator:
 
     Availability failures go sideways to another provider (this class).
     Capability failures escalate up the worker ladder (PR #36 — separate concern).
+
+    The emergency is an ORDERED LIST of fallbacks, tried free-before-paid (Codex $0 → Sonnet →
+    Opus): each rung is attempted in turn and the first whose .call() returns (i.e. validated)
+    wins. Backward-compatible with the legacy 2-arg (primary, single-emergency) construction.
     """
 
     def __init__(self, primary, emergency) -> None:
         self._primary = primary
-        self._emergency = emergency
+        # Accept either a single emergency orchestrator (legacy) or an ordered list of fallbacks.
+        if isinstance(emergency, (list, tuple)):
+            self._emergency_chain = list(emergency)
+        else:
+            self._emergency_chain = [emergency]
 
     def call(self, payload: dict, max_retries: int = 2) -> dict:
         try:
             return self._primary.call(payload, max_retries=max_retries)
         except RuntimeError as exc:
-            # Do NOT record a telemetry event here: the emergency orchestrator's own .call()
+            # Do NOT record a telemetry event here: each emergency orchestrator's own .call()
             # records the real attempt (success/schema_fail + latency) under the same
             # orch:<state> role. A pre-call record_role_event would phantom-success on emergency
             # failure and double-count on success (Codex review fix). The primary's recorded
             # schema_fails already signal that a fallback occurred.
             console.print(
                 f"\n[bold red]EMERGENCY: Primary orchestrator exhausted all retries — "
-                f"falling back to {type(self._emergency).__name__} "
-                f"({EMERGENCY_ORCHESTRATOR_MODEL})[/bold red]\n"
+                f"walking the free-first fallback chain "
+                f"({' → '.join(type(e).__name__ for e in self._emergency_chain)})[/bold red]\n"
                 f"  Primary failure: {exc}\n"
             )
-            return self._emergency.call(payload, max_retries=max_retries)
+            last_error: Exception = exc
+            for rung in self._emergency_chain:
+                try:
+                    return rung.call(payload, max_retries=max_retries)
+                except Exception as rung_exc:  # noqa: BLE001 — try the next cheaper-to-costlier rung
+                    last_error = rung_exc
+                    console.print(
+                        f"[yellow]Emergency rung {type(rung).__name__} failed — "
+                        f"trying next fallback: {rung_exc}[/yellow]"
+                    )
+            raise RuntimeError(
+                f"All orchestrator fallbacks exhausted: {last_error}"
+            ) from last_error
+
+
+def _emergency_chain() -> list:
+    """Build the free-first ordered emergency fallback chain: Codex ($0 OAuth) → Sonnet (paid) →
+    Opus (paid). Codex is included only when the OAuth rung is enabled; the paid Anthropic rungs
+    only when ORCHESTRATOR_EMERGENCY_PROVIDER is anthropic and a key is present. Grok is NOT in the
+    chain — it's evidence-gated per the plan (added only if a shadow test proves valid orch JSON).
+    """
+    chain: list = []
+    try:
+        import worker
+        if worker._oauth_enabled("codex"):
+            chain.append(CodexOrchestrator())
+    except Exception:  # noqa: BLE001 — worker import/flag issues must not break orchestrator setup
+        pass
+    if ORCHESTRATOR_EMERGENCY_PROVIDER == "anthropic" and ANTHROPIC_API_KEY:
+        # Sonnet first (the existing emergency tier), then Opus as the costliest last resort.
+        chain.append(Orchestrator(model=EMERGENCY_ORCHESTRATOR_MODEL))
+        chain.append(Orchestrator(model="claude-opus-4-8"))
+    return chain
 
 
 def make_orchestrator(provider: str | None = None, *, manual: bool = False):
@@ -305,15 +513,9 @@ def make_orchestrator(provider: str | None = None, *, manual: bool = False):
 
     if p == "gemini":
         primary = GeminiOrchestrator()
-        if ORCHESTRATOR_EMERGENCY_PROVIDER == "anthropic" and ANTHROPIC_API_KEY:
-            # Patch ORCHESTRATOR_MODEL temporarily so the Anthropic orchestrator
-            # uses EMERGENCY_ORCHESTRATOR_MODEL instead of the default.
-            import config as _cfg
-            _orig = _cfg.ORCHESTRATOR_MODEL
-            _cfg.ORCHESTRATOR_MODEL = EMERGENCY_ORCHESTRATOR_MODEL
-            emergency = Orchestrator()
-            _cfg.ORCHESTRATOR_MODEL = _orig
-            return CompositeOrchestrator(primary, emergency)
+        chain = _emergency_chain()
+        if chain:
+            return CompositeOrchestrator(primary, chain)
         return primary
 
     if p == "openrouter":

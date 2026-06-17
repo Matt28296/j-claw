@@ -173,6 +173,19 @@ ORCHESTRATOR_EMERGENCY_PROVIDER: str = os.getenv(
     "anthropic" if os.getenv("ANTHROPIC_API_KEY") else "",
 )
 EMERGENCY_ORCHESTRATOR_MODEL: str = os.getenv("EMERGENCY_ORCHESTRATOR_MODEL", "claude-sonnet-4-6")
+
+# Gemini free-tier quota fail-fast (orchestrator). When True, a QUOTA-CLASS 429 from the Gemini
+# orchestrator (RESOURCE_EXHAUSTED / daily-limit, distinct from a transient per-minute rate-limit)
+# raises immediately instead of walking the model chain + sleeping the parsed retryDelay, and sets
+# a module-level run latch so every subsequent orchestrator call in the run skips Gemini and falls
+# straight to the emergency chain. Set False to restore the old retry-on-every-call behaviour.
+GEMINI_QUOTA_FAILFAST: bool = os.getenv("GEMINI_QUOTA_FAILFAST", "true").lower() == "true"
+
+# Per-run cap on the number of OAuth Codex calls the ORCHESTRATOR emergency rung may consume,
+# carved out of the shared CODEX_CLI_MAX_CALLS capacity so a long planning/heal run can't starve
+# worker rescue of Codex. The CodexOrchestrator stops drawing Codex once this many orchestrator
+# Codex calls have been made in the run and falls through to paid Sonnet/Opus instead.
+CODEX_PLANNING_RESERVE: int = int(os.getenv("CODEX_PLANNING_RESERVE", "6"))
 CREATIVE_DIRECTOR_PROMPT_PATH: Path = Path(__file__).parent.parent / "creative_director.txt"
 MAX_FORMAT5_DEPTH: int = int(os.getenv("MAX_FORMAT5_DEPTH", "3"))
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")

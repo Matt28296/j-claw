@@ -143,6 +143,8 @@ class TestOpenAICompatOrchestrator(unittest.TestCase):
         orch = GeminiOrchestrator.__new__(GeminiOrchestrator)
         orch._model_chain = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
         orch._system_prompt = "sys"
+        orch._provider_name = "gemini"
+        orch._quota_failfast = False
         orch._client = MagicMock()
         return orch
 
@@ -248,6 +250,7 @@ class TestAnthropicOrchestrator(unittest.TestCase):
         orch = Orchestrator.__new__(Orchestrator)
         orch._client = MagicMock()
         orch._system_prompt = "sys"
+        orch._pinned_model = None
         return orch
 
     def _good_resp(self, data: dict):
@@ -1698,6 +1701,252 @@ class TestCreativeDirectorValidator(unittest.TestCase):
         cd._validate(b)  # must not raise
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 15. Orchestrator free-tier 429 bottleneck fix (sub-plan 2026-06-17, Steps 1 & 2)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Step 1 — quota-class 429 latches Gemini off for the run + fails fast; transient 429 retries.
+# Step 2 — CodexOrchestrator (validate + one retry) and free-first CompositeOrchestrator chain
+#          (Codex → Sonnet → Opus), stopping at the first validated rung.
+# All mocked — no real API / subprocess.
+
+class TestGeminiQuotaFailfast(unittest.TestCase):
+
+    def setUp(self):
+        import orchestrator as o
+        self._o = o
+        o.reset_orchestrator_run()  # clear the module latch between tests
+
+    def tearDown(self):
+        self._o.reset_orchestrator_run()
+
+    def _make_gemini(self):
+        from orchestrator import GeminiOrchestrator
+        orch = GeminiOrchestrator.__new__(GeminiOrchestrator)
+        orch._model_chain = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+        orch._system_prompt = "sys"
+        orch._provider_name = "gemini"
+        orch._quota_failfast = True
+        orch._client = MagicMock()
+        return orch
+
+    def _good_response(self, data: dict):
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = json.dumps(data)
+        return resp
+
+    # ── _is_quota_class_429 classification ─────────────────────────────────────
+    def test_quota_class_classification(self):
+        from orchestrator import _is_quota_class_429
+        # Quota-class (daily / RESOURCE_EXHAUSTED) — latch.
+        self.assertTrue(_is_quota_class_429(Exception("429 RESOURCE_EXHAUSTED: quota exceeded")))
+        self.assertTrue(_is_quota_class_429(_make_exc(Exception, "429", {"error": {
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure"}],
+        }})))
+        self.assertTrue(_is_quota_class_429(Exception("you exceeded your current quota, free_tier")))
+        # Transient per-minute throttle — NOT quota-class.
+        self.assertFalse(_is_quota_class_429(Exception("429 too many requests, retry in 12s")))
+        self.assertFalse(_is_quota_class_429(Exception("503 UNAVAILABLE")))
+
+    # ── (1) a quota-class 429 latches Gemini + fails fast on attempt 1 ─────────
+    def test_quota_429_latches_and_fails_fast(self):
+        from openai import RateLimitError
+        orch = self._make_gemini()
+        orch._client.chat.completions.create.side_effect = _make_exc(
+            RateLimitError, "429 RESOURCE_EXHAUSTED quota",
+            {"error": {"status": "RESOURCE_EXHAUSTED"}})
+
+        with patch("time.sleep") as mock_sleep, patch("orchestrator.console"):
+            with self.assertRaises(RuntimeError):
+                orch.call({"system_state": "INIT"}, max_retries=3)
+
+        # Failed fast: exactly one API call, no chain-walk retries, no backoff sleep.
+        self.assertEqual(orch._client.chat.completions.create.call_count, 1,
+                         "quota-class 429 must raise on attempt 1 (no chain walk)")
+        mock_sleep.assert_not_called()
+        self.assertTrue(self._o._gemini_quota_disabled, "the run latch must be set")
+
+    # ── subsequent call skips Gemini entirely (raises fast, no API call) ───────
+    def test_subsequent_call_skips_gemini_after_latch(self):
+        self._o._gemini_quota_disabled = True
+        orch = self._make_gemini()
+        with self.assertRaises(RuntimeError):
+            orch.call({"system_state": "SPEC_ACCEPTED"}, max_retries=3)
+        orch._client.chat.completions.create.assert_not_called()
+
+    # ── (2) a transient (non-quota) 429 still retries as before ────────────────
+    def test_transient_429_still_retries_no_latch(self):
+        from openai import RateLimitError
+        orch = self._make_gemini()
+
+        call_count = [0]
+        def side(*a, **kw):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise _make_exc(RateLimitError, "429 too many requests, retry in 5s")
+            return self._good_response(VALID_FORMAT2)
+
+        orch._client.chat.completions.create.side_effect = side
+        with patch("time.sleep"):
+            result = orch.call({"system_state": "SPEC_ACCEPTED"}, max_retries=3)
+
+        self.assertEqual(result, VALID_FORMAT2)
+        self.assertGreaterEqual(call_count[0], 2, "transient 429 must walk the chain / retry")
+        self.assertFalse(self._o._gemini_quota_disabled,
+                         "a transient throttle must NOT set the quota latch")
+
+    # ── failfast disabled by flag → quota 429 falls back to legacy retry ───────
+    def test_failfast_disabled_keeps_legacy_behaviour(self):
+        from openai import RateLimitError
+        orch = self._make_gemini()
+        orch._client.chat.completions.create.side_effect = _make_exc(
+            RateLimitError, "429 RESOURCE_EXHAUSTED",
+            {"error": {"status": "RESOURCE_EXHAUSTED"}})
+        with patch.object(self._o, "GEMINI_QUOTA_FAILFAST", False), \
+             patch("time.sleep"), patch("orchestrator.console"):
+            with self.assertRaises(RuntimeError):
+                orch.call({"system_state": "INIT"}, max_retries=1)
+        # Legacy path walks the 2-model chain then backs off → more than one create() call.
+        self.assertGreater(orch._client.chat.completions.create.call_count, 1)
+        self.assertFalse(self._o._gemini_quota_disabled)
+
+
+class TestCodexOrchestrator(unittest.TestCase):
+
+    def setUp(self):
+        import orchestrator as o, worker as w
+        self._o = o
+        self._w = w
+        o.reset_orchestrator_run()
+        w.reset_paid_budget()
+        self._orig_enabled = w.CODEX_CLI_ENABLED
+        w.CODEX_CLI_ENABLED = True
+
+    def tearDown(self):
+        self._w.CODEX_CLI_ENABLED = self._orig_enabled
+        self._w.reset_paid_budget()
+        self._o.reset_orchestrator_run()
+
+    def _make(self):
+        from orchestrator import CodexOrchestrator
+        orch = CodexOrchestrator.__new__(CodexOrchestrator)
+        orch._model = "gpt-5.5"
+        orch._system_prompt = "sys"
+        orch._provider_name = "codex"
+        orch._planning_calls = 0
+        return orch
+
+    # ── (4) validates on first try ────────────────────────────────────────────
+    def test_validates_first_try(self):
+        orch = self._make()
+        with patch.object(self._w, "_call_codex", return_value=json.dumps(VALID_FORMAT2)) as mc, \
+             patch("orchestrator.record_role_event"):
+            result = orch.call({"system_state": "SPEC_ACCEPTED"})
+        self.assertEqual(result, VALID_FORMAT2)
+        self.assertEqual(mc.call_count, 1)
+
+    # ── (4) bad output → retries once at same tier, then succeeds ──────────────
+    def test_retries_once_then_succeeds(self):
+        orch = self._make()
+        outs = ["NOT JSON", json.dumps(VALID_FORMAT2)]
+        idx = [0]
+        def codex(*a, **kw):
+            r = outs[idx[0]]; idx[0] += 1
+            return r
+        with patch.object(self._w, "_call_codex", side_effect=codex) as mc, \
+             patch("orchestrator.console"), patch("orchestrator.record_role_event"):
+            result = orch.call({"system_state": "SPEC_ACCEPTED"})
+        self.assertEqual(result, VALID_FORMAT2)
+        self.assertEqual(mc.call_count, 2, "one same-tier retry on a wrapping/truncation failure")
+
+    # ── (4) two bad outputs → escalates (RuntimeError) ─────────────────────────
+    def test_two_bad_outputs_escalates(self):
+        orch = self._make()
+        with patch.object(self._w, "_call_codex", return_value="STILL NOT JSON") as mc, \
+             patch("orchestrator.console"), patch("orchestrator.record_role_event"):
+            with self.assertRaises(RuntimeError):
+                orch.call({"system_state": "SPEC_ACCEPTED"})
+        self.assertEqual(mc.call_count, 2, "exactly two attempts before escalating")
+
+    # ── Codex unavailable (auth/quota) → latches shared rung, escalates fast ───
+    def test_unavailable_latches_and_escalates(self):
+        orch = self._make()
+        with patch.object(self._w, "_call_codex",
+                          side_effect=RuntimeError("not logged in")) as mc, \
+             patch("orchestrator.record_role_event"):
+            with self.assertRaises(RuntimeError):
+                orch.call({"system_state": "INIT"})
+        self.assertEqual(mc.call_count, 1, "unavailability stops retrying immediately")
+        self.assertTrue(self._w._codex_disabled, "shared codex latch must be set")
+
+    # ── CODEX_PLANNING_RESERVE bounds orchestrator Codex draw ──────────────────
+    def test_planning_reserve_caps_calls(self):
+        orch = self._make()
+        orch._planning_calls = 99  # already past any reasonable reserve
+        with patch.object(self._w, "_call_codex") as mc, \
+             patch.object(self._o, "CODEX_PLANNING_RESERVE", 6):
+            with self.assertRaises(RuntimeError):
+                orch.call({"system_state": "INIT"})
+        mc.assert_not_called()
+
+
+class TestCompositeChain(unittest.TestCase):
+    """(3) Generalized free-first chain: Codex → Sonnet → Opus, stop at first valid."""
+
+    def test_walks_chain_stops_at_first_valid(self):
+        from orchestrator import CompositeOrchestrator
+        primary = MagicMock(); primary.call.side_effect = RuntimeError("Gemini latched")
+        codex = MagicMock(); codex.call.side_effect = RuntimeError("codex schema fail")
+        sonnet = MagicMock(); sonnet.call.return_value = VALID_FORMAT2
+        opus = MagicMock()  # must NOT be reached
+
+        c = CompositeOrchestrator(primary, [codex, sonnet, opus])
+        with patch("orchestrator.console"):
+            result = c.call({"system_state": "INIT"})
+
+        self.assertEqual(result, VALID_FORMAT2)
+        codex.call.assert_called_once()
+        sonnet.call.assert_called_once()
+        opus.call.assert_not_called()
+
+    def test_codex_first_when_codex_valid(self):
+        from orchestrator import CompositeOrchestrator
+        primary = MagicMock(); primary.call.side_effect = RuntimeError("Gemini latched")
+        codex = MagicMock(); codex.call.return_value = VALID_FORMAT2
+        sonnet = MagicMock(); opus = MagicMock()
+
+        c = CompositeOrchestrator(primary, [codex, sonnet, opus])
+        with patch("orchestrator.console"):
+            result = c.call({"system_state": "INIT"})
+
+        self.assertEqual(result, VALID_FORMAT2)
+        codex.call.assert_called_once()
+        sonnet.call.assert_not_called()
+        opus.call.assert_not_called()
+
+    def test_all_rungs_fail_raises(self):
+        from orchestrator import CompositeOrchestrator
+        primary = MagicMock(); primary.call.side_effect = RuntimeError("primary")
+        r1 = MagicMock(); r1.call.side_effect = RuntimeError("r1")
+        r2 = MagicMock(); r2.call.side_effect = RuntimeError("r2")
+        c = CompositeOrchestrator(primary, [r1, r2])
+        with patch("orchestrator.console"):
+            with self.assertRaises(RuntimeError):
+                c.call({"system_state": "INIT"})
+
+    def test_legacy_single_emergency_still_works(self):
+        from orchestrator import CompositeOrchestrator
+        primary = MagicMock(); primary.call.side_effect = RuntimeError("primary")
+        emergency = MagicMock(); emergency.call.return_value = VALID_FORMAT2
+        c = CompositeOrchestrator(primary, emergency)  # 2-arg legacy form
+        with patch("orchestrator.console"):
+            result = c.call({"system_state": "INIT"})
+        self.assertEqual(result, VALID_FORMAT2)
+        emergency.call.assert_called_once()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Runner
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1720,6 +1969,9 @@ if __name__ == "__main__":
         TestPlanningCall,
         TestRoleCutover,
         TestCreativeDirectorValidator,
+        TestGeminiQuotaFailfast,
+        TestCodexOrchestrator,
+        TestCompositeChain,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 
