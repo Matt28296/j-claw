@@ -38,3 +38,6 @@ Thumbs.db
 
 # Claude Code (local settings + temporary agent worktrees)
 .claude/
+
+# Worktree isolation staging directories (feat: worktree-isolation-per-worker)
+/.jclaw_worktrees/
