@@ -5,8 +5,50 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#102 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (difficulty routing + per-role quotas) is next. **Open PRs: #103** (CD validator hardening — proposal item #1, see below) + **#73** (DRAFT operator WIP salvage — leave parked).
+**PRs #10–#104 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89, + CD validator hardening #103 + routing-review plan amendments #104). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (interpretation-risk routing + per-role quotas) is next. **Open PRs: #105** (this session — orchestrator Gemini quota latch + free-first Codex→Sonnet→Opus chain + offline Matrix agent-dashboard + j-claw OAuth-tier/token tracking; verified 134 passed/1 skipped) + **#73** (DRAFT operator WIP salvage — leave parked).
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ✅ DONE 2026-06-17 (ninth session continued) — orchestrator quota latch + free-first chain + offline dashboards (PR #105, OPEN)
+
+A two-team in-session agent swarm implemented three changes; after a rate-limit reset I verified them
+directly (ran the full suites rather than re-spawning), caught and fixed the one regression the
+verification team would have flagged, and wired the one integration gap the implementers self-flagged.
+All committed on `feat/agent-mission-control` → **PR #105** (open, base `main`). Consulted Codex on the
+sequencing/structure (it concurred). Verified locally: **134 passed, 1 skipped** across all four suites.
+
+### Orchestrator — Gemini quota latch + free-first Codex→Sonnet→Opus chain (`orchestrator.py`, `worker.py`, `config.py`, `main.py`)
+- Quota-class 429 detection (`_is_quota_class_429`): a daily `RESOURCE_EXHAUSTED` latches Gemini off for
+  the run (`_gemini_quota_disabled` + `GEMINI_QUOTA_FAILFAST` gate) and raises immediately so
+  `CompositeOrchestrator` drops straight to the emergency chain — no chain-walk, no `retryDelay` sleep.
+  Transient throttles / 5xx / timeouts and OpenRouter keep the legacy behaviour (gated on the Gemini
+  subclass's `_quota_failfast`, default `False`).
+- `CodexOrchestrator` (validate + retry) added; `CompositeOrchestrator` generalized from a single
+  emergency to an ordered chain; `make_orchestrator` rewired **free-first** Codex→Sonnet→Opus. Grok left
+  out (evidence-gated). `CODEX_PLANNING_RESERVE` added to config.
+- `reset_orchestrator_run()` clears the per-run latch and is now wired into **both** `run_project` and
+  `run_continuation` start, beside `reset_paid_budget()` — so neither budget nor latch leaks across runs
+  (harmless no-op under the current subprocess-per-run model; closes the trap if anyone adds an
+  in-process caller — confirmed with Codex).
+- **Regression fixed:** two stale `__new__`-based test fixtures in `test_llm_layers.py` never set the new
+  instance attributes (`_pinned_model`; `_quota_failfast`/`_provider_name`) that `call()` reads and
+  production `__init__` provides — they blew up with `AttributeError`. Mirrored the defaults into both
+  fixtures (test-only fix; production was correct). +14 new orchestrator/Codex tests.
+
+### Dashboards — offline agent-dashboard + j-claw tiers/tokens (`agent_dashboard.py`, `agent_dashboard/`, `dashboard/index.html`, `state_writer.py`)
+- Agent dashboard de-Tailwinded and split into `css/` + `js/`; **fully offline** (grep for
+  `https?://`/CDN/googleapis across the assets → zero hits). Per-LLM token rollup on `/api/agents`.
+- j-claw dashboard: Grok mislabel fixed via `_OAUTH_PREFIXES` (checked before cloud) → purple
+  `OAUTH $0` badge; rung badges remapped (R0–1 local, R2–3 oauth, R4 sonnet, R5+ opus). Per-task
+  `tokens_by_model` persisted to `mission_control.json` + rendered in the drawer/cost rollup. Honest
+  caveat: Grok/Codex CLIs report 0 tokens today, so the entry is a "this model ran" marker until they
+  expose counts.
+
+### Commit structure (debated with Codex → 3 commits, not 4)
+`4b4ed81` orchestrator (incl. test fixtures + new tests — they share `test_llm_layers.py`, so a separate
+"fixtures" commit would split one bisect unit into two broken states), `4539b88` dashboards, + this docs
+commit. Next: Phase 4 (interpretation-risk routing + per-role quotas) on its own branch.
 
 ---
 
