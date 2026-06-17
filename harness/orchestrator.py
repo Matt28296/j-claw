@@ -164,6 +164,10 @@ class Orchestrator:
 
         for attempt in range(max_retries + 1):
             try:
+                # A pinned model (emergency-chain rung) intentionally wins over the per-state
+                # EXECUTION_ERROR_MODEL: once we're on the paid Sonnet→Opus fallback the rung's
+                # fixed tier is the policy, so EXECUTION_ERROR recovery there runs on the pinned
+                # model, not the cheaper Haiku the primary path would use.
                 _model = (self._pinned_model
                           or (EXECUTION_ERROR_MODEL if state == "EXECUTION_ERROR" else ORCHESTRATOR_MODEL))
                 _t0 = time.monotonic()
