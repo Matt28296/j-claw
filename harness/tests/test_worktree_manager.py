@@ -172,16 +172,24 @@ class TestWorktreeManagerMergeAndRemove(unittest.TestCase):
 
     def test_merge_and_remove_issues_correct_commands(self):
         self._register_task("task_ok", "wt-task_ok-deadbeef")
-        with patch("worktree_manager._run", return_value=_ok()) as mock_run:
+
+        def _side_effect(args, cwd, check=True):
+            if args[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _ok(stdout="main\n")
+            return _ok()
+
+        with patch("worktree_manager._run", side_effect=_side_effect) as mock_run:
             self._wt.merge_and_remove("task_ok", into_branch="main")
 
         all_args = [c.args[0] for c in mock_run.call_args_list]
 
-        # Must have: git add --all, git commit, git merge --no-ff <branch>,
-        # git worktree remove --force, git branch -D
+        # Must have: git add --all, git commit, git checkout <into_branch>,
+        # git merge --no-ff <branch>, git worktree remove --force, git branch -D
         cmds = [tuple(a[:4]) for a in all_args]
         self.assertIn(("git", "add", "--all"), [tuple(a[:3]) for a in all_args])
         self.assertIn(("git", "commit", "-m"), [tuple(a[:3]) for a in all_args])
+        checkout_calls = [a for a in all_args if a[:2] == ["git", "checkout"]]
+        self.assertTrue(checkout_calls, "git checkout <into_branch> must be called")
         self.assertIn(("git", "merge", "--no-ff", "wt-task_ok-deadbeef"), cmds)
         self.assertIn(("git", "worktree", "remove", "--force"), cmds)
         branch_deletes = [a for a in all_args if a[:2] == ["git", "branch"] and "-D" in a]
@@ -189,7 +197,13 @@ class TestWorktreeManagerMergeAndRemove(unittest.TestCase):
 
     def test_merge_and_remove_clears_registry(self):
         self._register_task("task_done", "wt-task_done-aabb1234")
-        with patch("worktree_manager._run", return_value=_ok()):
+
+        def _side_effect(args, cwd, check=True):
+            if args[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _ok(stdout="main\n")
+            return _ok()
+
+        with patch("worktree_manager._run", side_effect=_side_effect):
             self._wt.merge_and_remove("task_done")
         self.assertNotIn("task_done", self._wt._worktrees)
 
@@ -202,6 +216,8 @@ class TestWorktreeManagerMergeAndRemove(unittest.TestCase):
         self._register_task("task_conflict", "wt-task_conflict-cafe4321")
 
         def _side_effect(args, cwd, check=True):
+            if args[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _ok(stdout="main\n")
             if args[:3] == ["git", "merge", "--no-ff"]:
                 return _fail("CONFLICT")
             return _ok()
@@ -213,6 +229,49 @@ class TestWorktreeManagerMergeAndRemove(unittest.TestCase):
         self.assertIn("git merge failed", str(ctx.exception))
         # Registry must be cleared even on merge failure.
         self.assertNotIn("task_conflict", self._wt._worktrees)
+
+    def test_merge_restores_original_branch(self):
+        """After merging into a different branch, HEAD is restored to original."""
+        self._register_task("task_restore", "wt-task_restore-ffff0000")
+
+        checkouts_seen = []
+
+        def _side_effect(args, cwd, check=True):
+            if args[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _ok(stdout="feat/my-feature\n")
+            if args[:2] == ["git", "checkout"]:
+                checkouts_seen.append(args[2])
+            return _ok()
+
+        with patch("worktree_manager._run", side_effect=_side_effect):
+            self._wt.merge_and_remove("task_restore", into_branch="main")
+
+        self.assertIn("main", checkouts_seen, "must checkout into_branch before merging")
+        self.assertIn("feat/my-feature", checkouts_seen, "must restore original branch after merge")
+
+    def test_checkout_failure_raises_and_cleans_up(self):
+        """If git checkout <into_branch> fails, raises RuntimeError and cleans up."""
+        self._register_task("task_co_fail", "wt-task_co_fail-11223344")
+
+        def _side_effect(args, cwd, check=True):
+            if args[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _ok(stdout="main\n")
+            if args[:2] == ["git", "checkout"]:
+                return _fail("pathspec 'missing-branch' did not match")
+            return _ok()
+
+        with patch("worktree_manager._run", side_effect=_side_effect):
+            with self.assertRaises(RuntimeError) as ctx:
+                self._wt.merge_and_remove("task_co_fail", into_branch="missing-branch")
+
+        self.assertIn("git checkout", str(ctx.exception))
+        self.assertNotIn("task_co_fail", self._wt._worktrees)
+
+    def test_merge_lock_is_a_lock(self):
+        """WorktreeManager must expose _merge_lock as a threading.Lock."""
+        import threading
+        wt = WorktreeManager(self._repo)
+        self.assertIsInstance(wt._merge_lock, type(threading.Lock()))
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +324,16 @@ class TestWorktreeManagerRemove(unittest.TestCase):
         with patch("worktree_manager._run") as mock_run:
             self._wt.remove("nobody")
         mock_run.assert_not_called()
+
+    def test_remove_calls_worktree_prune(self):
+        """_cleanup_worktree must call git worktree prune to clear stale entries."""
+        self._register_task("task_prune", "wt-task_prune-aabbccdd")
+        with patch("worktree_manager._run", return_value=_ok()) as mock_run:
+            self._wt.remove("task_prune")
+
+        all_args = [c.args[0] for c in mock_run.call_args_list]
+        prune_calls = [a for a in all_args if a[:3] == ["git", "worktree", "prune"]]
+        self.assertTrue(prune_calls, "git worktree prune must be called during cleanup")
 
 
 # ---------------------------------------------------------------------------

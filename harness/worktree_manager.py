@@ -23,6 +23,7 @@ import os
 import secrets
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 # Worktrees are created as siblings of the repo root so they never nest inside
@@ -85,6 +86,10 @@ class WorktreeManager:
         self.repo: Path = repo
         self._base: Path = self.repo.parent / _WORKTREE_DIRNAME
         self._worktrees: dict[str, tuple[Path, str]] = {}  # task_id -> (path, branch)
+        # Serializes merge operations: git does not support concurrent merges
+        # into the same working tree.  Worktree creation/removal are thread-safe
+        # (each operates on its own isolated path), but merge must be sequential.
+        self._merge_lock: threading.Lock = threading.Lock()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -111,6 +116,7 @@ class WorktreeManager:
         result = _run(
             ["git", "worktree", "add", str(wt_path), "-b", branch],
             cwd=self.repo,
+            check=False,
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -123,9 +129,13 @@ class WorktreeManager:
     def merge_and_remove(self, task_id: str, into_branch: str = "main") -> None:
         """Merge the worktree branch into *into_branch*, then clean up.
 
-        Calls ``git -C <repo> merge --no-ff <branch>`` so the isolation is
-        always recorded as a merge commit.  Fast-forward is also acceptable
-        (``--no-ff`` creates an explicit merge commit for auditability).
+        Checks out *into_branch* in the main repo before merging, then
+        restores the original HEAD branch.  Merge operations are serialized
+        with a lock because git does not support concurrent merges into the
+        same working tree.
+
+        Calls ``git merge --no-ff <branch>`` so the isolation is always
+        recorded as a merge commit for auditability.
         """
         if task_id not in self._worktrees:
             return
@@ -140,23 +150,54 @@ class WorktreeManager:
             check=False,  # No-op if nothing to commit is not an error.
         )
 
-        # Merge into the target branch from within the main repo checkout.
-        merge = _run(
-            ["git", "merge", "--no-ff", branch],
-            cwd=self.repo,
-            check=False,
-        )
-        if merge.returncode != 0:
-            # Abort the merge and fall through to removal — callers will decide
-            # whether to propagate the error.
-            _run(["git", "merge", "--abort"], cwd=self.repo, check=False)
-            self._cleanup_worktree(task_id, wt_path, branch)
-            raise RuntimeError(
-                f"git merge failed for task {task_id!r} (branch {branch!r}):\n"
-                f"{merge.stderr.strip()}"
+        # Serialize all merge operations: concurrent merges into the same
+        # working tree corrupt the git index.
+        with self._merge_lock:
+            # Remember current HEAD so we can restore it after merging.
+            head_result = _run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=self.repo,
+                check=False,
             )
+            original_branch = head_result.stdout.strip() if head_result.returncode == 0 else None
 
-        self._cleanup_worktree(task_id, wt_path, branch)
+            # Check out the target branch before merging.
+            checkout = _run(
+                ["git", "checkout", into_branch],
+                cwd=self.repo,
+                check=False,
+            )
+            if checkout.returncode != 0:
+                self._cleanup_worktree(task_id, wt_path, branch)
+                raise RuntimeError(
+                    f"git checkout {into_branch!r} failed for task {task_id!r}:\n"
+                    f"{checkout.stderr.strip()}"
+                )
+
+            # Merge into the target branch from within the main repo checkout.
+            merge = _run(
+                ["git", "merge", "--no-ff", branch],
+                cwd=self.repo,
+                check=False,
+            )
+            if merge.returncode != 0:
+                # Abort the merge and fall through to removal — callers will
+                # decide whether to propagate the error.
+                _run(["git", "merge", "--abort"], cwd=self.repo, check=False)
+                self._cleanup_worktree(task_id, wt_path, branch)
+                # Restore original branch even on failure.
+                if original_branch and original_branch != into_branch:
+                    _run(["git", "checkout", original_branch], cwd=self.repo, check=False)
+                raise RuntimeError(
+                    f"git merge failed for task {task_id!r} (branch {branch!r}):\n"
+                    f"{merge.stderr.strip()}"
+                )
+
+            self._cleanup_worktree(task_id, wt_path, branch)
+
+            # Restore the original branch so the repo HEAD is unchanged.
+            if original_branch and original_branch != into_branch:
+                _run(["git", "checkout", original_branch], cwd=self.repo, check=False)
 
     def remove(self, task_id: str) -> None:
         """Discard the worktree without merging (verification failed or error)."""
@@ -177,6 +218,8 @@ class WorktreeManager:
         # Belt-and-suspenders: remove the directory if git left it behind.
         if wt_path.exists():
             shutil.rmtree(wt_path, ignore_errors=True)
+        # Prune stale .git/worktrees/<name> admin entries left by crashes.
+        _run(["git", "worktree", "prune"], cwd=self.repo, check=False)
         _run(
             ["git", "branch", "-D", branch],
             cwd=self.repo,
