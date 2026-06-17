@@ -41,20 +41,34 @@ class StateWriter:
         self._last_orch_model: str = "orchestrator"
         self._last_worker_model: str = "worker"
         self._test_attempt_counts: dict[str, int] = {}  # task_id → attempt number
-        self._session: SessionLog | None = None  # append-only per-run transcript (roadmap #5)
+        self._session_stack: list[SessionLog] = []  # per-run transcripts (roadmap #5); top = current run
 
     # ── Public hooks ──────────────────────────────────────────────────────────
 
+    @property
+    def _session(self) -> SessionLog | None:
+        """The current run's session log (top of the stack), or None before any run starts."""
+        return self._session_stack[-1] if self._session_stack else None
+
+    def _pop_session(self) -> None:
+        """End the current run's transcript; a recursive FORMAT-5 sub-run pops back to its parent."""
+        if self._session_stack:
+            self._session_stack.pop()
+
     def _sess(self, event: str, **fields) -> None:
-        """Forward one structured event to the append-only session log (best-effort; no-op until a
-        run has started). The session log is the replayable counterpart to this snapshot state."""
+        """Forward one structured event to the current run's append-only session log (best-effort;
+        no-op until a run has started). The session log is the replayable counterpart to this state."""
         if self._session is not None:
             self._session.emit(event, **fields)
 
     def on_project_start(self, intent: str, output_dir: str) -> None:
         self._start_time = _now()
-        # Open a fresh append-only transcript for this run (emits the mission_started event).
-        self._session = SessionLog(new_mission_id(), intent=intent, output_dir=output_dir)
+        # Open a fresh append-only transcript for this run (emits mission_started). A recursive
+        # FORMAT-5 sub-run PUSHES its own transcript, correlated to its parent, so it can't clobber
+        # the parent's — the parent resumes as 'current' when the sub-run terminates (_pop_session).
+        _parent_id = self._session.mission_id if self._session else None
+        self._session_stack.append(SessionLog(
+            new_mission_id(), intent=intent, output_dir=output_dir, parent_mission_id=_parent_id))
         # Compute a relative URL path so the dashboard can fetch output files
         try:
             output_url = Path(output_dir).resolve().relative_to(_STATE_FILE.parent.resolve()).as_posix()
@@ -255,6 +269,8 @@ class StateWriter:
                 "tokens_by_model": {},
             })
         self._event(f"Heal tasks added — {len(new_tasks)} fix task(s) queued")
+        self._sess("tasks_added", count=len(new_tasks),
+                   task_ids=[t.get("id") for t in new_tasks][:50])
         self._write()
 
     def on_verification_result(self, task_id: str, method: str, ecosystem: str,
@@ -291,21 +307,26 @@ class StateWriter:
                        summary[:120], status=result)
         self._sess("mission_finished", result=result, summary=(summary or "")[:300])
         self._write()
+        self._pop_session()
 
     def on_project_failed(self, summary: str, phase: str | None = None) -> None:
         detail = f"{phase}: {summary}" if phase else summary
         self._set_terminal_state("FAILED", f"Project failed - {detail[:160]}")
         self._sess("mission_failed", summary=(summary or "")[:300], phase=phase)
         self._write()
+        self._pop_session()
 
     def on_project_canceled(self, summary: str = "Pipeline canceled") -> None:
         self._set_terminal_state("CANCELED", summary[:160])
         self._sess("mission_canceled", summary=(summary or "")[:300])
         self._write()
+        self._pop_session()
 
     def on_no_continuation_tasks(self, summary: str) -> None:
         self._set_terminal_state("FAILED", f"Continuation failed - {summary[:160]}")
+        self._sess("mission_failed", summary=(summary or "")[:300], phase="continuation")
         self._write()
+        self._pop_session()
 
     def on_final_review_result(self, passed: bool, summary: str | None = None,
                                heal_cycle: int | None = None) -> None:
@@ -316,6 +337,7 @@ class StateWriter:
             "recorded_at": _ts(),
         }
         self._event(f"Final review: {'PASS' if passed else 'NEEDS_FOLLOWUP'}")
+        self._sess("final_review", passed=bool(passed), heal_cycle=heal_cycle)
         self._write()
 
     def on_dynamic_checks(self, passed: bool, issues: list[str] | None = None) -> None:
@@ -325,6 +347,7 @@ class StateWriter:
             "recorded_at": _ts(),
         }
         self._event(f"Dynamic checks: {'PASS' if passed else 'FAILED'}")
+        self._sess("dynamic_checks", passed=bool(passed), issue_count=len(issues or []))
         self._write()
 
     def on_deploy(self, url: str | None, note: str) -> None:

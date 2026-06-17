@@ -76,14 +76,21 @@ class TestSessionLog(unittest.TestCase):
         w.on_task_start("t1")
         w.on_verification_result("t1", "smoke", "vanilla", True, "ok")
         w.on_task_done("t1", "ollama/qwen3:8b")
+        w.on_tasks_added([{"id": "t2", "type": "frontend", "objective": "heal it"}])
+        w.on_dynamic_checks(True, [])
+        w.on_final_review_result(True, "PASS", heal_cycle=1)
         w.on_deploy("https://x.netlify.app", "deployed")
+        _ended = w._session  # capture before on_project_done pops the stack
+        session_path = _ended.path
         w.on_project_done("pass", "all good")
+        self.assertIsNone(w._session, "the run's session is popped on terminal")
 
-        records = _read_jsonl(w._session.path)
+        records = _read_jsonl(session_path)
         events = [r["event"] for r in records]
         self.assertEqual(events[0], "mission_started")
         for expected in ("spec_accepted", "dag_loaded", "agent_call", "task_started",
-                         "verification", "task_done", "deploy", "mission_finished"):
+                         "verification", "task_done", "tasks_added", "dynamic_checks",
+                         "final_review", "deploy", "mission_finished"):
             self.assertIn(expected, events)
         seqs = [r["seq"] for r in records]
         self.assertEqual(seqs, sorted(seqs), "seq must be chronological")
@@ -91,7 +98,35 @@ class TestSessionLog(unittest.TestCase):
         ac = next(r for r in records if r["event"] == "agent_call")
         self.assertEqual(ac["provider"], "ollama")
         self.assertEqual(ac["rung"], 0)
-        self.assertEqual(w._state["project"]["mission_id"], w._session.mission_id)
+        self.assertEqual(w._state["project"]["mission_id"], _ended.mission_id)
+
+    def test_format5_nested_sessions_do_not_clobber_parent(self):
+        """A recursive sub-project must get its OWN transcript correlated to the parent, and the
+        parent's terminal event must land in the PARENT file (the FORMAT-5 ownership bug)."""
+        w = _NoWriteStateWriter()
+        w.on_project_start("parent build", "/out/parent")
+        parent_sess = w._session
+        parent_id = parent_sess.mission_id
+
+        # Sub-project starts + finishes WITHIN the parent run.
+        w.on_project_start("child scene", "/out/parent/scene1")
+        child_sess = w._session
+        self.assertIsNot(child_sess, parent_sess)
+        w.on_task_done("c1", "ollama/qwen3:8b")          # → child transcript
+        w.on_project_done("pass", "child done")          # child terminal + pop → parent current
+        self.assertIs(w._session, parent_sess, "parent resumes as current after the sub-run ends")
+
+        w.on_project_done("pass", "parent done")         # parent terminal
+        self.assertIsNone(w._session)
+
+        parent_records = _read_jsonl(parent_sess.path)
+        child_records = _read_jsonl(child_sess.path)
+        parent_finishes = [r for r in parent_records if r["event"] == "mission_finished"]
+        child_finishes = [r for r in child_records if r["event"] == "mission_finished"]
+        self.assertEqual([r["summary"] for r in parent_finishes], ["parent done"])
+        self.assertEqual([r["summary"] for r in child_finishes], ["child done"])
+        child_started = next(r for r in child_records if r["event"] == "mission_started")
+        self.assertEqual(child_started["parent_mission_id"], parent_id)
 
 
 if __name__ == "__main__":
