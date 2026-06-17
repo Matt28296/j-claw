@@ -1,10 +1,12 @@
 from __future__ import annotations
 import json
+import shutil
 from concurrent.futures import ThreadPoolExecutor, wait as _cf_wait, FIRST_EXCEPTION
 from pathlib import Path
 from rich.console import Console
 
 from config import MAX_RETRIES_PER_TASK, WORKER_MODEL, WORKER_PROVIDER, MAX_PARALLEL_WORKERS, MAX_TASKS, WORKER_TASK_TIMEOUT, WORKER_LADDER, ASSET_PROVIDER, spec_stack
+from worktree_manager import WorktreeManager
 from experience_log import log_outcome, get_relevant_hints
 from project import ProjectInstance, Task
 from worker import execute_task, routed_rung
@@ -82,6 +84,20 @@ class Scheduler:
     def __init__(self, instance: ProjectInstance, orchestrator) -> None:
         self.instance = instance
         self.orch = orchestrator
+        # WorktreeManager is created once per Scheduler lifetime.  If git is
+        # unavailable or the output dir is not inside a git repo the manager
+        # silently degrades: _wt_manager is set to None and tasks run without
+        # isolation (existing behaviour).
+        try:
+            self._wt_manager: WorktreeManager | None = WorktreeManager(
+                instance.output_dir
+            )
+        except Exception as _wt_init_exc:  # noqa: BLE001
+            console.print(
+                f"  [dim]Worktree isolation unavailable: {_wt_init_exc} "
+                "— falling back to shared output dir.[/dim]"
+            )
+            self._wt_manager = None
 
     def run(self) -> None:
         """Execute all tasks to completion (or terminal failure).
@@ -93,34 +109,39 @@ class Scheduler:
         _MAX_REVIEW_ROUNDS = 2
         review_rounds = 0
 
-        while True:
-            while not self.instance.all_tasks_done():
-                ready = self._ready_tasks()
+        # WorktreeManager is used as a context manager so its __exit__ cleans up
+        # any orphaned worktrees if the scheduler exits unexpectedly.  When
+        # _wt_manager is None we use a no-op context via a plain object.
+        _ctx = self._wt_manager if self._wt_manager is not None else _NullContext()
+        with _ctx:
+            while True:
+                while not self.instance.all_tasks_done():
+                    ready = self._ready_tasks()
 
-                if not ready:
-                    failed = self.instance.failed_tasks()
-                    pending = [t for t in self.instance.tasks.values() if t.status == "pending"]
-                    if failed:
-                        console.print(
-                            f"\n[red]Scheduler stalled: {len(failed)} task(s) failed with no retries left.[/red]"
-                        )
-                        for t in failed:
-                            console.print(f"  • {t.id}: {t.error_log[:200]}")
-                    elif pending:
-                        console.print(
-                            "[red]Scheduler deadlock: tasks are pending but none are ready "
-                            "(unsatisfied dependencies?).[/red]"
-                        )
-                    return  # stalled/deadlocked — not actually done, skip review
+                    if not ready:
+                        failed = self.instance.failed_tasks()
+                        pending = [t for t in self.instance.tasks.values() if t.status == "pending"]
+                        if failed:
+                            console.print(
+                                f"\n[red]Scheduler stalled: {len(failed)} task(s) failed with no retries left.[/red]"
+                            )
+                            for t in failed:
+                                console.print(f"  • {t.id}: {t.error_log[:200]}")
+                        elif pending:
+                            console.print(
+                                "[red]Scheduler deadlock: tasks are pending but none are ready "
+                                "(unsatisfied dependencies?).[/red]"
+                            )
+                        return  # stalled/deadlocked — not actually done, skip review
 
-                self._dispatch_batch(ready)
+                    self._dispatch_batch(ready)
 
-            # All tasks done. Run PROJECT_REVIEW once; if it added follow-ups, loop to run them.
-            if review_rounds >= _MAX_REVIEW_ROUNDS:
-                break
-            review_rounds += 1
-            if not self._project_review():
-                break
+                # All tasks done. Run PROJECT_REVIEW once; if it added follow-ups, loop to run them.
+                if review_rounds >= _MAX_REVIEW_ROUNDS:
+                    break
+                review_rounds += 1
+                if not self._project_review():
+                    break
 
     def _dispatch_batch(self, ready: list[Task]) -> None:
         """Run a batch of ready tasks under a per-batch timeout.
@@ -394,18 +415,55 @@ class Scheduler:
             summary="Generating declared files",
         )
 
+        # Determine whether to use worktree isolation for this code task.
+        # Asset/audio/video/music tasks write binary content outside the git tree
+        # and are handled by their respective workers above — no isolation needed.
+        _use_wt = self._wt_manager is not None
+        _wt_path: Path | None = None
+        if _use_wt:
+            try:
+                _wt_path = self._wt_manager.create(task.id)
+                console.print(f"  [dim]Worktree: {_wt_path}[/dim]")
+            except Exception as _wt_exc:  # noqa: BLE001
+                console.print(
+                    f"  [yellow]Worktree creation failed ({_wt_exc}) "
+                    "— running without isolation.[/yellow]"
+                )
+                _use_wt = False
+                _wt_path = None
+
+        # The effective output directory: either the isolated worktree mirror of
+        # output_dir, or the real output_dir when isolation is unavailable.
+        if _wt_path is not None:
+            # Reproduce the output_dir sub-path inside the worktree so that
+            # file paths relative to output_dir are valid inside the worktree.
+            try:
+                _rel_output = self.instance.output_dir.resolve().relative_to(
+                    self._wt_manager.repo.resolve()
+                )
+                _eff_output_dir = _wt_path / _rel_output
+            except ValueError:
+                # output_dir is not inside the repo (e.g. absolute path outside) —
+                # fall back to unrelativised path.
+                _eff_output_dir = _wt_path / self.instance.output_dir.name
+            _eff_output_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            _eff_output_dir = self.instance.output_dir
+
         try:
             context = _build_context(task, self.instance.output_dir)
             result = execute_task(task, self.instance.spec, dep_files, context)
             task.output_files = {f["path"]: f["content"] for f in result["files"]}
-            self.instance.write_task_files(task)
+
+            # Write to the effective output dir (worktree copy or main output_dir).
+            _write_task_files_to(task.output_files, _eff_output_dir)
             for path in task.output_files:
                 sw.on_file_written(path, task.id)
 
             # Apply memory patch if worker produced one
             patch_json = task.output_files.get("memory_patch.json")
             if patch_json:
-                _apply_memory_patch(patch_json, self.instance.output_dir, task.id)
+                _apply_memory_patch(patch_json, _eff_output_dir, task.id)
 
             # A task is only done when every file it DECLARED exists on disk
             # (non-empty, except intentional dotfiles like .gitkeep). Workers
@@ -413,7 +471,7 @@ class Scheduler:
             # live: render.sh "done" but never materialized across 3 heal cycles.
             missing_decl = []
             for rel in (task.files or []):
-                p = self.instance.output_dir / rel
+                p = _eff_output_dir / rel
                 if not p.exists() or (p.stat().st_size == 0 and not p.name.startswith(".")):
                     missing_decl.append(rel)
             if missing_decl:
@@ -426,8 +484,8 @@ class Scheduler:
             if stub_hit:
                 raise ValueError(f"Stub detected in output: {stub_hit}")
 
-            ecosystem = detect_ecosystem(self.instance.output_dir)
-            passed, log = run_verification(task, self.instance.output_dir)
+            ecosystem = detect_ecosystem(_eff_output_dir)
+            passed, log = run_verification(task, _eff_output_dir)
             comp_ok, comp_issues = check_completeness(files=task.output_files, ecosystem=ecosystem)
             if not comp_ok:
                 passed = False
@@ -435,6 +493,17 @@ class Scheduler:
                 log = (log + "\n" if log else "") + "Completeness gate failed:\n" + _comp
             sw.on_verification_result(task.id, task.verification, ecosystem, passed, log)
             if passed:
+                # Verification passed — promote worktree files to the real output dir.
+                if _use_wt and _wt_path is not None:
+                    _copy_tree(_eff_output_dir, self.instance.output_dir)
+                    try:
+                        self._wt_manager.merge_and_remove(task.id)
+                    except Exception as _merge_exc:  # noqa: BLE001
+                        # Merge failure is non-fatal: files are already in output_dir.
+                        console.print(
+                            f"  [yellow]Worktree merge warning ({_merge_exc}) "
+                            "— files copied, branch not merged.[/yellow]"
+                        )
                 model_used = result.get("model_used", WORKER_MODEL)
                 task.status = "done"
                 self._finish_worker_telemetry(
@@ -447,6 +516,12 @@ class Scheduler:
                 sw.on_task_done(task.id, model_used)
                 console.print(f"  [green]✓ done[/green]  [dim](worker: {model_used})[/dim]")
             else:
+                # Verification failed — discard worktree (no pollution to main tree).
+                if _use_wt and _wt_path is not None:
+                    try:
+                        self._wt_manager.remove(task.id)
+                    except Exception as _rm_exc:  # noqa: BLE001
+                        console.print(f"  [dim]Worktree cleanup warning: {_rm_exc}[/dim]")
                 task.status = "failed"
                 task.error_log = f"Verification ({task.verification}) failed:\n{log}"
                 self._finish_worker_telemetry(
@@ -459,6 +534,12 @@ class Scheduler:
                 self._handle_error(task)
 
         except Exception as exc:  # noqa: BLE001
+            # Any exception — discard the worktree to avoid partial writes.
+            if _use_wt and _wt_path is not None:
+                try:
+                    self._wt_manager.remove(task.id)
+                except Exception:  # noqa: BLE001
+                    pass
             task.status = "failed"
             task.error_log = str(exc)
             self._finish_worker_telemetry(
@@ -616,6 +697,50 @@ class Scheduler:
 
 
 # ── module-level helpers ──────────────────────────────────────────────────────
+
+
+class _NullContext:
+    """Drop-in no-op context manager used when WorktreeManager is unavailable."""
+
+    def __enter__(self) -> "_NullContext":
+        return self
+
+    def __exit__(self, *_) -> None:
+        pass
+
+
+def _write_task_files_to(output_files: dict[str, str], target_dir: Path) -> None:
+    """Write task output files to *target_dir* (mirrors ProjectInstance.write_task_files
+    but accepts an arbitrary target directory for worktree isolation)."""
+    for rel_path, content in output_files.items():
+        full = target_dir / rel_path
+        # Guard against file-vs-directory collision (mirrors project.py logic).
+        for ancestor in full.parents:
+            if ancestor == target_dir:
+                break
+            if ancestor.is_file():
+                raise ValueError(
+                    f"Cannot write {rel_path!r}: ancestor {ancestor.name!r} already exists "
+                    "as a file, not a directory — rename one to fix the spec."
+                )
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(content, encoding="utf-8")
+
+
+def _copy_tree(src: Path, dst: Path) -> None:
+    """Recursively copy all files under *src* into *dst*, creating directories as needed.
+
+    Used to promote worktree-verified files back into the main output_dir.
+    Existing files in *dst* are overwritten — this is intentional (the
+    worktree holds the authoritative verified copy).
+    """
+    for item in src.rglob("*"):
+        if item.is_file():
+            rel = item.relative_to(src)
+            target = dst / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(item), str(target))
+
 
 def _build_context(task, output_dir: Path) -> dict | None:
     """Build structured context for a task. Returns None if project_memory/ not initialized."""
