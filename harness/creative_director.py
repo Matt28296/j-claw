@@ -1,7 +1,8 @@
 from __future__ import annotations
 from rich.console import Console
 
-from config import CREATIVE_DIRECTOR_PROMPT_PATH
+from config import CREATIVE_DIRECTOR_PROMPT_PATH, OPUS_MODEL
+from interpretation_risk import score_interpretation_risk, HIGH_RISK_THRESHOLD
 
 console = Console()
 
@@ -66,17 +67,77 @@ class CreativeDirector:
 
     def interpret(self, intent: str) -> dict:
         """
-        Send raw user intent through the Codex-first planning ladder (Phase 3).
-        Returns a validated CREATIVE_BRIEF dict.
+        Send raw user intent through the planning ladder. Returns a validated CREATIVE_BRIEF dict.
 
-        Routes through worker.planning_call: Codex (free OAuth) → one same-tier retry → Anthropic
-        Sonnet → Opus, gated by the required-field validation below (preserved as the fallback
-        boundary, not mere parse success). planning_call handles telemetry + fallback; Codex
-        unavailability/quota never hard-fails — it falls through to Anthropic.
+        Phase 4: routes by interpretation risk score before calling the planning ladder.
+          - Low risk (< HIGH_RISK_THRESHOLD): Codex-first via planning_call (existing Phase 3 path)
+          - High risk (>= HIGH_RISK_THRESHOLD): Sonnet primary (not Codex-first) — Codex is less
+            reliable on ambiguous / novel / constraint-heavy intents, so we skip straight to Sonnet
+            to avoid wasting a Codex slot on output that will fail validation and require escalation.
+            Opus is the final fallback (Amendment #3: risk > 0.75 Opus escalation).
+
+        planning_call handles telemetry + fallback; its Codex path is still available for low-risk
+        intents as before. Raises RuntimeError only if every tier fails.
         """
-        from worker import planning_call
+        from worker import planning_call, _call_anthropic
 
-        brief = planning_call(self._system_prompt, intent, _validate, role="creative")
+        risk = score_interpretation_risk(intent)
+        console.print(
+            f"  [dim]Interpretation risk: {risk:.2f} "
+            f"({'high — routing to Sonnet' if risk >= HIGH_RISK_THRESHOLD else 'low — Codex-first'})[/dim]"
+        )
+
+        if risk >= HIGH_RISK_THRESHOLD:
+            # High-risk path: skip Codex, go directly to Sonnet primary.
+            # Codex is less reliable on ambiguous / novel / constraint-heavy intents,
+            # so we avoid wasting an OAuth slot on output likely to fail validation.
+            # Amendment #3: escalate to Opus only when risk > 0.75; else Sonnet-only.
+            import time as _time
+            from cost import record_role_event as _record
+            from llm_json import loads_llm_json_object
+            from orchestrator import _strip_fences
+
+            sonnet_model = "claude-sonnet-4-6"
+            opus_model = OPUS_MODEL
+
+            # Build the model list: always Sonnet; add Opus only when risk is very high.
+            _models_to_try = [sonnet_model]
+            if risk > 0.75:
+                _models_to_try.append(opus_model)
+
+            last_err: Exception | None = None
+            brief: dict | None = None
+            for _model in _models_to_try:
+                _t0 = _time.monotonic()
+                try:
+                    raw = _call_anthropic(_model, self._system_prompt, intent, label="creative")
+                    try:
+                        parsed = loads_llm_json_object(raw)
+                    except Exception:
+                        import json as _j
+                        parsed = _j.loads(_strip_fences(raw))
+                    _validate(parsed)
+                    _record("creative", provider="anthropic", model=_model, success=True,
+                            fallback=(_model != sonnet_model),
+                            latency_s=_time.monotonic() - _t0)
+                    brief = parsed
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_err = exc
+                    _record("creative", provider="anthropic", model=_model, success=False,
+                            schema_fail=True, fallback=(_model != sonnet_model),
+                            latency_s=_time.monotonic() - _t0)
+
+            if brief is None:
+                # All high-risk models failed — fall through to planning_call ladder as backstop.
+                console.print(
+                    f"  [yellow]High-risk Sonnet path failed ({last_err}) — "
+                    f"falling through to planning_call ladder[/yellow]"
+                )
+                brief = planning_call(self._system_prompt, intent, _validate, role="creative")
+        else:
+            # Low-risk path: existing Codex-first planning_call (Phase 3 behavior).
+            brief = planning_call(self._system_prompt, intent, _validate, role="creative")
 
         console.print(
             f"[bold cyan]Creative Brief:[/bold cyan] "

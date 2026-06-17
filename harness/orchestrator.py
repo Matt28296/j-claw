@@ -12,7 +12,7 @@ from config import (
     ORCHESTRATOR_MAX_TOKENS, EXECUTION_ERROR_MODEL, ORCHESTRATOR_TIMEOUT,
     GOOGLE_API_KEY, GEMINI_ORCHESTRATOR_MODEL,
     ORCHESTRATOR_EMERGENCY_PROVIDER, EMERGENCY_ORCHESTRATOR_MODEL,
-    GEMINI_QUOTA_FAILFAST, CODEX_PLANNING_RESERVE, OPUS_MODEL,
+    GEMINI_QUOTA_FAILFAST, CODEX_PLANNING_RESERVE, OPUS_MODEL, HAIKU_MODEL,
 )
 from validator import validate_response, OrchestratorOutputError
 from cache_telemetry import log_cache_usage
@@ -502,9 +502,20 @@ def _emergency_chain() -> list:
     return chain
 
 
-def make_orchestrator(provider: str | None = None, *, manual: bool = False):
+def make_orchestrator(provider: str | None = None, *, manual: bool = False,
+                      difficulty: str | None = None):
     """Factory that returns the right orchestrator for ORCHESTRATOR_PROVIDER,
-    wrapped with an emergency fallback when configured."""
+    wrapped with an emergency fallback when configured.
+
+    difficulty (Phase 4): "simple" | "medium" | "complex" | None
+      Only applies when provider is "anthropic" (the default). Selects the cost/capability
+      trade-off appropriate for the project scale derived from the creative brief:
+        - "simple"  → Haiku (cheapest) with Codex emergency chain
+        - "medium"  → CodexOrchestrator primary → Sonnet emergency (Codex-first, paid fallback)
+        - "complex" → Sonnet → Opus chain (full capability, highest cost)
+        - None      → existing behaviour (plain Orchestrator() on Sonnet)
+      Non-anthropic providers (gemini, openrouter) ignore difficulty and use their own routing.
+    """
     from config import ORCHESTRATOR_PROVIDER
     p = provider or ORCHESTRATOR_PROVIDER
 
@@ -521,7 +532,41 @@ def make_orchestrator(provider: str | None = None, *, manual: bool = False):
     if p == "openrouter":
         return OpenRouterOrchestrator()
 
-    return Orchestrator()  # anthropic (default)
+    # ── Anthropic provider with difficulty routing (Phase 4) ─────────────────
+    if difficulty == "simple":
+        # Prototype builds: Haiku is sufficient for JSON orchestration at this scale.
+        # Emergency chain (Codex $0 → Sonnet → Opus) handles Haiku outages.
+        primary = Orchestrator(model=HAIKU_MODEL)
+        chain = _emergency_chain()
+        if chain:
+            return CompositeOrchestrator(primary, chain)
+        return primary
+
+    if difficulty == "medium":
+        # MVP builds: Codex-first (free) with a paid Sonnet emergency fallback.
+        # This mirrors the planning_call ladder: Codex handles the common case,
+        # Anthropic is the backstop. Codex unavailability falls straight to Sonnet.
+        try:
+            import worker
+            if worker._oauth_enabled("codex"):
+                codex_primary = CodexOrchestrator()
+                paid_fallback = [Orchestrator(model=EMERGENCY_ORCHESTRATOR_MODEL),
+                                 Orchestrator(model=OPUS_MODEL)]
+                return CompositeOrchestrator(codex_primary, paid_fallback)
+        except Exception:  # noqa: BLE001 — worker import issues fall through to Sonnet
+            pass
+        # Codex not enabled: fall through to Sonnet (same as None but explicit)
+        return Orchestrator()
+
+    if difficulty == "complex":
+        # Production builds: Sonnet primary → Opus escalation for maximum capability.
+        if ANTHROPIC_API_KEY:
+            sonnet = Orchestrator(model=ORCHESTRATOR_MODEL)
+            opus_fallback = Orchestrator(model=OPUS_MODEL)
+            return CompositeOrchestrator(sonnet, [opus_fallback])
+        return Orchestrator()
+
+    return Orchestrator()  # anthropic default (difficulty=None)
 
 
 def _parse_retry_delay(exc: Exception, attempt: int) -> int:

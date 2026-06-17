@@ -243,12 +243,53 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
         raise
 
 
+def _difficulty_from_brief(brief: dict) -> str | None:
+    """Derive orchestrator difficulty tier from the creative brief's scale field.
+
+    scale → difficulty mapping (Phase 4):
+      "prototype" → "simple"   (Haiku primary, cheapest)
+      "mvp"       → "medium"   (Codex-first, Sonnet fallback)
+      "production" → "complex" (Sonnet → Opus, full capability)
+      missing/unknown → None   (existing behavior, plain Sonnet)
+
+    Cross-check: if the brief has more than 12 features, bump one tier up.
+    Tier order: simple → medium → complex (cap at complex).
+    """
+    _TIER_ORDER = ["simple", "medium", "complex"]
+    scale = brief.get("scale", "")
+    difficulty = {
+        "prototype": "simple",
+        "mvp": "medium",
+        "production": "complex",
+    }.get(scale)
+
+    if difficulty is None:
+        return None
+
+    # Bump one tier if the feature count suggests higher complexity than the scale label implies.
+    features = brief.get("features", [])
+    if isinstance(features, list) and len(features) > 12:
+        idx = _TIER_ORDER.index(difficulty)
+        difficulty = _TIER_ORDER[min(idx + 1, len(_TIER_ORDER) - 1)]
+
+    return difficulty
+
+
+def _bump_difficulty(difficulty: str | None) -> str | None:
+    """Bump difficulty one tier up for heal-loop re-planning. Returns None unchanged."""
+    _TIER_ORDER = ["simple", "medium", "complex"]
+    if difficulty is None:
+        return None
+    idx = _TIER_ORDER.index(difficulty) if difficulty in _TIER_ORDER else -1
+    if idx < 0:
+        return difficulty
+    return _TIER_ORDER[min(idx + 1, len(_TIER_ORDER) - 1)]
+
+
 def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, auto_accept: bool, wiring: dict | None, phase: dict) -> bool:
     """Inner pipeline body — separated so run_project() can catch + report failures."""
 
     _start_dashboard()
-
-    orch = make_orchestrator(manual=manual)
 
     sw.on_project_start(intent, str(output_dir))
     phase["current"] = "creative-director"
@@ -264,6 +305,16 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
     except Exception as _cd_exc:
         console.print(f"  [yellow]Creative Director skipped ({_cd_exc})[/yellow]")
         creative_brief = {}
+
+    # ── Difficulty routing (Phase 4) ──────────────────────────────────────────
+    # Derive difficulty from the creative brief's scale field BEFORE building the
+    # orchestrator so make_orchestrator can select the right model tier.
+    # manual mode bypasses difficulty routing (ManualOrchestrator ignores it).
+    _difficulty: str | None = _difficulty_from_brief(creative_brief) if creative_brief else None
+    if _difficulty:
+        console.print(f"  [dim]Project difficulty: {_difficulty} (scale={creative_brief.get('scale', '?')})[/dim]")
+
+    orch = make_orchestrator(manual=manual, difficulty=_difficulty)
 
     # ── Technical Architect pass ──────────────────────────────────────────────
     phase["current"] = "technical-architect"
@@ -544,6 +595,19 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
                         f"Do NOT reintroduce removed/disallowed frameworks or rename established "
                         f"classes. Address the ROOT CAUSE of the recurring issues directly and minimally."
                     )
+
+            # Difficulty re-plan bump (Phase 4): on REVIEW_FAILED, escalate the orchestrator
+            # one difficulty tier so the fix-planning call uses a stronger model. This ensures
+            # that a heal loop driven by complex issues doesn't stay on the cheap Haiku/Codex
+            # rung that caused the first failure. Bump once; subsequent cycles keep the bumped
+            # difficulty (it can only go up, never down). manual mode bypasses this.
+            _bumped_diff = _bump_difficulty(_difficulty)
+            if _bumped_diff != _difficulty:
+                _difficulty = _bumped_diff
+                console.print(
+                    f"  [dim]Bumping orchestrator difficulty to '{_difficulty}' for REVIEW_FAILED re-plan.[/dim]"
+                )
+                orch = make_orchestrator(manual=manual, difficulty=_difficulty)
 
             sw.on_agent_call("orchestrator", ORCHESTRATOR_MODEL, "REVIEW_FAILED")
             sw.on_review_failed(len(issues), heal_cycle + 1)
