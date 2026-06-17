@@ -20,6 +20,7 @@ from config import (
     CODEX_CLI_ENABLED, CODEX_HOME, CODEX_MODEL, CODEX_EFFORT, OPUS_MODEL,
     CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT, OAUTH_PROVIDERS, METERED_PROVIDERS,
     GROK_CLI_ENABLED, GROK_HOME, GROK_MODEL, GROK_MAX_CALLS, GROK_TIMEOUT,
+    CLAUDE_CLI_ENABLED, CLAUDE_CLI_HOME, CLAUDE_CLI_MODEL, CLAUDE_CLI_MAX_CALLS, CLAUDE_CLI_TIMEOUT,
 )
 from experience_log import get_worker_hints, log_escalation
 from cost import record_role_event
@@ -713,6 +714,7 @@ _oauth_calls_made: dict[str, int] = {}
 _oauth_lock = threading.Lock()
 _codex_disabled = False
 _grok_disabled = False
+_claude_cli_disabled = False
 
 # Single-flight lock for Grok: xAI rotates the OAuth refresh token on each use, so concurrent
 # `grok -p` subprocesses would race and invalidate the cached ~/.grok/auth.json session. Serialize
@@ -722,13 +724,14 @@ _grok_call_lock = threading.Lock()
 
 def reset_paid_budget() -> None:
     """Reset the per-project paid (cloud) worker-call counter. Call at project start."""
-    global _paid_calls_made, _codex_disabled, _grok_disabled
+    global _paid_calls_made, _codex_disabled, _grok_disabled, _claude_cli_disabled
     with _paid_lock:
         _paid_calls_made = 0
     with _oauth_lock:
         _oauth_calls_made.clear()
         _codex_disabled = False
         _grok_disabled = False
+        _claude_cli_disabled = False
 
 
 def _reserve_paid_call() -> bool:
@@ -752,12 +755,16 @@ def _reserve_oauth_call(provider: str) -> bool:
         cap = CODEX_CLI_MAX_CALLS
     elif provider == "grok":
         cap = GROK_MAX_CALLS
+    elif provider == "claude_cli":
+        cap = CLAUDE_CLI_MAX_CALLS
     else:
         cap = 0
     with _oauth_lock:
         if provider == "codex" and _codex_disabled:
             return False
         if provider == "grok" and _grok_disabled:
+            return False
+        if provider == "claude_cli" and _claude_cli_disabled:
             return False
         made = _oauth_calls_made.get(provider, 0)
         if made >= cap:
@@ -773,6 +780,8 @@ def _oauth_enabled(provider: str) -> bool:
         return CODEX_CLI_ENABLED
     if provider == "grok":
         return GROK_CLI_ENABLED
+    if provider == "claude_cli":
+        return CLAUDE_CLI_ENABLED
     return False
 
 
@@ -828,7 +837,7 @@ def execute_task(
     the legacy WORKER_PROVIDER + WORKER_FALLBACKS chain if WORKER_LADDER is unset.
     Raises ValueError immediately on bad JSON format so the scheduler can send EXECUTION_ERROR.
     """
-    global _codex_disabled, _grok_disabled  # latched off when an OAuth rung hits auth/quota mid-run
+    global _codex_disabled, _grok_disabled, _claude_cli_disabled  # latched off when an OAuth rung hits auth/quota mid-run
     arch  = spec.get("architecture", {})
     stack = arch.get("stack", "vanilla")
     # For full-stack projects, pick the sub-stack based on task type
@@ -989,6 +998,8 @@ def execute_task(
                         _codex_disabled = True
                     elif provider == "grok":
                         _grok_disabled = True
+                    elif provider == "claude_cli":
+                        _claude_cli_disabled = True
                 console.print(
                     f"  [yellow]{provider} unavailable (auth/quota) — disabling {provider} rung "
                     f"for this run, escalating to next rung.[/yellow]"
@@ -1066,6 +1077,25 @@ def _is_grok_unavailable(exc: Exception) -> bool:
     ))
 
 
+def _is_claude_cli_unavailable(exc: Exception) -> bool:
+    """True when the Claude Max CLI rung is unavailable for this run (exe missing, not logged in,
+    or — the common case — the subscription's usage limit has been reached / a rate limit hit /
+    the subprocess timed out). All of these mean "latch off, skip to the metered API rung", NOT a
+    capability failure. Hitting the Max usage limit must latch (unlike a transient API 429) because
+    the limit is a rolling window that won't clear within a build — and crucially it's the SAME pool
+    the operator's interactive session uses, so we stop hammering it. A bad-output ValueError is
+    handled elsewhere and returns False here."""
+    if isinstance(exc, (FileNotFoundError, subprocess.TimeoutExpired)):
+        return True
+    msg = str(exc).lower()
+    return any(k in msg for k in (
+        "not logged in", "please run /login", "run /login", "login required",
+        "unauthorized", "401", "403", "429", "rate limit",
+        "usage limit", "reached your usage", "limit reached", "quota",
+        "out of credits", "subscription",
+    ))
+
+
 def _oauth_unavailable(provider: str, exc: Exception) -> bool:
     """Dispatch an OAuth-rung failure to the provider's availability classifier. True → latch the
     rung off + skip to next rung; False → treat as a normal capability failure (escalate)."""
@@ -1073,6 +1103,8 @@ def _oauth_unavailable(provider: str, exc: Exception) -> bool:
         return _is_codex_unavailable(exc)
     if provider == "grok":
         return _is_grok_unavailable(exc)
+    if provider == "claude_cli":
+        return _is_claude_cli_unavailable(exc)
     return False
 
 
@@ -1160,6 +1192,8 @@ def _call_provider(provider: str, model: str, system: str, user: str) -> str:
         return _call_codex(model, system, user)
     if provider == "grok":
         return _call_grok(model, system, user)
+    if provider == "claude_cli":
+        return _call_claude_cli(model, system, user)
     raise ValueError(f"Unknown worker provider: {provider!r}")
 
 
@@ -1378,6 +1412,85 @@ def _call_grok(model: str, system: str, user: str) -> str:
         # Count attempted invocations too — a failed call (exe missing, timeout, nonzero exit,
         # auth/quota) is what trips the disable-latch, so it must be visible in cost telemetry.
         record_oauth_usage("grok", success=False, latency_s=time.monotonic() - start, tokens=0)
+        raise
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _extract_claude_text(stdout: str) -> tuple[str, int, int]:
+    """Pull the final assistant message (and token counts) out of `claude -p --output-format json`.
+
+    The print-mode envelope is a single JSON object: {"type":"result","subtype":"success",
+    "is_error":false,"result":"<text>","usage":{"input_tokens":N,"output_tokens":M},...}. Returns
+    (text, input_tokens, output_tokens). Falls back defensively to other text keys, then the raw
+    stdout, since downstream _parse_and_validate hunts for the {"files":[...]} contract anyway.
+    Raises RuntimeError when the envelope reports is_error (a model-level failure on a 0 exit)."""
+    s = (stdout or "").strip()
+    if not s:
+        return "", 0, 0
+    try:
+        obj = json.loads(s)
+    except (json.JSONDecodeError, ValueError):
+        return s, 0, 0  # plain text — let _parse_and_validate find the contract
+    if isinstance(obj, dict):
+        usage = obj.get("usage") if isinstance(obj.get("usage"), dict) else {}
+        inp = int(usage.get("input_tokens") or 0)
+        out = int(usage.get("output_tokens") or 0)
+        if obj.get("is_error"):
+            raise RuntimeError(f"claude -p reported an error: {str(obj.get('result'))[:300]}")
+        for key in ("result", "text", "response", "message", "output", "final"):
+            v = obj.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip(), inp, out
+    return s, 0, 0
+
+
+def _call_claude_cli(model: str, system: str, user: str) -> str:
+    """Run a one-shot headless `claude -p` under the operator's Claude Max subscription ($0 marginal).
+
+    Mirrors _call_ollama's (model, system, user) -> str contract. The combined prompt is piped on
+    stdin (UTF-8 forced, same reason as Codex — non-cp1252 glyphs); the JSON envelope's "result" is
+    the final message. Runs in an isolated scratch cwd and DENIES the agentic tools (Bash/Edit/Write/
+    …) so `claude -p` — which is the full Claude Code agent, not a bare model call — just generates
+    the JSON contract instead of trying to act on the filesystem. CLAUDE_CLI_TIMEOUT bounds the call.
+    NOTE: ships inert (CLAUDE_CLI_ENABLED=false); needs a live smoke test to confirm the agent
+    returns the worker contract cleanly before this rung is trusted in a real build."""
+    exe = shutil.which("claude") or shutil.which("claude.cmd") or "claude"
+    scratch = tempfile.mkdtemp(prefix="claude_cwd_")
+    cmd = [
+        exe, "-p", "--output-format", "json", "--model", (model or CLAUDE_CLI_MODEL),
+        # Pure generation: no agentic file/exec/web tools — just return the JSON contract.
+        "--disallowedTools", "Bash,Edit,Write,Read,NotebookEdit,MultiEdit,WebFetch,WebSearch,Task",
+    ]
+    env = {**os.environ}
+    if CLAUDE_CLI_HOME:
+        env["CLAUDE_CONFIG_DIR"] = CLAUDE_CLI_HOME
+
+    from cost import record_oauth_usage
+    start = time.monotonic()
+    try:
+        result = subprocess.run(
+            cmd,
+            input=(system + "\n\n" + user),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=CLAUDE_CLI_TIMEOUT,
+            env=env,
+            cwd=scratch,
+        )
+        if result.returncode != 0:
+            tail = ((result.stderr or "") + (result.stdout or ""))[-300:]
+            raise RuntimeError(f"claude -p exited {result.returncode}: ...{tail}")
+        text, inp, out = _extract_claude_text(result.stdout or "")
+        record_oauth_usage("claude_cli", success=True, latency_s=time.monotonic() - start,
+                            tokens=inp + out)
+        # Unlike Codex/Grok, claude -p DOES expose usage — record real counts when present.
+        _set_call_tokens(inp, out)
+        return text
+    except BaseException:
+        record_oauth_usage("claude_cli", success=False, latency_s=time.monotonic() - start, tokens=0)
         raise
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

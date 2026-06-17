@@ -1424,6 +1424,145 @@ class TestGrokWorkerRung(unittest.TestCase):
             self.skipTest("live WORKER_LADDER (from .env) does not include both grok and codex")
 
 
+class TestClaudeCliWorkerRung(unittest.TestCase):
+    """Claude Max CLI OAuth rung — mirrors TestCodexWorkerRung/TestGrokWorkerRung. All mocked: no
+    real `claude` subprocess. Same transport pattern as Codex (subscription, $0 marginal); a usage
+    limit / 429 latches the rung off (like Codex, unlike Grok's transient-throttle handling) because
+    the Max limit is a rolling window that won't clear within a build and is shared with the operator."""
+
+    def setUp(self):
+        import worker as w
+        self._w = w
+        self._orig_ladder = w.WORKER_LADDER
+        self._orig_enabled = w.CLAUDE_CLI_ENABLED
+        self._orig_codex = w.CODEX_CLI_ENABLED
+        self._orig_grok = w.GROK_CLI_ENABLED
+        w.CLAUDE_CLI_ENABLED = True
+        w.CODEX_CLI_ENABLED = False
+        w.GROK_CLI_ENABLED = False  # isolate claude_cli: escalation past it lands on anthropic
+        w.WORKER_LADDER = [
+            ("ollama", "qwen3:8b"),
+            ("ollama", "deepseek-coder-v2:16b"),
+            ("claude_cli", "sonnet"),
+            ("anthropic", "claude-sonnet-4-6"),
+        ]
+        w.reset_paid_budget()
+
+    def tearDown(self):
+        self._w.WORKER_LADDER = self._orig_ladder
+        self._w.CLAUDE_CLI_ENABLED = self._orig_enabled
+        self._w.CODEX_CLI_ENABLED = self._orig_codex
+        self._w.GROK_CLI_ENABLED = self._orig_grok
+        self._w.reset_paid_budget()
+
+    def _task(self):
+        t = MagicMock()
+        t.id = "task-1"; t.type = "frontend"; t.objective = "build a page"
+        t.files = ["index.html"]; t.dependencies = []; t.acceptance_criteria = []
+        t.verification = "none"; t.retry_count = 0
+        return t
+
+    def _good_output(self):
+        return json.dumps({"files": [{"path": "index.html", "content": "<html/>"}]})
+
+    # ── 1. _call_provider routes provider "claude_cli" → _call_claude_cli ──────
+    def test_call_provider_routes_claude_cli(self):
+        w = self._w
+        sentinel = self._good_output()
+        with patch.object(w, "_call_claude_cli", return_value=sentinel) as mock_cli:
+            out = w._call_provider("claude_cli", "sonnet", "sys", "user")
+        mock_cli.assert_called_once()
+        self.assertEqual(out, sentinel)
+
+    # ── 2. _is_claude_cli_unavailable: usage-limit/auth/timeout latch; bad output does not ──
+    def test_is_claude_cli_unavailable_classification(self):
+        w = self._w
+        fn = w._is_claude_cli_unavailable
+        self.assertTrue(fn(FileNotFoundError("claude not found")))
+        self.assertTrue(fn(w.subprocess.TimeoutExpired(cmd="claude", timeout=1)))
+        self.assertTrue(fn(RuntimeError("Claude usage limit reached")), "Max usage limit must latch")
+        self.assertTrue(fn(RuntimeError("claude -p exited 1: 429 rate limit")))
+        self.assertTrue(fn(RuntimeError("not logged in, please run /login")))
+        self.assertFalse(fn(ValueError("bad output")), "capability error is not unavailability")
+
+    # ── 3. _extract_claude_text: result + usage; non-json raw; is_error raises ──
+    def test_extract_claude_text(self):
+        w = self._w
+        txt, inp, out = w._extract_claude_text(json.dumps(
+            {"type": "result", "is_error": False, "result": "HELLO",
+             "usage": {"input_tokens": 5, "output_tokens": 7}}))
+        self.assertEqual(txt, "HELLO"); self.assertEqual((inp, out), (5, 7))
+        t2, i2, o2 = w._extract_claude_text("plain text not json")
+        self.assertEqual(t2, "plain text not json"); self.assertEqual((i2, o2), (0, 0))
+        with self.assertRaises(RuntimeError):
+            w._extract_claude_text(json.dumps({"is_error": True, "result": "usage limit reached"}))
+
+    # ── 4. reserve respects per-run cap + disable latch ───────────────────────
+    def test_reserve_respects_cap_and_latch(self):
+        w = self._w
+        self.assertTrue(w._oauth_enabled("claude_cli"))
+        w.reset_paid_budget()
+        with patch.object(w, "CLAUDE_CLI_MAX_CALLS", 2):
+            self.assertTrue(w._reserve_oauth_call("claude_cli"))
+            self.assertTrue(w._reserve_oauth_call("claude_cli"))
+            self.assertFalse(w._reserve_oauth_call("claude_cli"), "third call exceeds the cap")
+        w.reset_paid_budget()
+        w._claude_cli_disabled = True
+        try:
+            self.assertFalse(w._reserve_oauth_call("claude_cli"), "latched-off rung must not reserve")
+        finally:
+            w._claude_cli_disabled = False
+
+    # ── 5. the OAuth claude_cli call does NOT consume the dollar budget ───────
+    def test_claude_cli_call_does_not_consume_dollar_budget(self):
+        w = self._w
+        reserved = {"oauth": 0}
+        orig_reserve = w._reserve_oauth_call
+
+        def counting_reserve(provider):
+            ok = orig_reserve(provider)
+            if ok and provider == "claude_cli":
+                reserved["oauth"] += 1
+            return ok
+
+        spec = {"architecture": {"stack": "vanilla"}}
+        with patch.object(w, "_call_provider", return_value=self._good_output()), \
+             patch.object(w, "_reserve_oauth_call", side_effect=counting_reserve), \
+             patch.object(w, "route_task", return_value=2), \
+             patch.object(w, "_parse_and_validate", return_value={"files": []}):
+            before = w._paid_calls_made
+            w.execute_task(self._task(), spec, {})
+            after = w._paid_calls_made
+        self.assertGreaterEqual(reserved["oauth"], 1, "expected a claude_cli oauth reservation")
+        self.assertEqual(before, after, "oauth claude_cli call must NOT touch the dollar budget")
+
+    # ── 6. _call_claude_cli subprocess shape (headless json, model, no agentic tools, UTF-8) ──
+    def test_call_claude_cli_subprocess_shape(self):
+        w = self._w
+        captured = {}
+
+        def capture_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            m = MagicMock(); m.returncode = 0; m.stderr = ""
+            m.stdout = json.dumps({"type": "result", "is_error": False,
+                                   "result": self._good_output(),
+                                   "usage": {"input_tokens": 12, "output_tokens": 34}})
+            return m
+
+        with patch.object(w.subprocess, "run", side_effect=capture_run):
+            out = w._call_claude_cli("sonnet", "SYSPROMPT", "USERPROMPT")
+        cmd = captured["cmd"]
+        self.assertIn("-p", cmd)
+        self.assertIn("--output-format", cmd); self.assertIn("json", cmd)
+        self.assertIn("--model", cmd); self.assertIn("sonnet", cmd)
+        self.assertIn("--disallowedTools", cmd)
+        self.assertEqual(captured["kwargs"].get("encoding"), "utf-8")
+        sent = captured["kwargs"].get("input") or ""
+        self.assertIn("SYSPROMPT", sent); self.assertIn("USERPROMPT", sent)
+        self.assertIn("files", out, "the inner worker contract is extracted from result")
+
+
 class TestRoleMetrics(unittest.TestCase):
     """Phase-0 instrumentation baseline: per-role routing telemetry in cost.py.
     Pure accumulator — these never exercise a model. Verifies the metrics surfaced in
