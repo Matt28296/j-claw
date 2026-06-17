@@ -17,7 +17,7 @@ from config import (
     WORKER_FALLBACKS, ANTHROPIC_API_KEY, OPENROUTER_API_KEY,
     WORKER_LADDER, LOCAL_FIRST_TASK_TYPES, MAX_PAID_WORKER_CALLS,
     WORKER_TASK_TIMEOUT,
-    CODEX_CLI_ENABLED, CODEX_HOME, CODEX_MODEL, CODEX_EFFORT,
+    CODEX_CLI_ENABLED, CODEX_HOME, CODEX_MODEL, CODEX_EFFORT, OPUS_MODEL,
     CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT, OAUTH_PROVIDERS, METERED_PROVIDERS,
     GROK_CLI_ENABLED, GROK_HOME, GROK_MODEL, GROK_MAX_CALLS, GROK_TIMEOUT,
 )
@@ -25,6 +25,25 @@ from experience_log import get_worker_hints, log_escalation
 from cost import record_role_event
 
 console = Console()
+
+# Thread-local storage for per-call token counts.  Each _call_* function writes
+# the tokens it observed; execute_task reads and resets it after every attempt.
+_call_tokens = threading.local()
+
+
+def _set_call_tokens(inp: int, out: int) -> None:
+    """Store token counts from the most recent provider call (thread-safe)."""
+    _call_tokens.input = inp
+    _call_tokens.output = out
+
+
+def _get_call_tokens() -> dict:
+    """Return and clear the stored token counts for this thread."""
+    tok = {"input": getattr(_call_tokens, "input", 0),
+           "output": getattr(_call_tokens, "output", 0)}
+    _call_tokens.input = 0
+    _call_tokens.output = 0
+    return tok
 
 _SYSTEM_PROMPT = """\
 You are a precise code-writing assistant in an automated pipeline.
@@ -863,6 +882,16 @@ def execute_task(
 
     last_err: Exception | None = None
     failed_attempts: list[tuple[str, str, str]] = []  # (provider, model, error)
+    tokens_by_model: dict[str, dict[str, int]] = {}  # accumulated per-attempt token counts
+
+    def _accum_tokens(label: str) -> None:
+        """Read thread-local call tokens and accumulate into tokens_by_model keyed by label."""
+        tok = _get_call_tokens()
+        if label not in tokens_by_model:
+            tokens_by_model[label] = {"input": 0, "output": 0}
+        tokens_by_model[label]["input"]  += tok["input"]
+        tokens_by_model[label]["output"] += tok["output"]
+
     for provider, model in attempts:
         # Gate the attempt by provider class. METERED providers (anthropic/openrouter) draw
         # on the per-project dollar budget; OAUTH providers (codex) draw on a separate flat-rate
@@ -918,16 +947,30 @@ def execute_task(
                     )
             record_role_event("worker", provider=provider, model=model, success=True,
                               fallback=bool(failed_attempts), latency_s=time.monotonic() - _t0)
+            _accum_tokens(label)
+            if tokens_by_model:
+                parsed["tokens_by_model"] = dict(tokens_by_model)
+                # Persist tokens to mission_control.json without requiring scheduler changes.
+                task_id = getattr(task, "id", None)
+                if task_id:
+                    try:
+                        from state_writer import writer as _sw
+                        _sw.on_task_tokens(task_id, tokens_by_model)
+                    except Exception:  # noqa: BLE001
+                        pass  # telemetry failure must never abort a successful task
             return parsed
 
         except ValueError:
             record_role_event("worker", provider=provider, model=model, success=False,
                               schema_fail=True, latency_s=time.monotonic() - _t0)
+            _get_call_tokens()  # drain thread-local on schema-fail before raising
             raise  # Bad output format — let scheduler handle via EXECUTION_ERROR
 
         except Exception as exc:  # noqa: BLE001
             record_role_event("worker", provider=provider, model=model, success=False,
                               latency_s=time.monotonic() - _t0)
+            label_fail = model if provider == "ollama" else f"{provider}/{model}"
+            _accum_tokens(label_fail)  # capture any partial tokens from failed attempt
             # Infrastructure failure on Ollama (server unreachable) — do NOT escalate
             # to cloud. Anthropic escalation is for capability failures only (bad output,
             # wrong format). A down Ollama server should fail the task, not burn API credits.
@@ -1041,7 +1084,7 @@ def planning_call(
     role: str = "planning",
     codex_model: str | None = None,
     sonnet_model: str = "claude-sonnet-4-6",
-    opus_model: str = "claude-opus-4-8",
+    opus_model: str = OPUS_MODEL,
 ) -> dict:
     """Codex-first planning helper for strict-schema control-plane roles (Creative Director,
     Technical Architect, later the orchestrator). Tries the cheapest *reliable* tier first:
@@ -1133,10 +1176,10 @@ def _call_ollama(model: str, system: str, user: str) -> str:
         options={"temperature": 0.15, "num_predict": 8192},
     )
     from cost import record_ollama_usage
-    record_ollama_usage(
-        prompt_tokens=getattr(response, "prompt_eval_count", None) or 0,
-        eval_tokens=getattr(response, "eval_count", None) or 0,
-    )
+    prompt_toks = getattr(response, "prompt_eval_count", None) or 0
+    eval_toks   = getattr(response, "eval_count", None) or 0
+    record_ollama_usage(prompt_tokens=prompt_toks, eval_tokens=eval_toks)
+    _set_call_tokens(prompt_toks, eval_toks)
     return response.message.content.strip()
 
 
@@ -1160,6 +1203,9 @@ def _call_anthropic(model: str, system: str, user: str, label: str = "worker-esc
     )
     log_cache_usage(response.usage, label)
     record_usage(response.usage, model, label)
+    inp = getattr(response.usage, "input_tokens", 0) or 0
+    out = getattr(response.usage, "output_tokens", 0) or 0
+    _set_call_tokens(inp, out)
     return response.content[0].text.strip()
 
 
@@ -1239,6 +1285,9 @@ def _call_codex(model: str, system: str, user: str) -> str:
         if not text:
             text = (result.stdout or "").strip()
         record_oauth_usage("codex", success=True, latency_s=time.monotonic() - start, tokens=0)
+        # Codex CLI does not expose per-call token counts; record 0 so the per-task
+        # accumulator still sees an entry for this model.
+        _set_call_tokens(0, 0)
         return text
     except BaseException:
         # Count attempted invocations too — a failed call (exe missing, timeout, nonzero exit,
@@ -1321,6 +1370,9 @@ def _call_grok(model: str, system: str, user: str) -> str:
             raise RuntimeError(f"grok -p exited {result.returncode}: ...{tail}")
         text = _extract_grok_text(result.stdout or "")
         record_oauth_usage("grok", success=True, latency_s=time.monotonic() - start, tokens=0)
+        # Grok CLI ($0 OAuth) does not expose per-call token counts; record 0 so the
+        # per-task accumulator still sees an entry for this model.
+        _set_call_tokens(0, 0)
         return text
     except BaseException:
         # Count attempted invocations too — a failed call (exe missing, timeout, nonzero exit,

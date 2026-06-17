@@ -1,0 +1,21 @@
+:root {
+  --color-bg: #0d0d0d;
+  --color-green: #00ff41;
+  --color-amber: #ffb300;
+  --color-dim-green: #1a6b2a;
+  --color-muted: #555;
+  --color-text: #c0c0c0;
+  --font-mono: 'Courier New', monospace;
+  --z-canvas: 0;
+  --z-ui: 10;
+}
+
+body {
+  box-sizing: border-box;
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+}

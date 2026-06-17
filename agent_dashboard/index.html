@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AGENT MISSION CONTROL</title>
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/components.css">
+</head>
+<body>
+  <canvas id="matrix-canvas"></canvas>
+
+  <div id="app">
+    <header id="status-bar">
+      <h1>AGENT MISSION CONTROL</h1>
+      <div class="status-info">
+        <span id="session-scope"></span>
+        <span id="agent-count"></span>
+        <span id="clock"></span>
+      </div>
+    </header>
+
+    <div id="unreachable-banner" hidden>Server unreachable — retrying…</div>
+
+    <main id="dashboard">
+      <section id="agent-panel">
+        <div id="agent-panel-header">
+          <h2>Agents</h2>
+          <div id="cancel-result"></div>
+        </div>
+        <section id="agent-list"></section>
+        <div id="empty-state" hidden>No live agents.</div>
+        <div id="session-totals" hidden></div>
+      </section>
+
+      <div id="git-panel"></div>
+    </main>
+  </div>
+
+  <div id="transcript-drawer">
+    <div id="transcript-drawer-header">
+      <button id="close-drawer" type="button">Close</button>
+    </div>
+    <div id="transcript-log"></div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

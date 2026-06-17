@@ -86,6 +86,7 @@ class StateWriter:
                 "files": t.get("files", []),
                 "model_used": None,
                 "error_log": None,
+                "tokens_by_model": {},
             }
             for t in tasks
         ]
@@ -99,8 +100,25 @@ class StateWriter:
         self._event(f"▶ {task_id} started")
         self._write()
 
-    def on_task_done(self, task_id: str, model_used: str) -> None:
+    def on_task_tokens(self, task_id: str,
+                       tokens_by_model: dict[str, dict[str, int]]) -> None:
+        """Merge per-attempt per-model token counts into the named task entry.
+
+        Called by worker.execute_task immediately after a successful provider call so the
+        scheduler doesn't need to be modified.  Additive: retried tasks accumulate tokens
+        across all attempts (each rung's spend is preserved even when a later rung succeeds
+        and overwrites model_used).
+        """
+        if tokens_by_model:
+            self._merge_task_tokens(task_id, tokens_by_model)
+            self._write()
+
+    def on_task_done(self, task_id: str, model_used: str,
+                     tokens_by_model: dict | None = None) -> None:
         self._update_task(task_id, status="done", model_used=model_used, error_log=None)
+        # Merge per-model token counts into the task entry (additive across retries).
+        if tokens_by_model:
+            self._merge_task_tokens(task_id, tokens_by_model)
         self._event(f"✓ {task_id} done  [{model_used}]")
         obj = self._task_objective(task_id)
         self._last_worker_model = model_used
@@ -213,6 +231,7 @@ class StateWriter:
                 "files": t.get("files", []),
                 "model_used": None,
                 "error_log": None,
+                "tokens_by_model": {},
             })
         self._event(f"Heal tasks added — {len(new_tasks)} fix task(s) queued")
         self._write()
@@ -366,6 +385,23 @@ class StateWriter:
         self._write()
 
     # ── Internals ─────────────────────────────────────────────────────────────
+
+    def _merge_task_tokens(self, task_id: str,
+                           new_tokens: dict[str, dict[str, int]]) -> None:
+        """Additively merge per-model token counts into the named task's tokens_by_model dict.
+
+        This is additive so retried tasks accumulate tokens across all attempts (each rung's
+        spend is preserved even when a later rung succeeds and overwrites model_used).
+        """
+        for t in self._state["tasks"]:
+            if t["id"] == task_id:
+                tbm = t.setdefault("tokens_by_model", {})
+                for mdl, tok in new_tokens.items():
+                    if mdl not in tbm:
+                        tbm[mdl] = {"input": 0, "output": 0}
+                    tbm[mdl]["input"]  += int(tok.get("input",  0) or 0)
+                    tbm[mdl]["output"] += int(tok.get("output", 0) or 0)
+                return
 
     def _update_task(self, task_id: str, **kwargs) -> None:
         for t in self._state["tasks"]:
