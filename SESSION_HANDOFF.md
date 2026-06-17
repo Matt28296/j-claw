@@ -5,8 +5,25 @@ Two systems:
 - **OpenClaw** = Telegram bot front-end (routing only). Config: `C:\Users\Tyler\.openclaw\`
 - **J-Claw** = the build pipeline. Code: `C:\Users\Tyler\Desktop\Jarvis-Claw\harness\`
 
-**PRs #10–#111 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89, + CD validator hardening #103 + routing-review plan amendments #104, + orchestrator Gemini **per-day** quota latch + free-first Codex→Sonnet→Opus chain + offline Matrix agent-dashboard + j-claw OAuth-tier/token tracking **#105** (squash `3b71f54`), + **#107** Claude Max CLI OAuth worker rung `claude_cli` (squash `b4b7c62`, live-validated; ships inert in-repo but **now enabled in the operator's `harness/.env`**), + **#111** PR-#105 follow-up cleanups (squash `e78a62d`); **#106/#108/#109/#110** are docs syncs). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (interpretation-risk routing + per-role quotas) is next. **Open PRs: #73** (DRAFT operator WIP salvage — leave parked).
+**PRs #10–#113 are MERGED to `main`** (role-routing overhaul Phases 0–3: #92/#94/#95/#96, + Grok rung #91, + corrective fixes #98, + docs syncs #99–#102, + dead-`groq`-config removal #89, + CD validator hardening #103 + routing-review plan amendments #104, + orchestrator Gemini **per-day** quota latch + free-first Codex→Sonnet→Opus chain + offline Matrix agent-dashboard + j-claw OAuth-tier/token tracking **#105** (squash `3b71f54`), + **#107** Claude Max CLI OAuth worker rung `claude_cli` (squash `b4b7c62`, live-validated; ships inert in-repo but **now enabled in the operator's `harness/.env`**), + **#111** PR-#105 follow-up cleanups (squash `e78a62d`); **#106/#108/#109/#110/#112/#113** are docs syncs). Phases 0–3 were then audited by a 5-agent review team + Codex; the corrective fixes landed in **#98 (`811bab9`)**. Phase 4 (interpretation-risk routing + per-role quotas) is next. **Open PRs: #73** (DRAFT operator WIP salvage — leave parked).
 Direct push to `main` is intentionally blocked — land changes via PR.
+
+---
+
+## ⏭️ NEXT — APPROVED ROADMAP (2026-06-17): Claude-Code-style upgrades
+
+Prioritized via a Codex debate. **Full plan:** `C:\Users\Tyler\.claude\plans\after-verifying-that-the-vast-narwhal.md`. Each item is its OWN PR; **none started yet.**
+
+Order most→least important:
+1. **#5 Append-only replayable session log** — FIRST. The observability substrate; you can't safely gate/tune an unattended system you can't replay.
+2. **#6 Action-risk classification + enforcement gateway** — one choke point scoring every dangerous op (install/deploy/git/delete) by blast radius.
+3. **#1 Permission modes** — `read_only`/`ask_before_write`/`auto_safe`/`dangerous_skip`; a *separate policy layer* over #6 (ship together, design apart).
+4. **#3 Git-worktree isolation per worker** — robustness/verify-before-merge, NOT core safety.
+5. **#2 Hybrid patch editing** — strong rungs only; full-file stays default for weak Ollama workers (a global migration would fight the local-first reliability principle).
+6. **#4 Connector capability-registry** — a small internal registry first, NOT full MCP (a trap for a single-operator system).
+
+**Recommended first milestone:** #5 + a **logging-only** action gateway (classify + log, don't block yet; set gate thresholds from real evidence).
+**Before the first impl PR:** re-scan the safety + worker-editing execution surfaces — 2 Explore agents hit the Claude session limit mid-planning, so that mapping is grounded in session knowledge + the Codex debate rather than a fresh sweep.
 
 ---
 
