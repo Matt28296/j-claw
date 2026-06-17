@@ -124,10 +124,13 @@ j-claw/
 ├── run.bat                       Entry point (Windows)
 ├── bot.bat                       Telegram bot entry point
 ├── dashboard.py                  Mission Control dashboard server (port 8765, auto-starts)
+├── cc_dashboard.py               Claude Code session dashboard server (port 8766, read-only)
 ├── openclaw-skill/
 │   └── SKILL.md                  OpenClaw skill — invoke j-claw from Telegram/WhatsApp
 ├── dashboard/
 │   └── index.html                Live pipeline dashboard (dark theme, auto-polling)
+├── cc_dashboard/
+│   └── index.html                Claude Code session dashboard (read-only, tails session JSONL)
 └── harness/
     ├── main.py                   CLI + pipeline loop (Creative Director → Architect → INIT)
     ├── creative_director.py      Creative Director — intent → CREATIVE_BRIEF (WHAT)
@@ -482,6 +485,26 @@ Live panels:
 - **OpenClaw Banner** — purple APPROVED stamp when claude CLI is on PATH
 
 **Copy Logs button** — structured plain-text snapshot of all pipeline state to clipboard.
+
+### Claude Code Session Dashboard (`cc_dashboard.py`, port 8766)
+
+A separate, **read-only** dashboard for watching an interactive **Claude Code** session (distinct from
+the build pipeline above). It tails the active Claude Code session transcript on disk and renders it live
+— no configuration, no API keys, and **zero token cost** (pure local file I/O; it makes no LLM calls).
+
+```powershell
+python cc_dashboard.py            # http://127.0.0.1:8766/cc_dashboard/index.html
+python cc_dashboard.py --session <uuid> --no-browser   # pin a session / suppress auto-open
+```
+
+Live panels: **session vitals** (cwd, branch, model, plan/permission mode, elapsed), a turn-by-turn
+**timeline** (user → tool call → result ✓/✗ → assistant text), a **sub-agent fleet** (every `Agent`
+spawn with status/duration/result, sourced from the per-agent transcripts), **tokens & context**
+(cost tokens, cache-read shown separately, est. cost, context-window fill %), and **files / git / PRs**.
+
+It defaults to `127.0.0.1` only (the transcript contains raw prompts + tool I/O — never bind it to a
+LAN), and is fully self-contained (inline CSS/JS, zero external refs). A background tailer reads only the
+newly-appended bytes of the JSONL each second and writes an atomic `cc_state.json` the page polls.
 
 ---
 
