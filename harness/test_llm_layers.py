@@ -1536,7 +1536,7 @@ class TestClaudeCliWorkerRung(unittest.TestCase):
         self.assertGreaterEqual(reserved["oauth"], 1, "expected a claude_cli oauth reservation")
         self.assertEqual(before, after, "oauth claude_cli call must NOT touch the dollar budget")
 
-    # ── 6. _call_claude_cli subprocess shape (headless json, model, no agentic tools, UTF-8) ──
+    # ── 6. _call_claude_cli subprocess shape: no-tools posture, system-prompt-file, UTF-8 ──
     def test_call_claude_cli_subprocess_shape(self):
         w = self._w
         captured = {}
@@ -1556,11 +1556,42 @@ class TestClaudeCliWorkerRung(unittest.TestCase):
         self.assertIn("-p", cmd)
         self.assertIn("--output-format", cmd); self.assertIn("json", cmd)
         self.assertIn("--model", cmd); self.assertIn("sonnet", cmd)
-        self.assertIn("--disallowedTools", cmd)
+        # Hardened constraint posture (NOT a denylist): tools off, MCP off, safe-mode, no slash cmds.
+        self.assertIn("--tools", cmd)
+        self.assertIn("--strict-mcp-config", cmd)
+        self.assertIn("--safe-mode", cmd)
+        self.assertIn("--disable-slash-commands", cmd)
+        self.assertNotIn("--disallowedTools", cmd, "denylist replaced by the no-tools posture")
+        self.assertNotIn("--dangerously-skip-permissions", cmd)
+        # The worker system prompt goes via --system-prompt-file; stdin carries ONLY the task JSON.
+        self.assertIn("--system-prompt-file", cmd)
         self.assertEqual(captured["kwargs"].get("encoding"), "utf-8")
         sent = captured["kwargs"].get("input") or ""
-        self.assertIn("SYSPROMPT", sent); self.assertIn("USERPROMPT", sent)
+        self.assertEqual(sent, "USERPROMPT", "stdin must be the user/task content only")
+        self.assertNotIn("SYSPROMPT", sent, "system prompt must NOT be piped on stdin")
         self.assertIn("files", out, "the inner worker contract is extracted from result")
+
+    # ── 7. the subprocess env is scrubbed of API-key creds so it uses the subscription ──
+    def test_call_claude_cli_scrubs_metered_credentials(self):
+        w = self._w
+        captured = {}
+
+        def capture_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env") or {}
+            m = MagicMock(); m.returncode = 0; m.stderr = ""
+            m.stdout = json.dumps({"is_error": False, "result": self._good_output()})
+            return m
+
+        with patch.dict(w.os.environ, {"ANTHROPIC_API_KEY": "sk-should-be-stripped",
+                                       "ANTHROPIC_AUTH_TOKEN": "tok",
+                                       "CLAUDE_CODE_USE_BEDROCK": "1"}, clear=False), \
+             patch.object(w.subprocess, "run", side_effect=capture_run):
+            w._call_claude_cli("sonnet", "SYS", "USER")
+        env = captured["env"]
+        self.assertNotIn("ANTHROPIC_API_KEY", env,
+                         "ANTHROPIC_API_KEY must be scrubbed or the rung silently bills the metered API")
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
+        self.assertNotIn("CLAUDE_CODE_USE_BEDROCK", env)
 
 
 class TestRoleMetrics(unittest.TestCase):

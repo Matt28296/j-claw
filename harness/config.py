@@ -104,9 +104,21 @@ GROK_TIMEOUT: int = int(os.getenv("GROK_TIMEOUT", "300"))  # seconds per grok -p
 # (separate subscriptions), this draws on the SAME Max usage pool as the operator's interactive
 # Claude Code — a heavy build can throttle interactive use and vice-versa. So it's placed BELOW
 # Codex/Grok and its per-run cap defaults LOW. Shelled out in non-interactive mode (see
-# worker._call_claude_cli). Ships INERT (disabled by default) and needs a live smoke test before
-# enabling — `claude -p` is the Claude Code AGENT, not a bare model call, so output shape / tool
-# behaviour must be validated live (mirrors how the Codex rung was live-validated in PR #84).
+# worker._call_claude_cli). Ships INERT (disabled by default); `claude -p` is the Claude Code AGENT,
+# not a bare model call, so it is constrained hard (no tools, MCP off, safe-mode, worker system
+# prompt via --system-prompt-file) and its credentials env is scrubbed so it uses the subscription.
+#
+# LIVE-VALIDATION CHECKLIST — do ALL of these before setting CLAUDE_CLI_ENABLED=true (mirrors how the
+# Codex rung was validated in PR #84, which found a live-only UTF-8 bug):
+#   1. AUTH: confirm a `claude -p` call actually bills the Max SUBSCRIPTION, not the metered API
+#      (i.e. the env scrub works) — e.g. run with no ANTHROPIC_API_KEY and confirm it still answers.
+#   2. CONTRACT: confirm that with --tools "" + --safe-mode + the worker --system-prompt-file it emits
+#      a clean {"files":[...]} JSON object (no agent preamble, no tool attempts, no markdown fences).
+#   3. LATCH: confirm a usage-limit / 429 response trips _claude_cli_disabled and skips to the API rung.
+#   4. ToS: confirm this scale of automated subscription use is acceptable under Anthropic's current
+#      Consumer Terms (a personal Max sub powering an automated build farm is a risk boundary — for
+#      team/commercial use prefer Team/Enterprise or Console API billing).
+# Keep the rung OUT of the default WORKER_LADDER until the above pass.
 CLAUDE_CLI_ENABLED: bool = os.getenv("CLAUDE_CLI_ENABLED", "false").lower() == "true"
 CLAUDE_CLI_HOME: str = os.getenv("CLAUDE_CLI_HOME", "")  # empty = use claude's default config dir (sets CLAUDE_CONFIG_DIR)
 CLAUDE_CLI_MODEL: str = os.getenv("CLAUDE_CLI_MODEL", "sonnet")  # alias the Claude CLI accepts (sonnet|opus|haiku) or a full id
