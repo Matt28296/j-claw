@@ -134,6 +134,117 @@ def _add_tokens(by_model, model, inp, out, cw, cr):
     m["cache_read"] += cr
 
 
+# ── Workflow-agent scanning ─────────────────────────────────────────────────
+
+def _wf_name_for(session_dir: Path, wf_id: str) -> str:
+    """Derive a human-readable workflow name from the script filename.
+
+    Scripts are stored as <name>-<wf_id>.js in <session_dir>/workflows/scripts/.
+    Example: phase4-difficulty-routing-wf_0c65d783-638.js → phase4-difficulty-routing
+    """
+    scripts_dir = session_dir / "workflows" / "scripts"
+    if scripts_dir.is_dir():
+        for f in scripts_dir.iterdir():
+            if f.suffix == ".js" and wf_id in f.stem:
+                name = f.stem.replace(f"-{wf_id}", "")
+                if name:
+                    return name
+    return wf_id[:16]
+
+
+def _agent_prompt_snippet(wf_dir: Path, agent_id: str) -> str:
+    """Return the first ~120 chars of the agent's initial user prompt."""
+    jsonl = wf_dir / f"agent-{agent_id}.jsonl"
+    if not jsonl.exists():
+        return ""
+    try:
+        with open(jsonl, encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    ev = json.loads(raw)
+                    if ev.get("type") != "user":
+                        continue
+                    content = (ev.get("message") or {}).get("content", "")
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                content = block.get("text", "")
+                                break
+                    text = str(content).split("\n")[0].strip()
+                    return _truncate(text, 120)
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+                break
+    except OSError:
+        pass
+    return ""
+
+
+def _scan_workflow_agents(session_path: Path) -> list:
+    """Scan workflow journal files and return agent records for all workflows.
+
+    Reads only journal.jsonl (tiny) for status and the first line of each
+    agent JSONL for a prompt snippet — no full-file reads, safe to call every poll.
+    """
+    if not session_path:
+        return []
+    session_dir = session_path.parent / session_path.stem
+    workflows_dir = session_dir / "subagents" / "workflows"
+    if not workflows_dir.is_dir():
+        return []
+
+    agents = []
+    for wf_dir in sorted(workflows_dir.iterdir()):
+        if not wf_dir.is_dir():
+            continue
+        journal = wf_dir / "journal.jsonl"
+        if not journal.exists():
+            continue
+
+        wf_id = wf_dir.name
+        wf_name = _wf_name_for(session_dir, wf_id)
+        started: dict[str, float] = {}   # agentId -> order (insertion index)
+        results: dict[str, str] = {}
+
+        try:
+            with open(journal, encoding="utf-8", errors="replace") as f:
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        ev = json.loads(raw)
+                        aid = ev.get("agentId")
+                        if not aid:
+                            continue
+                        if ev.get("type") == "started" and aid not in started:
+                            started[aid] = len(started)
+                        elif ev.get("type") == "result":
+                            results[aid] = _truncate(ev.get("result") or "", 300)
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
+
+        for aid in started:
+            status = "done" if aid in results else "running"
+            agents.append({
+                "agentId": aid,
+                "status": status,
+                "subagent_type": wf_name,
+                "description": _agent_prompt_snippet(wf_dir, aid),
+                "result": results.get(aid),
+                "resolvedModel": None,
+                "duration_s": None,
+                "tokens": {},
+            })
+
+    return agents
+
+
 # ── Tailer ─────────────────────────────────────────────────────────────────
 
 
@@ -521,6 +632,7 @@ class Tailer:
         elapsed_s = int((self.last_event_epoch or now) - self.started_epoch) \
             if self.started_epoch else 0
         agents = [self.agents[a] for a in self.agent_order]
+        agents += _scan_workflow_agents(self.path)
         # Per-model token usage = main session + each sub-agent (by its resolved
         # model). Sub-agent tokens are recomputed fresh each poll, so merge here
         # rather than accumulating (avoids double-counting across polls).
