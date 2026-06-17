@@ -1569,7 +1569,12 @@ class TestRoleCutover(unittest.TestCase):
 
     def test_creative_director_routes_through_planning_call(self):
         import creative_director as cd, worker as w
-        brief = {"output_type": "web", "features": ["a"], "scale": "mvp"}
+        brief = {
+            "output_type": "website",
+            "features": ["a"],
+            "scale": "mvp",
+            "visual_identity": {"style": "flat"},
+        }
         captured = {}
 
         def fake_planning(system, user, validate_fn, *, role=None, **kw):
@@ -1603,11 +1608,94 @@ class TestRoleCutover(unittest.TestCase):
         with patch.object(w, "planning_call", side_effect=fake_planning), \
              patch.object(ta, "ProjectMemory") as mock_pm, \
              tempfile.TemporaryDirectory() as tmp:
-            out = ta.TechnicalArchitect().review({"output_type": "web"}, "intent", Path(tmp))
+            out = ta.TechnicalArchitect().review({"output_type": "website"}, "intent", Path(tmp))
 
         self.assertEqual(out["confirmed_stack"], "vanilla")
         self.assertEqual(captured["role"], "architect")
         mock_pm.assert_called()  # ProjectMemory is still seeded after planning
+
+
+class TestCreativeDirectorValidator(unittest.TestCase):
+    """The hardened CREATIVE_BRIEF validator: a thin/malformed brief must escalate (raise) rather
+    than pass silently and mis-route downstream. Pure function — no planning_call involved."""
+
+    @staticmethod
+    def _brief(**overrides):
+        brief = {
+            "output_type": "website",
+            "features": ["landing page", "contact form"],
+            "scale": "mvp",
+            "visual_identity": {"style": "flat", "palette": "#000", "typography": "sans"},
+        }
+        brief.update(overrides)
+        return brief
+
+    def test_valid_brief_passes(self):
+        import creative_director as cd
+        cd._validate(self._brief())  # must not raise
+
+    def test_non_dict_raises(self):
+        import creative_director as cd
+        with self.assertRaises(ValueError):
+            cd._validate(["not", "a", "dict"])
+
+    def test_missing_output_type_raises(self):
+        import creative_director as cd
+        b = self._brief()
+        del b["output_type"]
+        with self.assertRaises(ValueError):
+            cd._validate(b)
+
+    def test_output_type_not_in_enum_raises(self):
+        import creative_director as cd
+        # "web" was the old loose value — no longer valid; "website" is the real enum member.
+        with self.assertRaises(ValueError):
+            cd._validate(self._brief(output_type="web"))
+
+    def test_missing_scale_raises(self):
+        import creative_director as cd
+        b = self._brief()
+        del b["scale"]
+        with self.assertRaises(ValueError):
+            cd._validate(b)
+
+    def test_scale_not_in_enum_raises(self):
+        import creative_director as cd
+        with self.assertRaises(ValueError):
+            cd._validate(self._brief(scale="enterprise"))
+
+    def test_empty_features_raises(self):
+        import creative_director as cd
+        with self.assertRaises(ValueError):
+            cd._validate(self._brief(features=[]))
+
+    def test_over_inflated_features_raises(self):
+        import creative_director as cd
+        bloated = [f"feature {i}" for i in range(cd._MAX_FEATURES + 1)]
+        with self.assertRaises(ValueError):
+            cd._validate(self._brief(features=bloated))
+
+    def test_features_at_cap_passes(self):
+        import creative_director as cd
+        at_cap = [f"feature {i}" for i in range(cd._MAX_FEATURES)]
+        cd._validate(self._brief(features=at_cap))  # must not raise (boundary inclusive)
+
+    def test_non_code_requires_visual_identity(self):
+        import creative_director as cd
+        with self.assertRaises(ValueError):
+            cd._validate(self._brief(visual_identity={}))
+        b = self._brief()
+        del b["visual_identity"]
+        with self.assertRaises(ValueError):
+            cd._validate(b)
+
+    def test_code_exempt_from_visual_identity(self):
+        import creative_director as cd
+        # Code prompts are explicitly allowed minimal/empty visual_identity by the prompt.
+        cd._validate(self._brief(output_type="code", visual_identity={}))
+        b = self._brief(output_type="code")
+        del b["visual_identity"]
+        cd._validate(b)  # must not raise
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1631,6 +1719,7 @@ if __name__ == "__main__":
         TestRoleMetrics,
         TestPlanningCall,
         TestRoleCutover,
+        TestCreativeDirectorValidator,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 
