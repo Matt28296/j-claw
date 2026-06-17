@@ -61,6 +61,11 @@ class StateWriter:
         if self._session is not None:
             self._session.emit(event, **fields)
 
+    def on_action(self, kind: str, risk: str, reason: str = "", detail: str = "") -> None:
+        """Record a classified side-effecting action to the session log (observe-only; never blocks).
+        Part of the action-risk layer (roadmap #6); driven by permissions.observe()."""
+        self._sess("risk_classified", kind=kind, risk=risk, reason=reason, detail=(detail or "")[:200])
+
     def on_project_start(self, intent: str, output_dir: str) -> None:
         self._start_time = _now()
         # Open a fresh append-only transcript for this run (emits mission_started). A recursive
