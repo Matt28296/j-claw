@@ -173,6 +173,9 @@ ORCHESTRATOR_EMERGENCY_PROVIDER: str = os.getenv(
     "anthropic" if os.getenv("ANTHROPIC_API_KEY") else "",
 )
 EMERGENCY_ORCHESTRATOR_MODEL: str = os.getenv("EMERGENCY_ORCHESTRATOR_MODEL", "claude-sonnet-4-6")
+# Last-resort Opus model id, shared by the emergency orchestrator chain and planning_call's Opus
+# tier so a model-id roll is a single config change, not a hunt for hardcoded literals.
+OPUS_MODEL: str = os.getenv("OPUS_MODEL", "claude-opus-4-8")
 
 # Gemini free-tier quota fail-fast (orchestrator). When True, a QUOTA-CLASS 429 from the Gemini
 # orchestrator (RESOURCE_EXHAUSTED / daily-limit, distinct from a transient per-minute rate-limit)

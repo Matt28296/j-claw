@@ -1750,6 +1750,33 @@ class TestGeminiQuotaFailfast(unittest.TestCase):
         self.assertFalse(_is_quota_class_429(Exception("429 too many requests, retry in 12s")))
         self.assertFalse(_is_quota_class_429(Exception("503 UNAVAILABLE")))
 
+    # ── per-minute vs per-day RESOURCE_EXHAUSTED must be distinguished by the violation period ──
+    def test_per_minute_resource_exhausted_not_latched(self):
+        """Gemini returns RESOURCE_EXHAUSTED + QuotaFailure for BOTH a per-minute throttle and a
+        per-day outage; only the per-day one may latch (the per-minute clears within the run)."""
+        from orchestrator import _is_quota_class_429
+        per_minute = _make_exc(Exception, "429 RESOURCE_EXHAUSTED", {"error": {
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}],
+            }],
+        }})
+        self.assertFalse(_is_quota_class_429(per_minute),
+                         "a per-minute RESOURCE_EXHAUSTED must NOT latch Gemini for the run")
+        per_day = _make_exc(Exception, "429 RESOURCE_EXHAUSTED", {"error": {
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [{
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                "violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}],
+            }],
+        }})
+        self.assertTrue(_is_quota_class_429(per_day),
+                        "a per-day RESOURCE_EXHAUSTED is a real daily outage and must latch")
+        # And the common free-tier per-minute message phrasing must also be treated as transient.
+        self.assertFalse(_is_quota_class_429(
+            Exception("429 Quota exceeded for quota metric 'generate_content' per minute")))
+
     # ── (1) a quota-class 429 latches Gemini + fails fast on attempt 1 ─────────
     def test_quota_429_latches_and_fails_fast(self):
         from openai import RateLimitError
@@ -1835,7 +1862,6 @@ class TestCodexOrchestrator(unittest.TestCase):
         orch._model = "gpt-5.5"
         orch._system_prompt = "sys"
         orch._provider_name = "codex"
-        orch._planning_calls = 0
         return orch
 
     # ── (4) validates on first try ────────────────────────────────────────────
@@ -1884,12 +1910,19 @@ class TestCodexOrchestrator(unittest.TestCase):
     # ── CODEX_PLANNING_RESERVE bounds orchestrator Codex draw ──────────────────
     def test_planning_reserve_caps_calls(self):
         orch = self._make()
-        orch._planning_calls = 99  # already past any reasonable reserve
+        self._o._codex_planning_calls = 99  # module-level budget, already past any reasonable reserve
         with patch.object(self._w, "_call_codex") as mc, \
              patch.object(self._o, "CODEX_PLANNING_RESERVE", 6):
             with self.assertRaises(RuntimeError):
                 orch.call({"system_state": "INIT"})
         mc.assert_not_called()
+
+    # ── the planning budget is reset by reset_orchestrator_run() (documented contract) ─────────
+    def test_planning_reserve_reset_by_run_reset(self):
+        self._o._codex_planning_calls = 99
+        self._o.reset_orchestrator_run()
+        self.assertEqual(self._o._codex_planning_calls, 0,
+                         "reset_orchestrator_run() must clear the Codex planning budget")
 
 
 class TestCompositeChain(unittest.TestCase):

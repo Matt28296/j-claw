@@ -17,7 +17,7 @@ from config import (
     WORKER_FALLBACKS, ANTHROPIC_API_KEY, OPENROUTER_API_KEY,
     WORKER_LADDER, LOCAL_FIRST_TASK_TYPES, MAX_PAID_WORKER_CALLS,
     WORKER_TASK_TIMEOUT,
-    CODEX_CLI_ENABLED, CODEX_HOME, CODEX_MODEL, CODEX_EFFORT,
+    CODEX_CLI_ENABLED, CODEX_HOME, CODEX_MODEL, CODEX_EFFORT, OPUS_MODEL,
     CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT, OAUTH_PROVIDERS, METERED_PROVIDERS,
     GROK_CLI_ENABLED, GROK_HOME, GROK_MODEL, GROK_MAX_CALLS, GROK_TIMEOUT,
 )
@@ -1084,7 +1084,7 @@ def planning_call(
     role: str = "planning",
     codex_model: str | None = None,
     sonnet_model: str = "claude-sonnet-4-6",
-    opus_model: str = "claude-opus-4-8",
+    opus_model: str = OPUS_MODEL,
 ) -> dict:
     """Codex-first planning helper for strict-schema control-plane roles (Creative Director,
     Technical Architect, later the orchestrator). Tries the cheapest *reliable* tier first:

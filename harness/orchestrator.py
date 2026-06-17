@@ -12,7 +12,7 @@ from config import (
     ORCHESTRATOR_MAX_TOKENS, EXECUTION_ERROR_MODEL, ORCHESTRATOR_TIMEOUT,
     GOOGLE_API_KEY, GEMINI_ORCHESTRATOR_MODEL,
     ORCHESTRATOR_EMERGENCY_PROVIDER, EMERGENCY_ORCHESTRATOR_MODEL,
-    GEMINI_QUOTA_FAILFAST, CODEX_PLANNING_RESERVE,
+    GEMINI_QUOTA_FAILFAST, CODEX_PLANNING_RESERVE, OPUS_MODEL,
 )
 from validator import validate_response, OrchestratorOutputError
 from cache_telemetry import log_cache_usage
@@ -33,10 +33,29 @@ _INPUT_FILE = Path("orchestrator_input.json")
 # burning the 30-60s retryDelay) on each of the ~6-8 calls in a build. Reset in reset_orchestrator_run().
 _gemini_quota_disabled = False
 
+# Per-run count of orchestrator Codex planning calls, bounded by CODEX_PLANNING_RESERVE so planning
+# can't drain the shared worker-rescue Codex capacity. Module-level (one budget per run regardless of
+# how many CodexOrchestrator instances exist) so it is actually cleared by reset_orchestrator_run() —
+# a per-instance counter would leak across an in-process run reuse. Reset in reset_orchestrator_run().
+_codex_planning_calls = 0
 
-# Quota-class signatures: a daily/lifetime exhaustion that won't clear within the run, as opposed
-# to a transient per-minute rate-limit (which keeps today's retry/backoff behaviour). Kept narrow so
-# an ordinary burst throttle is NOT misclassified as a hard quota outage.
+
+# Per-MINUTE throttle signatures. CRITICAL: Gemini returns the SAME HTTP 429 + RESOURCE_EXHAUSTED
+# status + QuotaFailure detail for a transient per-minute rate-limit as it does for a daily/lifetime
+# outage — they differ ONLY in the violated quota metric's PERIOD, which appears in the QuotaFailure
+# violation id (e.g. "...PerMinutePerProjectPerModel-FreeTier" vs "...PerDay..."). A per-minute
+# throttle clears within the run, so it must NEVER latch Gemini off; matching it here short-circuits
+# the quota-class check below to False.
+_PER_MINUTE_MARKERS = (
+    "perminute",
+    "per minute",
+    "per_minute",
+    "per-minute",
+    "/ minute",
+)
+
+# Quota-class signatures: a daily/lifetime exhaustion that won't clear within the run. Evaluated only
+# AFTER the per-minute short-circuit, so an ordinary burst throttle is not misclassified.
 _QUOTA_CLASS_MARKERS = (
     "resource_exhausted",
     "quota",
@@ -51,32 +70,39 @@ _QUOTA_CLASS_MARKERS = (
 
 
 def _is_quota_class_429(exc: Exception) -> bool:
-    """True when a Gemini 429/rate-limit error is a QUOTA-class outage (daily RESOURCE_EXHAUSTED /
-    free-tier exhaustion) rather than a transient per-minute throttle. Inspects both the exception
-    text and, when present, the structured error body (Google nests a QuotaFailure /
-    RESOURCE_EXHAUSTED status in error.status / error.details)."""
+    """True ONLY for a daily/lifetime quota exhaustion that won't clear within the run — NOT a
+    transient per-minute throttle. Builds ONE combined blob from the exception text AND the
+    structured error body (so the QuotaFailure violation ids are always in scope — the two are
+    additive, not an either/or early-return), short-circuits to False on any per-minute marker, and
+    only then treats a structured RESOURCE_EXHAUSTED / QuotaFailure or an explicit daily/free-tier
+    phrase as quota-class. Biased toward NOT latching: a wrong 'quota' verdict disables free Gemini
+    for the whole run, whereas a wrong 'transient' verdict only costs one retry/backoff."""
     blob = str(exc).lower()
+    structured_quota = False
     try:
         body = exc.response.json()
-        err = body.get("error", {})
-        status = str(err.get("status", "")).lower()
-        if "resource_exhausted" in status:
-            return True
-        for detail in err.get("details", []):
-            t = str(detail.get("@type", "")).lower()
-            r = str(detail.get("reason", "")).lower()
-            if "quotafailure" in t or "resource_exhausted" in r or "quota" in r:
-                return True
         blob += " " + json.dumps(body).lower()
+        err = body.get("error", {})
+        if "resource_exhausted" in str(err.get("status", "")).lower():
+            structured_quota = True
+        for detail in err.get("details", []):
+            if "quotafailure" in str(detail.get("@type", "")).lower():
+                structured_quota = True
     except Exception:
         pass
+    # Per-minute throttle → transient, never latch (even with RESOURCE_EXHAUSTED / QuotaFailure).
+    if any(m in blob for m in _PER_MINUTE_MARKERS):
+        return False
+    if structured_quota:
+        return True
     return any(m in blob for m in _QUOTA_CLASS_MARKERS)
 
 
 def reset_orchestrator_run() -> None:
     """Reset per-run orchestrator latches. Call at project start, alongside worker.reset_paid_budget()."""
-    global _gemini_quota_disabled
+    global _gemini_quota_disabled, _codex_planning_calls
     _gemini_quota_disabled = False
+    _codex_planning_calls = 0
 
 
 class ManualOrchestrator:
@@ -363,13 +389,13 @@ class CodexOrchestrator:
         self._model = model
         self._system_prompt = ORCHESTRATOR_PROMPT_PATH.read_text(encoding="utf-8")
         self._provider_name = "codex"
-        # Per-run count of orchestrator Codex calls, bounded by CODEX_PLANNING_RESERVE so planning
-        # can't drain the shared worker-rescue Codex capacity. Reset via reset_orchestrator_run().
-        self._planning_calls = 0
+        # NB: the per-run planning-call budget lives in the module-level _codex_planning_calls
+        # (reset by reset_orchestrator_run()), NOT on the instance — see its definition above.
 
     def call(self, payload: dict, max_retries: int = 2) -> dict:
         import worker
         from config import CODEX_MODEL
+        global _codex_planning_calls
         state = payload.get("system_state", "INIT")
         user_message = json.dumps(payload)
         model = self._model or CODEX_MODEL
@@ -379,7 +405,7 @@ class CodexOrchestrator:
             raise RuntimeError("CodexOrchestrator unavailable — Codex CLI not enabled")
 
         for attempt in range(2):  # one same-tier retry for wrapping/truncation
-            if self._planning_calls >= CODEX_PLANNING_RESERVE:
+            if _codex_planning_calls >= CODEX_PLANNING_RESERVE:
                 raise RuntimeError(
                     "CodexOrchestrator skipped — CODEX_PLANNING_RESERVE "
                     f"({CODEX_PLANNING_RESERVE}) exhausted for this run"
@@ -390,7 +416,7 @@ class CodexOrchestrator:
                 raise RuntimeError(
                     "CodexOrchestrator unavailable — Codex latched off or OAuth capacity exhausted"
                 )
-            self._planning_calls += 1
+            _codex_planning_calls += 1
             _t0 = time.monotonic()
             try:
                 raw = worker._call_codex(model, self._system_prompt, user_message)
@@ -498,7 +524,7 @@ def _emergency_chain() -> list:
     if ORCHESTRATOR_EMERGENCY_PROVIDER == "anthropic" and ANTHROPIC_API_KEY:
         # Sonnet first (the existing emergency tier), then Opus as the costliest last resort.
         chain.append(Orchestrator(model=EMERGENCY_ORCHESTRATOR_MODEL))
-        chain.append(Orchestrator(model="claude-opus-4-8"))
+        chain.append(Orchestrator(model=OPUS_MODEL))
     return chain
 
 
