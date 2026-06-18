@@ -1361,6 +1361,22 @@ class TestGrokWorkerRung(unittest.TestCase):
         self.assertEqual(w._extract_grok_text("plain text"), "plain text")
         self.assertEqual(w._extract_grok_text(""), "")
 
+        # Empty-text envelope: grok-build sometimes parks the answer in "thought" with an empty
+        # "text". Fall back to "thought" rather than dropping the generation.
+        thought_only = json.dumps(
+            {"text": "", "thought": contract, "stopReason": "EndTurn", "sessionId": "abc"})
+        self.assertEqual(w._extract_grok_text(thought_only), contract,
+                         "must fall back to .thought when .text is empty")
+
+        # Recognized envelope with NO usable content anywhere → "" (honest empty generation),
+        # NOT the raw envelope. Returning the envelope was the bug: _parse_and_validate would
+        # parse it as a dict-without-files and raise the misleading "missing 'files' list".
+        empty_env = json.dumps(
+            {"text": "  ", "stopReason": "EndTurn", "sessionId": "abc",
+             "requestId": "r1", "thought": ""})
+        self.assertEqual(w._extract_grok_text(empty_env), "",
+                         "empty envelope must yield '' — never the raw envelope JSON")
+
     # ── 9. _call_grok: real body — UTF-8, scratch cwd, correct flags, $0 telem ─
     def test_call_grok_subprocess_shape_and_failed_telemetry(self):
         w = self._w

@@ -1444,7 +1444,17 @@ def _extract_grok_text(stdout: str) -> str:
     The confirmed envelope is a single JSON object with the message in "text"
     (e.g. {"text": "...", "stopReason": "EndTurn", ...}). Falls back defensively: other dict
     shapes, a streaming-json event list, or — if it isn't JSON at all — the raw stdout, since the
-    downstream _parse_and_validate hunts for the {"files":[...]} contract inside whatever it gets."""
+    downstream _parse_and_validate hunts for the {"files":[...]} contract inside whatever it gets.
+
+    Empty-text envelope: grok-build (a reasoning model) intermittently returns an envelope whose
+    "text" is empty because the answer landed in "thought" (reasoning) instead — or it produced
+    only reasoning and no final message. In that case we (1) fall back to "thought" as a last-resort
+    content source, then (2) return "" rather than the raw envelope. Returning the envelope here was
+    a bug: _parse_and_validate would parse it as a dict-without-"files" and raise the misleading
+    "missing 'files' list. Got keys: ['text','stopReason',...]" — masking an empty generation behind
+    a contract error and feeding an unfixable input to EXECUTION_ERROR refinement. "" routes it to an
+    honest empty-output retry instead. The raw-stdout passthrough is preserved ONLY for the
+    not-JSON-at-all case (plain text / streaming lines), where hunting for the contract is valid."""
     s = (stdout or "").strip()
     if not s:
         return ""
@@ -1453,10 +1463,14 @@ def _extract_grok_text(stdout: str) -> str:
     except (json.JSONDecodeError, ValueError):
         return s  # plain text / streaming lines — let _parse_and_validate find the contract
     if isinstance(obj, dict):
-        for key in ("text", "result", "response", "message", "output", "final"):
+        for key in ("text", "result", "response", "message", "output", "final", "thought"):
             v = obj.get(key)
             if isinstance(v, str) and v.strip():
                 return v.strip()
+        # Recognized envelope but no text-bearing key held content (empty generation). Return ""
+        # for an honest empty-output failure — NOT the raw envelope, which mis-parses as a
+        # malformed contract and triggers a pointless refinement loop.
+        return ""
     if isinstance(obj, list):
         for ev in reversed(obj):  # streaming events: last message-bearing event wins
             if isinstance(ev, dict):
