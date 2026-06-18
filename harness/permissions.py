@@ -48,7 +48,11 @@ def classify_action(kind: str, detail: str = "", **ctx) -> tuple[str, str]:
         return "medium", "destructive filesystem delete"
     if k == "llm_cli":
         return "medium", "external LLM CLI — network egress + subscription/credential use"
-    if k in ("build", "test", "render", "shell"):
+    if k == "shell":
+        # Executes an LLM-authored script (render.sh / render_scene.py) via bash/python —
+        # arbitrary local code execution, the same blast radius as a package install.
+        return "high", "executes an LLM-authored script (bash/python) — arbitrary local code execution"
+    if k in ("build", "test", "render"):
         return "low", f"local {k} command"
     return "medium", f"unclassified action ({kind})"
 

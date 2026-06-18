@@ -222,6 +222,8 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
             import os
             os.chmod(path, stat.S_IWRITE)
             func(path)
+        from permissions import observe
+        observe("fs_delete", detail=f"pre-run wipe of output_dir {output_dir}")  # roadmap #6: observe-only
         shutil.rmtree(output_dir, onexc=_force_remove_readonly)
     output_dir.mkdir(parents=True, exist_ok=True)
 

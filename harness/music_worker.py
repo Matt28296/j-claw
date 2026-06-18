@@ -154,6 +154,8 @@ def _render_music(genre: str, duration: int, dest: Path) -> bool:
             FLUIDSYNTH_SOUNDFONT,
             midi_path,
         ]
+        from permissions import observe
+        observe("render", detail="fluidsynth MIDI→WAV synthesis")  # roadmap #6: observe-only
         result = subprocess.run(cmd, capture_output=True, timeout=120)
         if result.returncode != 0:
             stderr = result.stderr.decode("utf-8", errors="replace")[-300:]

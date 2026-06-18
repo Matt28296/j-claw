@@ -73,6 +73,8 @@ def _piper_synthesize(text: str, dest: Path) -> None:
     """Run Piper TTS, writing a WAV to dest.  Piper reads text from stdin."""
     # Piper writes raw PCM to stdout when --output_file is omitted with
     # --output_raw, but using --output_file is simpler and more reliable.
+    from permissions import observe
+    observe("render", detail="piper TTS synthesis")  # roadmap #6: observe-only
     result = subprocess.run(
         [
             PIPER_BINARY,

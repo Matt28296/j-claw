@@ -126,6 +126,8 @@ def generate_video(task, spec: dict, output_dir: Path) -> tuple[list[Path], dict
                 else:
                     parts.append(str(abs_out))
                 console.print(f"  [dim]video: running ffmpeg for {rel_path}[/dim]")
+                from permissions import observe
+                observe("render", detail=f"ffmpeg video render: {rel_path}")  # roadmap #6: observe-only
                 try:
                     # Run from output_dir so the script's relative input paths
                     # (frames/%05d.png, audio/x.wav) resolve correctly. Running

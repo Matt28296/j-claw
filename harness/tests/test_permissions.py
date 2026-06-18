@@ -46,6 +46,8 @@ class TestClassifyAction(unittest.TestCase):
         self.assertEqual(c("llm_cli")[0], "medium")
         self.assertEqual(c("test")[0], "low")
         self.assertEqual(c("build")[0], "low")
+        self.assertEqual(c("render")[0], "low")
+        self.assertEqual(c("shell")[0], "high")  # LLM-authored script exec — arbitrary local code
         self.assertEqual(c("mystery_kind")[0], "medium")  # unclassified → medium, with a reason
         self.assertTrue(c("mystery_kind")[1])
 
