@@ -535,7 +535,7 @@ Every project writes to `harness/projects/<slug>/`:
 | Core pipeline: spec → DAG → code → verify → review → self-heal | ✅ |
 | 15 stacks (including film, tauri, godot, websocket-sse) | ✅ |
 | PWA output, JWT auth, Alembic migrations | ✅ |
-| SD WebUI asset generation + Coqui TTS audio | ✅ |
+| ComfyUI/SD asset generation + Piper TTS narration + FluidSynth music | ✅ |
 | Experience tracker (JSONL fix-outcome log) | ✅ |
 | Orchestrator JSON truncation fix + FORMAT 5 bug fix | ✅ |
 | OpenClaw skill deployed + Telegram bot paired | ✅ |
