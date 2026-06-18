@@ -142,11 +142,16 @@ j-claw/
     ├── scheduler.py              DAG scheduler — context building, memory patch apply, task routing
     ├── worker.py                 Sends tasks to Ollama; 17 stack-specific prompt sets
     ├── video_worker.py           ffmpeg-based video/film pipeline
-    ├── music_worker.py           Music generation (placeholder → MusicGen)
+    ├── music_worker.py           Music generation (algorithmic MIDI → FluidSynth)
     ├── verification.py           Ecosystem detection + ffprobe/frame/security/lighthouse checks
-    ├── asset_worker.py           SD WebUI asset generation + SVG fallback
-    ├── audio_worker.py           Coqui TTS audio generation + silent fallback
+    ├── asset_worker.py           ComfyUI/SD asset generation + SVG fallback
+    ├── audio_worker.py           Piper TTS narration + silent WAV fallback
     ├── experience_log.py         EXECUTION_ERROR outcome tracker (JSONL)
+    ├── session_log.py            Append-only replayable per-run JSONL transcript (sessions/)
+    ├── permissions.py            Action-risk classifier + observe() logging (roadmap #6)
+    ├── risk_evidence.py          Aggregates risk_classified events for threshold tuning
+    ├── worktree_manager.py       Per-task git worktree isolation (create/merge/remove)
+    ├── interpretation_risk.py    Deterministic brief-difficulty scoring → role routing
     ├── telegram_bot.py           Telegram bot — /run /status /cancel /projects
     ├── start_bot.py              Bot entry point
     ├── final_review.py           Claude API code review — stubs, imports, media quality
@@ -185,13 +190,13 @@ j-claw/
 |---|---|---|
 | `INIT` | FORMAT 1 | Orchestrator generates project spec |
 | `SPEC_REVISION` | FORMAT 1 | Re-emit spec with `revision_feedback` applied |
-| `SPEC_ACCEPTED` | FORMAT 2 | Full task DAG — up to 50 tasks with deps, files, criteria |
+| `SPEC_ACCEPTED` | FORMAT 2 | Full task DAG — up to 75 tasks with deps, files, criteria |
 | `EXECUTION_ERROR` | FORMAT 3 | Fix for a failed task: `modify`, `split`, or `deprecate` |
 | `PROJECT_REVIEW` | FORMAT 4 | Final orchestrator verdict: pass or add follow-up tasks |
 | `REVIEW_FAILED` | FORMAT 4 | Self-healing: receives Claude review issues, returns fix tasks |
 | `CONTINUE` | FORMAT 2 | Incremental tasks to add a feature to an existing project |
 
-**FORMAT 5 (oversize)**: if a project exceeds the 50-task budget, orchestrator emits a sub-project graph and the harness runs each as its own pipeline instance in dependency order.
+**FORMAT 5 (oversize)**: if a project exceeds the 75-task budget, orchestrator emits a sub-project graph and the harness runs each as its own pipeline instance in dependency order.
 
 ---
 
@@ -619,10 +624,16 @@ Every project writes to `harness/projects/<slug>/`:
 | **cc_dashboard per-model $Cost column + TOTAL row + workflow-agent scanning (PRs #121/#124, 2026-06-17):** `cc_dashboard/index.html` — `MODEL_PRICES` prefix-map, `calcCost()`/`fmtCost()` helpers, `$Cost` column per model row, bold TOTAL row (when ≥2 models); `cc_dashboard.py` — `_scan_workflow_agents()` surfaces workflow subagents (started/result from `subagents/workflows/*/journal.jsonl`) in the Sub-agent Fleet panel; $0, pure file I/O | ✅ |
 | **Git worktree isolation per task (PR #122, 2026-06-17):** `harness/worktree_manager.py` — `WorktreeManager` with `create/merge_and_remove/remove`; `_merge_lock` serializes concurrent merges; worktrees are created as siblings of the repo root (`repo.parent/.jclaw_worktrees/<task_id>`), discarded on verification fail, merged via `--no-ff` only on pass; 45 tests. `harness/scheduler.py` wired: code tasks run in isolation; asset/audio/video/music bypass unchanged; graceful degradation when git unavailable | ✅ |
 | **Phase 4 difficulty routing + interpretation-risk CD + per-role Codex quotas (PR #123, 2026-06-17):** `harness/interpretation_risk.py` (new) — deterministic `score_interpretation_risk()`, $0, 3 signal categories (ambiguity cap 0.30, novelty cap 0.30, constraint-load cap 0.40), `HIGH_RISK_THRESHOLD=0.55`. `harness/orchestrator.py` — `make_orchestrator(difficulty=)`: `simple`→Haiku, `medium`→Codex-first, `complex`→Sonnet→Opus. `harness/creative_director.py` — routes by interpretation-risk score (high→Sonnet primary, very-high→Opus). `harness/config.py` — `CODEX_WORKER_RESERVE = max(0, CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE)` hard sub-cap; `HAIKU_MODEL`. `harness/worker.py` — `_codex_worker_calls` counter enforced under `_oauth_lock`. `harness/main.py` — `_difficulty_from_brief()` + `_bump_difficulty()` wired to orchestrator. 124 tests | ✅ |
+| **Worktree correctness hardening (PR #126, 2026-06-18):** four `WorktreeManager`/`scheduler` bugs — detached-HEAD no longer permanently detaches the repo after a merge; merge runs before the output-dir copy (git history and `output_dir` can't desync); `remove()` holds `_merge_lock`; stale worktree dirs are `git worktree prune`d. 30 worktree tests | ✅ |
+| **Observe-only instrumentation across all surfaces (PR #128, 2026-06-18):** `permissions.observe()` wired at every side-effecting surface — `llm_cli` (codex/grok/claude), `fs_delete` (output-dir wipe), `install`/`build`/`test` (verification + e2e), `shell` (LLM-authored render-script exec), `render` (video/audio/music). `shell` reclassified low→**high** (arbitrary local code exec). Purely additive — observe never blocks. Completes roadmap #6's logging half across the whole pipeline | ✅ |
+| **Risk-evidence aggregator (PR #130, 2026-06-18):** `harness/risk_evidence.py` — read-only tool that scans `sessions/*.jsonl`, aggregates `risk_classified` by `kind`/current-risk/mission, and reports logged-vs-current taxonomy **drift**. Re-derives risk via `classify_action` (current taxonomy) rather than trusting the logged value. CLI: `python risk_evidence.py [--json]`. Closes the read-back gap so enforcement thresholds can come from data | ✅ |
+| **Enforcement gateway design — #6/#1 (2026-06-18, design-only):** `~/.claude/plans/enforcement-gateway-design.md` — `observe()`→`gate()` decision return (block = graceful skip, never raises); config-driven runtime policy; attended/unattended `RunContext` with Telegram-approval-or-fail-closed; mode×risk matrix; `auto_safe` unattended default; shadow-enforce rollout. Implementation gated on real-build evidence | 📐 designed |
 
 ---
 
 ## Current Status & What's Left to Finalize
+
+**2026-06-18 (eleventh session) — action-risk safety layer advancing; PRs #10–#132 merged, no open PRs.** The Claude-Code-style upgrades roadmap is progressing through its safety track. **Roadmap #6 (action-risk) now logs across the entire pipeline:** the observe-only classifier (`permissions.py`) is wired at every side-effecting surface — LLM CLIs, package installs, the pre-run output-dir wipe, and the execution of LLM-authored render scripts (`shell`, reclassified to high) — via PR #128, and a read-back/aggregation tool (`risk_evidence.py`, PR #130) turns the durable `sessions/*.jsonl` evidence into per-kind/per-risk distributions. Roadmap #3 (git-worktree isolation per task) shipped (#122) and was correctness-hardened (#126). The **enforcement gateway + permission modes** (#6 enforcement half + #1) are **designed** (`~/.claude/plans/enforcement-gateway-design.md`) but deliberately **blocked on real-build evidence** — the next concrete step is running real builds so the instrumentation produces data to set thresholds from, then implementing the evidence-gated enforcement slice. Full session history in `SESSION_HANDOFF.md`.
 
 **2026-06-17 (ninth session, continued) — Claude-Code-style upgrades roadmap approved + Milestone 1 shipped (PRs #114–#117); read-only session dashboard in review (#118).** A Codex-debated roadmap (recorded in PR #114) prioritized six Claude-Code-style capabilities; **Milestone 1 is complete**: an append-only replayable **session log** (`harness/session_log.py`, PR #115) and an **observe-only action-risk classifier** (`harness/permissions.py`, PR #116) that scores every side-effecting op by blast radius and logs it without blocking — enforcement is a deliberate later increment. PR #111 landed the deferred PR-#105 cleanups (a new `harness/llm_json.py` shared parser + Codex-tier dedup); #112/#113/#117 are doc syncs. **In review — PR #118:** a second, read-only **Claude Code Mission Control** dashboard (`cc_dashboard.py`, port 8766) that tails the live Claude Code session transcript (timeline, sub-agent fleet, token/context burn) alongside the existing build dashboard on 8765.
 
@@ -715,7 +726,7 @@ fourth is structural and remains by design.
 - **Projects directory is gitignored** — generated output is local only.
 - **Final code review requires `ANTHROPIC_API_KEY`** — without it, `REVIEW.md` and `HANDOFF.md` won't contain a real verdict.
 - **claude CLI stamp is optional** — OpenClaw verdict in the dashboard only appears if `claude` is installed and on PATH.
-- **SD/Coqui/Ollama must be running** — the pipeline degrades gracefully (SVG/silent/OpenRouter fallbacks) but local services need to be up for full capability.
+- **ComfyUI/Piper/Ollama must be running** — the pipeline degrades gracefully (SVG/silent-WAV/OpenRouter fallbacks) but local services need to be up for full capability.
 - **Full-stack projects split into sub-projects** — when the spec is "React + FastAPI", the orchestrator emits FORMAT 5 and the harness runs a `backend_api/` sub-project then a `frontend_react/` sub-project in sequence. Both land under `harness/projects/<slug>/`.
 - **Windows Defender exclusion required** — Defender locks `.git/objects/` at write time as the harness does `git init` and commits inside `harness/projects/`. Without this exclusion every build crashes at the git commit step with `PermissionError: [WinError 5]`. Run once in admin PowerShell:
   ```powershell
