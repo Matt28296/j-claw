@@ -1387,6 +1387,8 @@ def _call_codex(model: str, system: str, user: str) -> str:
     if CODEX_HOME:
         env["CODEX_HOME"] = CODEX_HOME
 
+    from permissions import observe
+    observe("llm_cli", detail=f"codex exec ({model or CODEX_MODEL})")  # roadmap #6: observe-only
     from cost import record_oauth_usage
     start = time.monotonic()
     try:
@@ -1485,6 +1487,8 @@ def _call_grok(model: str, system: str, user: str) -> str:
     if GROK_HOME:
         env["GROK_HOME"] = GROK_HOME
 
+    from permissions import observe
+    observe("llm_cli", detail=f"grok -p ({model or GROK_MODEL})")  # roadmap #6: observe-only
     from cost import record_oauth_usage
     start = time.monotonic()
     try:
@@ -1591,6 +1595,8 @@ def _call_claude_cli(model: str, system: str, user: str) -> str:
     if CLAUDE_CLI_HOME:
         env["CLAUDE_CONFIG_DIR"] = CLAUDE_CLI_HOME
 
+    from permissions import observe
+    observe("llm_cli", detail=f"claude -p ({model or CLAUDE_CLI_MODEL})")  # roadmap #6: observe-only
     from cost import record_oauth_usage
     start = time.monotonic()
     try:

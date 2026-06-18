@@ -9,6 +9,8 @@ from pathlib import Path
 from rich.console import Console
 from rich.prompt import Confirm
 
+from permissions import observe  # roadmap #6: observe-only action-risk logging
+
 console = Console()
 
 _TIMEOUT_DEFAULT = 120
@@ -306,6 +308,7 @@ def _run_python_test(project_dir: Path) -> tuple[bool, str]:
     if not ok:
         console.print("  [yellow]pytest not installed — auto-passing unit_test.[/yellow]")
         return True, "auto-passed: pytest not installed"
+    observe("test", detail="python -m pytest -q")  # roadmap #6: observe-only
     return _run_cmd(["python", "-m", "pytest", "-q"], project_dir, _TIMEOUT_DEFAULT)
 
 
@@ -339,6 +342,7 @@ def _run_react_vite_test(project_dir: Path) -> tuple[bool, str]:
             "Auto-passing (build step will install).[/yellow]"
         )
         return True, "auto-passed: node_modules not installed yet"
+    observe("test", detail="npm test --if-present")  # roadmap #6: observe-only
     return _run_cmd([npm, "test", "--if-present"], project_dir, _TIMEOUT_DEFAULT)
 
 
@@ -366,9 +370,11 @@ def _run_react_vite_build(project_dir: Path) -> tuple[bool, str]:
         return True, "auto-passed: scaffold phase, source files pending"
 
     console.print("  [dim]React+Vite build: npm install && npm run build[/dim]")
+    observe("install", detail="npm install")  # roadmap #6: observe-only
     ok, log = _run_cmd([npm, "install"], project_dir, _TIMEOUT_BUILD)
     if not ok:
         return False, f"npm install failed:\n{log}"
+    observe("build", detail="npm run build")  # roadmap #6: observe-only
     ok, log2 = _run_cmd([npm, "run", "build"], project_dir, _TIMEOUT_BUILD)
     if not ok:
         return False, f"npm run build failed:\n{log2}"
@@ -902,6 +908,7 @@ def _ensure_rendered(project_dir: Path) -> tuple[bool, str]:
             except ValueError:
                 parts = cmd_line.split()
             console.print(f"  [dim]render: {cmd_line[:100]}[/dim]")
+            observe("render", detail=f"ffmpeg edit-script line: {cmd_line[:120]}")  # roadmap #6: observe-only
             try:
                 result = subprocess.run(parts, cwd=project_dir, capture_output=True,
                                         text=True, timeout=600)
@@ -922,6 +929,7 @@ def _ensure_rendered(project_dir: Path) -> tuple[bool, str]:
         for script in _find_render_shell_scripts(project_dir)[:3]:
             rel = script.relative_to(project_dir)
             console.print(f"  [dim]render: bash {rel}[/dim]")
+            observe("shell", detail=f"bash LLM-authored render script: {rel}")  # roadmap #6: observe-only
             try:
                 result = subprocess.run([bash, str(script)], cwd=project_dir,
                                         capture_output=True, text=True, timeout=600)
@@ -948,6 +956,7 @@ def _ensure_rendered(project_dir: Path) -> tuple[bool, str]:
     req = project_dir / "requirements.txt"
     if req.exists():
         console.print("  [dim]render: pip install -r requirements.txt[/dim]")
+        observe("install", detail="pip install -r requirements.txt")  # roadmap #6: observe-only
         ok, pip_log = _run_cmd(["pip", "install", "-r", "requirements.txt"], project_dir, _TIMEOUT_BUILD)
         if not ok:
             msg = f"pip install failed before render:\n{pip_log[-500:]}"
@@ -955,6 +964,7 @@ def _ensure_rendered(project_dir: Path) -> tuple[bool, str]:
             return False, msg
 
     console.print(f"  [dim]render: python {entry.name}[/dim]")
+    observe("shell", detail=f"python LLM-authored render entry: {entry.name}")  # roadmap #6: observe-only
     try:
         result = subprocess.run([sys.executable, entry.name], cwd=project_dir,
                                 capture_output=True, text=True, timeout=600)

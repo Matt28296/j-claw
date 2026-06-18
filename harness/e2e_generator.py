@@ -326,6 +326,8 @@ def run_e2e_tests(project_dir: Path) -> tuple[bool, str]:
 
     try:
         console.print("\n[bold]Running Playwright E2E tests…[/bold]")
+        from permissions import observe
+        observe("test", detail="npx playwright test")  # roadmap #6: observe-only
         result = subprocess.run(
             "npx playwright test --reporter=line",
             cwd=str(project_dir),
