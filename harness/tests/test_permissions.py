@@ -44,6 +44,8 @@ class TestClassifyAction(unittest.TestCase):
         self.assertEqual(c("git", "git push origin main")[0], "high")
         self.assertEqual(c("fs_delete")[0], "medium")
         self.assertEqual(c("llm_cli")[0], "medium")
+        self.assertEqual(c("llm_local")[0], "low")  # local Ollama inference — no egress/credential
+        self.assertNotEqual(c("llm_local")[1], c("llm_cli")[1])  # distinct reason, not folded in
         self.assertEqual(c("test")[0], "low")
         self.assertEqual(c("build")[0], "low")
         self.assertEqual(c("render")[0], "low")

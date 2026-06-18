@@ -1298,6 +1298,8 @@ def _call_provider(provider: str, model: str, system: str, user: str) -> str:
 
 
 def _call_ollama(model: str, system: str, user: str) -> str:
+    from permissions import observe
+    observe("llm_local", detail=f"ollama chat ({model})")  # roadmap #6: observe-only
     # Bound the request so a hung local generation can't stall the pipeline indefinitely.
     client = ollama.Client(host=OLLAMA_HOST, timeout=WORKER_TASK_TIMEOUT)
     response = client.chat(
