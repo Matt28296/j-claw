@@ -3041,6 +3041,37 @@ class TestProjectDisposition(unittest.TestCase):
         self.assertFalse(_build_disposition(True, False, []))
 
 
+class TestAssetOutputTypeAccepted(unittest.TestCase):
+    """#3 regression lock: asset work flows through the UN-enum'd `stack` and task
+    `type` fields, NOT the enum'd project_type/output_type. The MOBA stress test's
+    'asset rejected by INIT enum' failure is fixed; these pin it so a future tightening
+    of those enums can't silently reintroduce it."""
+
+    def test_format1_with_asset_stack_validates(self):
+        from validator import validate_response
+        spec = {
+            "project_type": "game", "complexity": "medium", "goal": "hero asset pack",
+            "features": ["svgs"], "constraints": ["vector only"],
+            "architecture": {"frontend": "none", "backend": "none",
+                             "database": "none", "deployment": "none", "stack": "asset"},
+            "modules": [{"name": "art", "responsibility": "draw heroes"}],
+        }
+        validate_response("INIT", spec)  # must NOT raise — stack:"asset" is accepted
+
+    def test_format5_subproject_minimal_shape_validates(self):
+        from validator import validate_response
+        data = {"oversize": True, "reason": "73 assets exceed the 50-task budget",
+                "sub_projects": [{"name": "assets", "goal": "make 73 hero svgs", "depends_on": []}]}
+        validate_response("INIT", data)  # sub-projects carry no type field to reject
+
+    def test_task_type_asset_validates(self):
+        from validator import validate_response
+        task = {"id": "task-1", "type": "asset", "objective": "draw the swordsman",
+                "files": ["hero-swordsman.svg"], "dependencies": [], "priority": "low",
+                "acceptance_criteria": ["valid svg"], "verification": "none"}
+        validate_response("SPEC_ACCEPTED", {"tasks": [task]})  # task.type is enum-free
+
+
 class TestSubprojectEscapeValve(unittest.TestCase):
     """#5 escape valve: an over-scoped sub-project may decompose one more level while
     under MAX_FORMAT5_DEPTH, and is force-flattened at/above the cap. Activates the
@@ -3200,6 +3231,7 @@ if __name__ == "__main__":
         TestProjectDisposition,
         TestStampHonesty,
         TestSubprojectEscapeValve,
+        TestAssetOutputTypeAccepted,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 
