@@ -167,6 +167,16 @@ class Orchestrator:
             # was crossed. Placed BEFORE the try so it fails closed (propagates out)
             # instead of being swallowed by the retry handlers below.
             check_cost_ceiling()
+            # Control-plane paid-call budget: bound the number of metered orchestrator calls per
+            # build (the emergency Sonnet→Opus fallback is otherwise uncapped — a latched-free-rung
+            # run racked up 38 paid orchestrator calls on 2026-06-19). Reserve per actual API call;
+            # when exhausted, raise so CompositeOrchestrator falls through / the build fails closed
+            # rather than silently overspending. Shared with planning_call's Anthropic tiers.
+            import worker
+            if not worker._reserve_paid_orch_call():
+                raise RuntimeError(
+                    f"Paid orchestrator budget (MAX_PAID_ORCH_CALLS) exhausted — refusing further "
+                    f"metered orchestration (orch:{state}). Free OAuth rungs latched or unavailable.")
             try:
                 # A pinned model (emergency-chain rung) intentionally wins over the per-state
                 # EXECUTION_ERROR_MODEL: once we're on the paid Sonnet→Opus fallback the rung's

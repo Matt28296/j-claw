@@ -15,7 +15,7 @@ import threading
 from config import (
     WORKER_MODEL, OLLAMA_HOST, WORKER_PROVIDER,
     WORKER_FALLBACKS, ANTHROPIC_API_KEY, OPENROUTER_API_KEY,
-    WORKER_LADDER, LOCAL_FIRST_TASK_TYPES, MAX_PAID_WORKER_CALLS,
+    WORKER_LADDER, LOCAL_FIRST_TASK_TYPES, MAX_PAID_WORKER_CALLS, MAX_PAID_ORCH_CALLS,
     INTEGRATION_FIRST_ROUTING, WORKER_TASK_TIMEOUT,
     CODEX_CLI_ENABLED, CODEX_HOME, CODEX_MODEL, CODEX_EFFORT, OPUS_MODEL,
     CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT, OAUTH_PROVIDERS, METERED_PROVIDERS,
@@ -705,6 +705,11 @@ This stack prompt applies to auth tasks within a full-stack project. Write COMPL
 # Paid-call budget: shared across all worker threads in one project run. Reset at project
 # start (reset_paid_budget) and consumed by each non-ollama attempt (reserve_paid_call).
 _paid_calls_made = 0
+# Paid ORCHESTRATION/PLANNING-call budget (control-plane): bounds metered Anthropic calls made by
+# the orchestrator emergency fallback (orchestrator.Orchestrator.call) AND planning_call's Anthropic
+# tiers. Separate counter from _paid_calls_made so worker and control-plane spend are bounded
+# independently. Both guarded by _paid_lock. Reset at project start (reset_paid_budget).
+_paid_orch_calls = 0
 _paid_lock = threading.Lock()
 
 # OAuth-rung (flat-rate subscription) capacity: separate from the dollar budget above.
@@ -765,9 +770,10 @@ _CLAUDE_CLI_ENV_BLOCKLIST = frozenset({
 
 def reset_paid_budget() -> None:
     """Reset the per-project paid (cloud) worker-call counter. Call at project start."""
-    global _paid_calls_made, _codex_disabled, _grok_disabled, _claude_cli_disabled, _codex_worker_calls
+    global _paid_calls_made, _paid_orch_calls, _codex_disabled, _grok_disabled, _claude_cli_disabled, _codex_worker_calls
     with _paid_lock:
         _paid_calls_made = 0
+        _paid_orch_calls = 0
     with _oauth_lock:
         _oauth_calls_made.clear()
         _oauth_timeouts.clear()
@@ -785,6 +791,21 @@ def _reserve_paid_call() -> bool:
         if _paid_calls_made >= MAX_PAID_WORKER_CALLS:
             return False
         _paid_calls_made += 1
+        return True
+
+
+def _reserve_paid_orch_call() -> bool:
+    """Atomically reserve one paid (metered Anthropic) ORCHESTRATION/PLANNING call against the
+    per-run MAX_PAID_ORCH_CALLS budget. Returns False if exhausted (or True unconditionally when the
+    cap is disabled with 0). Separate counter from the worker budget (_reserve_paid_call) so the
+    control-plane and workers are bounded independently. Enforced by orchestrator.Orchestrator.call
+    and planning_call's Anthropic tiers — both previously uncapped, which let a latched-free-rung
+    build rack up 38 paid orchestrator calls (2026-06-19 D1 take-2)."""
+    global _paid_orch_calls
+    with _paid_lock:
+        if MAX_PAID_ORCH_CALLS and _paid_orch_calls >= MAX_PAID_ORCH_CALLS:
+            return False
+        _paid_orch_calls += 1
         return True
 
 
@@ -1528,6 +1549,15 @@ def planning_call(
 
     # Tier 2/3 — Anthropic Sonnet → Opus (paid), validated. fallback=True marks the cross-tier hop.
     for model in (sonnet_model, opus_model):
+        # Control-plane paid budget: refuse the metered planning call once MAX_PAID_ORCH_CALLS is
+        # spent (shared with the orchestrator emergency fallback). Fails closed — planning then
+        # raises below rather than silently overspending.
+        if not _reserve_paid_orch_call():
+            last_err = RuntimeError(
+                f"Paid orchestration budget (MAX_PAID_ORCH_CALLS={MAX_PAID_ORCH_CALLS}) exhausted — "
+                f"refusing metered {role} planning call")
+            console.print(f"  [yellow]{last_err}[/yellow]")
+            break
         _t0 = time.monotonic()
         try:
             raw = _call_anthropic(model, system, user, label=role)

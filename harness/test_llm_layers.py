@@ -3412,6 +3412,65 @@ class TestOauthTimeoutLatch(unittest.TestCase):
                         "a second consecutive timeout reaches the threshold → latch the rung")
 
 
+class TestPaidOrchBudget(unittest.TestCase):
+    """MAX_PAID_ORCH_CALLS bounds metered Anthropic ORCHESTRATION/PLANNING calls per run — the
+    control-plane analog of MAX_PAID_WORKER_CALLS. Regression for the 2026-06-19 D1 take-2 finding:
+    both free orchestrator rungs latched, every heal re-plan fell to paid Sonnet, 38 paid calls /
+    $0.81 on a build that should have stayed $0. Enforced by planning_call's Anthropic tiers and
+    orchestrator.Orchestrator.call (shared counter)."""
+
+    def setUp(self):
+        import worker as w
+        self._w = w
+        w.reset_paid_budget()
+
+    def tearDown(self):
+        self._w.reset_paid_budget()
+
+    def test_reserve_caps_at_budget(self):
+        w = self._w
+        with patch.object(w, "MAX_PAID_ORCH_CALLS", 3):
+            self.assertTrue(w._reserve_paid_orch_call())
+            self.assertTrue(w._reserve_paid_orch_call())
+            self.assertTrue(w._reserve_paid_orch_call())
+            self.assertFalse(w._reserve_paid_orch_call(), "4th call exceeds the cap")
+
+    def test_reset_rearms_budget(self):
+        w = self._w
+        with patch.object(w, "MAX_PAID_ORCH_CALLS", 1):
+            self.assertTrue(w._reserve_paid_orch_call())
+            self.assertFalse(w._reserve_paid_orch_call())
+            w.reset_paid_budget()
+            self.assertTrue(w._reserve_paid_orch_call(), "reset must re-arm the orch budget")
+
+    def test_zero_disables_cap(self):
+        w = self._w
+        with patch.object(w, "MAX_PAID_ORCH_CALLS", 0):
+            for _ in range(50):
+                self.assertTrue(w._reserve_paid_orch_call(), "0 = disabled → never refuses")
+
+    def test_planning_call_refuses_paid_when_budget_spent(self):
+        w = self._w
+        # Codex disabled → planning_call goes straight to the Anthropic tier, which must be
+        # refused once the orch budget is spent (NOT silently overspend).
+        with patch.object(w, "MAX_PAID_ORCH_CALLS", 2), \
+             patch.object(w, "_oauth_enabled", return_value=False), \
+             patch.object(w, "_call_anthropic") as mock_anthropic:
+            w._paid_orch_calls = 2  # budget already exhausted
+            with self.assertRaises(RuntimeError):
+                w.planning_call("sys", "usr", lambda d: None, role="creative_director")
+            mock_anthropic.assert_not_called()
+
+    def test_planning_call_uses_paid_when_budget_available(self):
+        w = self._w
+        with patch.object(w, "MAX_PAID_ORCH_CALLS", 5), \
+             patch.object(w, "_oauth_enabled", return_value=False), \
+             patch.object(w, "_call_anthropic", return_value='{"ok": true}'), \
+             patch("worker.record_role_event"):
+            result = w.planning_call("sys", "usr", lambda d: None, role="technical_architect")
+            self.assertEqual(result, {"ok": True})
+
+
 class TestSalvageWrapperOutput(unittest.TestCase):
     """_parse_and_validate must recover a single-file task's body when the worker (esp. the grok
     rung) wraps it in a chat-style envelope — {"response": ...} / {"output": ...} / {"result": ...}
@@ -3514,6 +3573,7 @@ if __name__ == "__main__":
         TestPythonBuildManifest,
         TestOauthTimeoutLatch,
         TestSalvageWrapperOutput,
+        TestPaidOrchBudget,
         TestCostCeiling,
         TestProjectDisposition,
         TestStampHonesty,

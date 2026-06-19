@@ -97,6 +97,16 @@ WORKER_LADDER: list[tuple[str, str]] = _parse_fallbacks(
 # instead of paying. Prevents a multi-task project from silently burning the API budget.
 MAX_PAID_WORKER_CALLS: int = _int_env("MAX_PAID_WORKER_CALLS", 15, lo=0)
 
+# Hard cap on PAID (metered Anthropic) ORCHESTRATION / PLANNING calls per project run — the
+# control-plane analog of MAX_PAID_WORKER_CALLS. Bounds the paid orchestrator emergency-fallback
+# rungs (Sonnet→Opus in orchestrator.Orchestrator.call) AND the planning_call Anthropic tiers
+# (Creative Director / Technical Architect / orchestrator). These had NO call-count cap before:
+# in the 2026-06-19 D1 take-2 run, both free orchestrator rungs latched off and every heal re-plan
+# fell through to paid Sonnet — 38 paid calls / $0.81 on a build that should have stayed $0. Once
+# spent, paid orchestration is refused (fails closed); the latch fix keeps the free rungs up so this
+# ceiling is a belt-and-suspenders backstop, not the primary defense. 0 = disabled (no cap).
+MAX_PAID_ORCH_CALLS: int = _int_env("MAX_PAID_ORCH_CALLS", 12, lo=0)
+
 # Per-build HARD cost ceiling (USD). When cumulative METERED spend (cost._total_usd, which
 # counts only paid Anthropic dollars — $0 OAuth/local rungs never count) reaches this, the
 # build FAILS CLOSED: the next metered call is refused (cost.BuildCostCeilingExceeded) and the
