@@ -4,7 +4,29 @@ Branch: `run/moba-monitored`. Operator: Matthew. **PUSHED & IN SYNC with `origin
 
 ---
 
-## ⏩⏩ LATEST (2026-06-19, late) — Gate 3 ran, cost-fix shipped, Phase 4 (minimal) shipped
+## ⏩⏩⏩ LATEST (2026-06-19, evening) — D1 RAN → regressed → 2 cost defects found + FIXED + pushed
+
+Head of branch: **`f385162`** (`0 0` vs origin, working tree clean, suite **191 green**). This session ran D1, killed it on an operator cost directive, and shipped two fixes. **Supersedes the "D1 NEXT" plan in the section below.**
+
+**D1 (re-run Gate 3 flat intent, `INTEGRATION_FIRST_ROUTING=true`) — RAN supervised, then KILLED mid heal-cycle-2.**
+- **Convergence: 9 → 13, REGRESSING** (vs baseline 13→14→11). Routing gave a **cleaner first pass (9 issues vs baseline 13)** ✅ but **did NOT fix convergence** ❌ — the "Heal loop regressing" detector fired (9→13, 28% overlap). Same non-convergence story as baseline.
+- **Routing placement worked:** integration tasks (`deps>0`) correctly started on the `$0` grok rung; `deps=0` stayed local (ollama). But grok's output-JSON discipline is weak → heavy reliance on codex-escalation; that churn also **exhausted `CODEX_PLANNING_RESERVE` (12)** at the orchestrator layer.
+- **HK2 (husk on the *decomposing* path) STILL UNPROVEN** — D1 was again a FLAT build.
+
+**Two defects surfaced, both causing avoidable METERED spend — BOTH FIXED in `f385162` (committed + pushed):**
+1. **Orchestrator free-first hole** — `make_orchestrator(difficulty="complex")` built a **paid Sonnet→Opus composite with NO free rungs**. When the heal loop bumped difficulty to `complex` on REVIEW_FAILED, every re-plan went straight to **paid Anthropic, bypassing available `$0` Codex/Claude-Max**. *This was the literal "free Claude bypassed while available."* Fixed → `complex` is now free-first (Codex → Claude-Max → paid Sonnet→Opus **last-resort backstop**), mirroring the `medium` branch. (`medium` and the emergency chain were already free-first.)
+2. **`verification.py` python-build bug** — the `python` ecosystem `build` was hardcoded to `pip install -r requirements.txt`, but `detect_ecosystem()` also returns `"python"` for **pyproject.toml-only** packages → guaranteed failure (no requirements.txt) → made `task-016` **unwinnable**, burning the worker ladder **up to the paid rung** on a task no model could pass. Fixed → new `_run_python_build()` handles both manifests (like the FastAPI path).
+- New regression tests lock both (191 OK, +4 since `190705a`).
+
+**Cost policy set by operator directive: FREE-FIRST, PAID-LAST-RESORT.** `.env` (gitignored): `MAX_PAID_WORKER_CALLS` was unset (silently **15**) → briefly **0** (over-correction) → now **5** (bounded genuine last-resort; `$5` ceiling still caps dollars). The free OAuth caps (`=40`) are **loop-breakers + shared-Max-pool guards, NOT paid-pushers** — safe to raise codex/grok if hard builds need headroom; keep `claude_cli` moderate (shared with interactive Claude Code).
+
+**Housekeeping DONE:** `.jclaw_worktrees` pruned empty (incl. the stale `task-015` + the killed-D1 `task-027` orphan + their `wt-task-*` branches).
+
+**NEXT (immediate): D1 take-2** — re-run the SAME Gate 3 flat intent now that both fixes are live. Purpose: (a) validate free-first orchestration + the pyproject build fix end-to-end (currently unit-tested only, NOT live-proven), and (b) get a CLEAN convergence number (the first D1 was confounded by the bypass + the unwinnable `task-016`). Metered but should stay on `$0` rungs; needs operator go-ahead. Then **C** `memory_lint.py` → **D2** small live FORMAT-5 smoke (still the only way to prove HK2) → **E** MOBA.
+
+---
+
+## ⏩⏩ LATEST (2026-06-19, late) — Gate 3 ran, cost-fix shipped, Phase 4 (minimal) shipped — ⚠ SUPERSEDED by the section above (D1 has since RUN)
 
 Head of branch: **`190705a`** (`0 0` vs origin). Sequence since Wave 4:
 
