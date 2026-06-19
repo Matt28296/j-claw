@@ -203,6 +203,16 @@ LOCAL_FIRST_TASK_TYPES: set[str] = set(
     os.getenv("LOCAL_FIRST_TASK_TYPES", "scaffold,style,data,config").split(",")
 )
 
+# Phase 4 (minimal slice): start integration-heavy tasks — a non-trivial type that
+# DEPENDS on sibling modules — at the first $0 OAuth cloud rung (grok) instead of the
+# weak local model. Gate 3 showed the local model cannot hold cross-module interface
+# contracts (wrong import paths, function-name drift, prose-instead-of-JSON), so it
+# only burns heal cycles before escalating anyway. OAuth rungs are $0, so this skips
+# the doomed first attempt at no dollar cost. Standalone (no-dep) code tasks stay
+# local — the model handles isolated files fine. Toggle off to restore strict
+# local-first base routing.
+INTEGRATION_FIRST_ROUTING: bool = os.getenv("INTEGRATION_FIRST_ROUTING", "true").lower() == "true"
+
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
 OPENROUTER_API_KEY: str | None = os.getenv("OPENROUTER_API_KEY")
 GOOGLE_API_KEY: str | None = os.getenv("GOOGLE_API_KEY")

@@ -403,6 +403,67 @@ class TestRoutedRung(unittest.TestCase):
             self.assertEqual(routed_rung(t), 3)
 
 
+class TestPhase4IntegrationRouting(unittest.TestCase):
+    """Phase 4 (minimal slice): an integration-heavy task (non-trivial type WITH deps on
+    sibling modules) starts at the first $0 OAuth cloud rung instead of the weak local
+    model — Gate 3 showed the local model cannot hold cross-module interface contracts.
+    Standalone/no-dep code stays local; trivial types stay rung 0; a no-OAuth ladder never
+    jumps to a metered rung; retry escalation still climbs from the higher base."""
+
+    def setUp(self):
+        import worker as w
+        from types import SimpleNamespace
+        self._w = w
+        self._ns = SimpleNamespace
+        self._orig_ladder = w.WORKER_LADDER
+        self._orig_flag = w.INTEGRATION_FIRST_ROUTING
+        w.WORKER_LADDER = [
+            ("ollama", "qwen3:8b"),               # 0
+            ("ollama", "deepseek-coder-v2:16b"),  # 1  strongest local
+            ("grok", "grok-build"),               # 2  first $0 OAuth rung
+            ("codex", "gpt-5.5"),                 # 3
+            ("anthropic", "claude-sonnet-4-6"),   # 4
+            ("anthropic", "claude-opus-4-8"),     # 5
+        ]
+        w.INTEGRATION_FIRST_ROUTING = True
+
+    def tearDown(self):
+        self._w.WORKER_LADDER = self._orig_ladder
+        self._w.INTEGRATION_FIRST_ROUTING = self._orig_flag
+
+    def _t(self, ttype, files=1, deps=0, retry=0):
+        return self._ns(type=ttype, files=["f"] * files,
+                        dependencies=["d"] * deps, retry_count=retry)
+
+    def test_integration_task_starts_at_first_oauth_rung(self):
+        # backend task WITH a sibling dependency → start at grok (index 2), not local.
+        self.assertEqual(self._w.route_task(self._t("backend", files=1, deps=1)), 2)
+
+    def test_standalone_code_task_stays_local(self):
+        # backend with NO deps → strongest local rung (1): the model handles isolated files.
+        self.assertEqual(self._w.route_task(self._t("backend", files=1, deps=0)), 1)
+
+    def test_trivial_type_stays_rung_zero(self):
+        self.assertEqual(self._w.route_task(self._t("scaffold", files=1, deps=0)), 0)
+
+    def test_toggle_off_restores_local_first(self):
+        self._w.INTEGRATION_FIRST_ROUTING = False
+        self.assertEqual(self._w.route_task(self._t("backend", files=1, deps=1)), 1)
+
+    def test_no_oauth_ladder_never_jumps_to_metered(self):
+        # No OAuth rung in the ladder → integration task falls back to local_top, NOT anthropic.
+        self._w.WORKER_LADDER = [
+            ("ollama", "qwen3:8b"),
+            ("ollama", "deepseek-coder-v2:16b"),
+            ("anthropic", "claude-sonnet-4-6"),
+        ]
+        self.assertEqual(self._w.route_task(self._t("backend", files=1, deps=1)), 1)
+
+    def test_escalation_still_climbs_from_oauth_base(self):
+        # routed_rung = base + retry_count: an integration task failing at grok climbs up.
+        self.assertEqual(self._w.routed_rung(self._t("backend", files=1, deps=2, retry=2)), 4)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 6. execute_task — rung walk-up, ValueError, paid-budget clamp
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3219,6 +3280,7 @@ if __name__ == "__main__":
         TestAnthropicOrchestrator,
         TestCompositeOrchestrator,
         TestRoutedRung,
+        TestPhase4IntegrationRouting,
         TestExecuteTask,
         TestFinalReviewFailsClosed,
         TestExperienceLearning,

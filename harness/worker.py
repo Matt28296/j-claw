@@ -16,7 +16,7 @@ from config import (
     WORKER_MODEL, OLLAMA_HOST, WORKER_PROVIDER,
     WORKER_FALLBACKS, ANTHROPIC_API_KEY, OPENROUTER_API_KEY,
     WORKER_LADDER, LOCAL_FIRST_TASK_TYPES, MAX_PAID_WORKER_CALLS,
-    WORKER_TASK_TIMEOUT,
+    INTEGRATION_FIRST_ROUTING, WORKER_TASK_TIMEOUT,
     CODEX_CLI_ENABLED, CODEX_HOME, CODEX_MODEL, CODEX_EFFORT, OPUS_MODEL,
     CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT, OAUTH_PROVIDERS, METERED_PROVIDERS,
     GROK_CLI_ENABLED, GROK_HOME, GROK_MODEL, GROK_MAX_CALLS, GROK_TIMEOUT,
@@ -829,23 +829,47 @@ def _strongest_local_rung() -> int:
     return local[-1] if local else len(WORKER_LADDER) - 1
 
 
+def _first_oauth_rung() -> int:
+    """Index of the first $0 OAuth cloud rung (grok/codex/claude_cli) in the ladder.
+
+    Falls back to the strongest local rung when the ladder has no OAuth rung — so a host
+    configured without OAuth providers keeps the strict local-first base routing unchanged
+    (the Phase-4 integration route never sends a task to a *metered* rung on its own)."""
+    for i, (prov, _) in enumerate(WORKER_LADDER):
+        if prov in OAUTH_PROVIDERS:
+            return i
+    return _strongest_local_rung()
+
+
 def route_task(task) -> int:
     """Pick the *base* worker ladder rung (0 = weakest) from task complexity.
 
-    Base routing is always LOCAL — a task never starts on a paid cloud rung. Genuinely hard
-    tasks reach cloud only via escalation-on-retry (see routed_rung), i.e. after a local
-    attempt has actually failed verification. This keeps the system local-first by default.
+    Base routing is LOCAL by default — most tasks never start on a cloud rung, reaching it
+    only via escalation-on-retry (see routed_rung) after a local attempt fails verification.
       - rung 0 (cheapest local): trivial single-file scaffold/style/data/config
-      - strongest-local rung: everything else (the normal-code workhorse)
+      - strongest-local rung: standalone code (the normal-code workhorse)
+      - first $0 OAuth rung: integration-heavy tasks (Phase 4, see below)
     """
     if not WORKER_LADDER:
         return 0
     local_top = _strongest_local_rung()
     ttype = (getattr(task, "type", "") or "").lower()
     n_files = len(getattr(task, "files", []) or [])
+    n_deps = len(getattr(task, "dependencies", []) or [])
 
     if ttype in LOCAL_FIRST_TASK_TYPES and n_files <= 1:
         return 0
+
+    # Phase 4 (minimal slice): an integration-heavy task — a non-trivial type that DEPENDS
+    # on sibling modules — starts at the first $0 OAuth cloud rung instead of the weak local
+    # model. Gate 3 showed the local model cannot hold cross-module interface contracts
+    # (wrong import paths, function-name drift), so it only burns heal cycles before
+    # escalating anyway; routing straight to a stronger $0 rung removes the doomed first
+    # attempt at no dollar cost. Standalone (no-dep) code stays local. Never lowers the rung
+    # (max with local_top), and no-OAuth ladders fall back to local-first (see helper).
+    if INTEGRATION_FIRST_ROUTING and n_deps > 0 and ttype not in LOCAL_FIRST_TASK_TYPES:
+        return max(local_top, _first_oauth_rung())
+
     return local_top
 
 
