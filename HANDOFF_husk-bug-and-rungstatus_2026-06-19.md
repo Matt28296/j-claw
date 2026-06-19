@@ -1,10 +1,27 @@
 # Session Handoff — Reliability Hardening Wave (2026-06-19, updated EOD)
 
-Branch: `run/moba-monitored`. Operator: Matthew. **PUSHED & IN SYNC with `origin/run/moba-monitored`** (`github.com/Matt28296/j-claw`) — `git rev-list --left-right --count` reads `0 0`, working tree clean. (The earlier "UNCOMMITTED Wave 4" caveat is superseded — Wave 4 shipped as `236965d`.)
+Branch: `run/moba-monitored`. Operator: Matthew. **PUSHED & IN SYNC with `origin/run/moba-monitored`** (`github.com/Matt28296/j-claw`) — head `85a9e81`, `0 0` vs origin, working tree clean, suite **208 green** (skipped=1). (The earlier "UNCOMMITTED Wave 4" caveat is superseded — Wave 4 shipped as `236965d`.)
 
 ---
 
-## ⏩⏩⏩ LATEST (2026-06-19, evening) — D1 RAN → regressed → 2 cost defects found + FIXED + pushed
+## ⏩⏩⏩⏩ LATEST (2026-06-19, night) — D1 take-2 RAN → 3 cost/reliability fixes shipped + pushed; verdict = cost-disciplined but worker-quality-gated
+
+Head of branch: **`85a9e81`** (`0 0` vs origin, tree clean, suite **208 green**). Repo deep-verified this session: remote `github.com/Matt28296/j-claw`, `.env` confirmed **untracked + gitignored** (real ANTHROPIC/GOOGLE keys safe), no stray untracked files to commit, all run artifacts (`projects/`, `.venv`, `*.log`) properly ignored. **Three commits shipped + PUSHED today.** Supersedes the "D1 take-2 NEXT" plan below.
+
+**D1 take-2 (`brn7zfroz`) — RAN supervised, FAILED to converge.** Heal regressed **13 → 14**; 7 tasks failed all the way up the ladder. **Root cause = worker output quality, NOT cost machinery:** grok (the $0 integration rung) emits chat-wrapper JSON (`{"response":...}` / `{"output":...}`) instead of the `{"files":[...]}` contract → tasks never satisfy the validator → endless heal churn. **Cost discipline HELD** (build stayed within budget) but convergence is now provably gated on worker contract-adherence, not reliability bugs.
+
+**Three fixes shipped (all pushed `0cce294..85a9e81`):**
+1. **`fda2e4d` fix(reliability): don't latch a free OAuth rung on a lone timeout.** A single subprocess timeout (`TimeoutExpired`, e.g. one 300s claude/codex/grok call) was permanently latching that **free** rung off for the *entire* build via `_oauth_unavailable`, cascading all downstream work onto **paid** Anthropic. Now a timeout only latches after `OAUTH_TIMEOUT_LATCH_THRESHOLD` (default **2**) **consecutive** timeouts, and a success **resets the streak** (`_should_latch_oauth` / `_note_oauth_success`, per-provider counter under `_oauth_lock`). Non-timeout failures (auth/quota) still latch immediately. +82 test lines.
+2. **`10f3ec5` fix(worker): salvage single-file output from chat-wrapper JSON shapes.** Directly targets the proven D1 take-2 blocker. `_salvage_single_file` now recovers content from `{"content"|"code"|"file"|"response"|"output"|"result"|"answer"|"text": ...}` wrappers (extracting a fenced code block from the value when present) instead of failing the whole task. Multi-file and input-echo shapes are still correctly rejected. +52 test lines.
+3. **`85a9e81` fix(cost): cap paid orchestrator/planning calls (`MAX_PAID_ORCH_CALLS`).** D1 take-2 produced **38 paid orchestrator calls = $0.81** because both free orchestrator rungs latched and every heal re-plan fell to paid Sonnet — the orchestrator/planning paid path had **only the $5 cost ceiling, no call-count cap**. New `MAX_PAID_ORCH_CALLS` (config default **12**, `=12` if unset) gated by `_reserve_paid_orch_call()`, wired into BOTH `Orchestrator.call()` (orchestrator.py) and `planning_call`'s Sonnet→Opus tier (worker.py). Counter resets in `reset_paid_budget()`. +60 test lines.
+
+**Open finding (recorded, NOT fixed):** Windows atomic-rename race — `[WinError 5] Access is denied` on `mission_control.json.<pid>.tmp -> mission_control.json` under concurrent writers (4 parallel workers + dashboard). Intermittent; cosmetic (write retries) but should get a retry-with-backoff or per-writer temp path before MOBA-scale concurrency.
+
+**NEXT (immediate): D3** — re-run the Gate 3 flat CLI-devtoolkit intent with ALL fixes live (free-first orchestration + pyproject build + latch + salvage + orch-cap). Purpose: prove (a) the salvage fix lets grok tasks actually converge, (b) latch no longer dumps work onto paid, (c) the orch-cap holds spend near $0. Metered, needs operator go-ahead. Then **C** `memory_lint.py` → **D2/gate3** small live FORMAT-5 decomposing smoke (still the only HK2 proof) → **E** MOBA.
+
+---
+
+## ⏩⏩⏩ EARLIER (2026-06-19, evening) — D1 RAN → regressed → 2 cost defects found + FIXED + pushed
 
 Head of branch: **`f385162`** (`0 0` vs origin, working tree clean, suite **191 green**). This session ran D1, killed it on an operator cost directive, and shipped two fixes. **Supersedes the "D1 NEXT" plan in the section below.**
 
