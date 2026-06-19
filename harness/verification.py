@@ -47,7 +47,7 @@ _COMMANDS: dict[str, dict[str, list[str] | None]] = {
     "python": {
         "lint":      ["python", "-m", "flake8", "."],
         "unit_test": ["python", "-m", "pytest", "-q"],
-        "build":     ["pip", "install", "-r", "requirements.txt"],
+        "build":     None,  # handled specially in run_verification (requirements.txt OR pyproject.toml)
         "smoke":     ["python", "-m", "pytest", "smoke/", "-q"],
     },
     "fastapi": {
@@ -272,6 +272,9 @@ def run_verification(task, project_dir: Path) -> tuple[bool, str]:
         ruff_ok, ruff_log = _run_ruff_check(project_dir)
         return ruff_ok, "\n".join(filter(None, [log, ruff_log]))
 
+    if ecosystem == "python" and method == "build":
+        return _run_python_build(project_dir)
+
     if ecosystem == "phaser":
         # If package.json exists, treat as node so npm scripts (including Playwright) run.
         # Falls back to auto HTML check if still no package.json present.
@@ -417,6 +420,36 @@ def _run_fastapi_install(project_dir: Path) -> tuple[bool, str]:
     else:
         console.print("  [yellow]No requirements.txt or pyproject.toml found — auto-passing build.[/yellow]")
         return True, "auto-passed: no requirements file found"
+
+
+def _run_python_build(project_dir: Path) -> tuple[bool, str]:
+    """Install a plain-Python package's dependencies for the build check.
+
+    A Python project may declare its dependencies via requirements.txt OR
+    pyproject.toml (PEP 621 / hatchling / Poetry). The old hardcoded
+    `pip install -r requirements.txt` (_COMMANDS['python']['build']) failed CLOSED on
+    a pyproject-only package — there is no requirements.txt to open — turning a
+    perfectly valid build into a guaranteed failure and burning worker-ladder
+    escalations (up to the paid rung) on an unwinnable task. Mirror the FastAPI
+    handler: install from requirements.txt when present, treat a pyproject.toml-only
+    project as build-OK (deps resolve at install/test time), and auto-pass when
+    neither manifest exists."""
+    req = project_dir / "requirements.txt"
+    pyproj = project_dir / "pyproject.toml"
+    if req.exists():
+        console.print("  [dim]Python: pip install -r requirements.txt[/dim]")
+        ok, log = _run_cmd(["pip", "install", "-r", "requirements.txt"], project_dir, _TIMEOUT_BUILD)
+        if not ok:
+            return False, f"pip install failed:\n{log}"
+        return True, log
+    if pyproj.exists():
+        console.print(
+            "  [yellow]pyproject.toml detected (no requirements.txt) — skipping pip install. "
+            "Auto-passing build.[/yellow]"
+        )
+        return True, "auto-passed: pyproject.toml project, pip install skipped"
+    console.print("  [yellow]No requirements.txt or pyproject.toml found — auto-passing build.[/yellow]")
+    return True, "auto-passed: no Python dependency manifest found"
 
 
 def _run_fullstack_build(project_dir: Path) -> tuple[bool, str]:

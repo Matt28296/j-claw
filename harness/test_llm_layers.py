@@ -2611,17 +2611,39 @@ class TestDifficultyRouting(unittest.TestCase):
         self.assertIsInstance(orch._primary, self._o.Orchestrator)
         self.assertEqual(orch._primary._pinned_model, HAIKU_MODEL)
 
-    def test_complex_difficulty_returns_sonnet_opus_composite(self):
-        """difficulty='complex' → CompositeOrchestrator(Sonnet primary, Opus fallback)."""
+    def test_complex_difficulty_is_free_first_with_paid_backstop(self):
+        """difficulty='complex' is FREE-FIRST (operator directive 2026-06-19): $0 OAuth rungs
+        (Codex → Claude Max) lead, with the paid Sonnet→Opus ladder only as a last-resort backstop.
+        Previously this branch went straight to a paid Sonnet primary, bypassing available $0
+        orchestration during heal loops."""
         from config import ORCHESTRATOR_MODEL, OPUS_MODEL
-        orch = self._make_with_provider_anthropic("complex")
+        import worker as w
+        with patch.object(w, "_oauth_enabled", return_value=True):
+            orch = self._make_with_provider_anthropic("complex")
         self.assertIsInstance(orch, self._o.CompositeOrchestrator)
-        self.assertIsInstance(orch._primary, self._o.Orchestrator)
-        self.assertEqual(orch._primary._pinned_model, ORCHESTRATOR_MODEL)
-        # Emergency chain must include Opus as last rung
+        # Free $0 rung leads.
+        self.assertIsInstance(orch._primary, self._o.CodexOrchestrator)
+        # Claude Max ($0) sits ahead of any paid rung.
+        self.assertIsInstance(orch._emergency_chain[0], self._o.ClaudeCliOrchestrator)
+        # Paid Sonnet→Opus remain ONLY as the last-resort backstop, Opus last.
         opus_rung = orch._emergency_chain[-1]
         self.assertIsInstance(opus_rung, self._o.Orchestrator)
         self.assertEqual(opus_rung._pinned_model, OPUS_MODEL)
+        sonnet_rung = orch._emergency_chain[-2]
+        self.assertIsInstance(sonnet_rung, self._o.Orchestrator)
+        self.assertEqual(sonnet_rung._pinned_model, ORCHESTRATOR_MODEL)
+
+    def test_complex_difficulty_no_free_rungs_falls_to_paid(self):
+        """difficulty='complex' with all $0 OAuth rungs disabled → paid Sonnet→Opus backstop
+        (the only remaining option), preserving the ability to finish hard builds."""
+        from config import ORCHESTRATOR_MODEL, OPUS_MODEL
+        import worker as w
+        with patch.object(w, "_oauth_enabled", return_value=False):
+            orch = self._make_with_provider_anthropic("complex")
+        self.assertIsInstance(orch, self._o.CompositeOrchestrator)
+        self.assertIsInstance(orch._primary, self._o.Orchestrator)
+        self.assertEqual(orch._primary._pinned_model, ORCHESTRATOR_MODEL)
+        self.assertEqual(orch._emergency_chain[-1]._pinned_model, OPUS_MODEL)
 
     def test_medium_difficulty_codex_disabled_falls_to_sonnet(self):
         """difficulty='medium' with Codex disabled → plain Orchestrator (Sonnet)."""
@@ -3256,6 +3278,59 @@ class TestManualGateUnattended(unittest.TestCase):
         self.assertTrue(passed, "attended approval must still pass through")
 
 
+class TestPythonBuildManifest(unittest.TestCase):
+    """Regression: a pyproject.toml-only Python package (PEP 621 / hatchling /
+    Poetry, no requirements.txt) must NOT be verified with the hardcoded
+    `pip install -r requirements.txt`. That file doesn't exist, so the build used
+    to fail CLOSED and burn worker-ladder escalations up to the PAID rung on an
+    unwinnable task (observed live on D1 task-016, 2026-06-19)."""
+
+    def _mk(self, files: dict):
+        import tempfile, shutil
+        d = Path(tempfile.mkdtemp(prefix="jclaw_pybuild_"))
+        for name, content in files.items():
+            (d / name).write_text(content, encoding="utf-8")
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        return d
+
+    def _build_task(self):
+        t = MagicMock()
+        t.verification = "build"
+        t.id = "task-1"
+        return t
+
+    def test_pyproject_only_build_auto_passes_without_pip(self):
+        """The bug path end-to-end: detect 'python', build must auto-pass and the
+        impossible `pip install -r requirements.txt` must never run."""
+        import verification
+        proj = self._mk({"pyproject.toml": "[project]\nname = 'x'\nversion = '0.1.0'\n"})
+        self.assertEqual(verification.detect_ecosystem(proj), "python")
+        with patch.object(verification, "console"), \
+             patch.object(verification, "_run_cmd") as mock_run:
+            passed, _ = verification.run_verification(self._build_task(), proj)
+        self.assertTrue(passed, "pyproject-only build must auto-pass, not fail closed")
+        mock_run.assert_not_called()
+
+    def test_requirements_txt_build_still_runs_pip(self):
+        import verification
+        proj = self._mk({"requirements.txt": "rich\n"})
+        with patch.object(verification, "console"), \
+             patch.object(verification, "_run_cmd", return_value=(True, "")) as mock_run:
+            passed, _ = verification._run_python_build(proj)
+        self.assertTrue(passed)
+        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_args[0][0], ["pip", "install", "-r", "requirements.txt"])
+
+    def test_no_manifest_build_auto_passes(self):
+        import verification
+        proj = self._mk({"main.py": "print('hi')\n"})
+        with patch.object(verification, "console"), \
+             patch.object(verification, "_run_cmd") as mock_run:
+            passed, _ = verification._run_python_build(proj)
+        self.assertTrue(passed)
+        mock_run.assert_not_called()
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
@@ -3304,6 +3379,7 @@ if __name__ == "__main__":
         TestRungStatusSnapshot,
         TestWorktreeHuskRegression,
         TestManualGateUnattended,
+        TestPythonBuildManifest,
         TestCostCeiling,
         TestProjectDisposition,
         TestStampHonesty,

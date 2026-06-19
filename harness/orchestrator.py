@@ -616,7 +616,24 @@ def make_orchestrator(provider: str | None = None, *, manual: bool = False,
         return Orchestrator()
 
     if difficulty == "complex":
-        # Production builds: Sonnet primary → Opus escalation for maximum capability.
+        # Production builds: maximum capability, but STILL free-first (operator directive
+        # 2026-06-19 — "paid only when free is unavailable"). Lead with the $0 OAuth rungs
+        # (Codex, then Claude Max) and fall back to the paid Sonnet→Opus ladder ONLY when every
+        # free rung is exhausted/unavailable. Previously this branch went straight to paid Sonnet
+        # with no free rung, which silently bypassed available $0 orchestration during heal loops.
+        try:
+            import worker
+            free_rungs = []
+            if worker._oauth_enabled("codex"):
+                free_rungs.append(CodexOrchestrator())
+            if worker._oauth_enabled("claude_cli"):
+                free_rungs.append(ClaudeCliOrchestrator())
+            if free_rungs:
+                paid_fallback = ([Orchestrator(model=ORCHESTRATOR_MODEL),
+                                  Orchestrator(model=OPUS_MODEL)] if ANTHROPIC_API_KEY else [])
+                return CompositeOrchestrator(free_rungs[0], free_rungs[1:] + paid_fallback)
+        except Exception:  # noqa: BLE001 — worker import issues fall through to the paid ladder
+            pass
         if ANTHROPIC_API_KEY:
             sonnet = Orchestrator(model=ORCHESTRATOR_MODEL)
             opus_fallback = Orchestrator(model=OPUS_MODEL)
