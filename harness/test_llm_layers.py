@@ -2114,6 +2114,116 @@ class TestCodexOrchestrator(unittest.TestCase):
                          "reset_orchestrator_run() must clear the Codex planning budget")
 
 
+class TestClaudeCliOrchestrator(unittest.TestCase):
+    """#7 — Claude Max ($0 OAuth) orchestrator rung via `claude -p` (worker._claude_cli_tier).
+    Mirrors TestCodexOrchestrator: validates, one same-tier retry, escalates on two bad outputs,
+    latches the SHARED claude_cli rung on auth/quota unavailability, and is bounded by the shared
+    CLAUDE_CLI_MAX_CALLS cap. Plus: chain-placement (after Codex, before paid)."""
+
+    def setUp(self):
+        import orchestrator as o, worker as w
+        self._o = o
+        self._w = w
+        o.reset_orchestrator_run()
+        w.reset_paid_budget()
+        self._orig_enabled = (w.CLAUDE_CLI_ENABLED, w.CODEX_CLI_ENABLED)
+        w.CLAUDE_CLI_ENABLED = True
+
+    def tearDown(self):
+        self._w.CLAUDE_CLI_ENABLED, self._w.CODEX_CLI_ENABLED = self._orig_enabled
+        self._w.reset_paid_budget()
+        self._o.reset_orchestrator_run()
+
+    def _make(self):
+        from orchestrator import ClaudeCliOrchestrator
+        orch = ClaudeCliOrchestrator.__new__(ClaudeCliOrchestrator)
+        orch._model = "sonnet"
+        orch._system_prompt = "sys"
+        orch._provider_name = "claude_cli"
+        return orch
+
+    def test_validates_first_try(self):
+        orch = self._make()
+        with patch.object(self._w, "_call_claude_cli", return_value=json.dumps(VALID_FORMAT2)) as mc, \
+             patch("worker.record_role_event"):
+            result = orch.call({"system_state": "SPEC_ACCEPTED"})
+        self.assertEqual(result, VALID_FORMAT2)
+        self.assertEqual(mc.call_count, 1)
+
+    def test_retries_once_then_succeeds(self):
+        orch = self._make()
+        outs = ["NOT JSON", json.dumps(VALID_FORMAT2)]
+        idx = [0]
+        def cli(*a, **kw):
+            r = outs[idx[0]]; idx[0] += 1
+            return r
+        with patch.object(self._w, "_call_claude_cli", side_effect=cli) as mc, \
+             patch("orchestrator.console"), patch("worker.record_role_event"):
+            result = orch.call({"system_state": "SPEC_ACCEPTED"})
+        self.assertEqual(result, VALID_FORMAT2)
+        self.assertEqual(mc.call_count, 2, "one same-tier retry on a wrapping/truncation failure")
+
+    def test_two_bad_outputs_escalates(self):
+        orch = self._make()
+        with patch.object(self._w, "_call_claude_cli", return_value="STILL NOT JSON") as mc, \
+             patch("orchestrator.console"), patch("worker.record_role_event"):
+            with self.assertRaises(RuntimeError):
+                orch.call({"system_state": "SPEC_ACCEPTED"})
+        self.assertEqual(mc.call_count, 2, "exactly two attempts before escalating")
+
+    def test_unavailable_latches_and_escalates(self):
+        orch = self._make()
+        with patch.object(self._w, "_call_claude_cli",
+                          side_effect=RuntimeError("reached your usage limit")) as mc, \
+             patch("worker.record_role_event"):
+            with self.assertRaises(RuntimeError):
+                orch.call({"system_state": "INIT"})
+        self.assertEqual(mc.call_count, 1, "unavailability stops retrying immediately")
+        self.assertTrue(self._w._claude_cli_disabled, "shared claude_cli latch must be set")
+
+    def test_capacity_cap_blocks_without_calling(self):
+        orch = self._make()
+        with patch.object(self._w, "_call_claude_cli") as mc, \
+             patch.object(self._w, "CLAUDE_CLI_MAX_CALLS", 0):
+            with self.assertRaises(RuntimeError):
+                orch.call({"system_state": "INIT"})
+        mc.assert_not_called()
+
+    # ── chain placement: Codex ($0, independent) before Claude Max ($0, shared pool), both before paid ──
+    def test_emergency_chain_orders_codex_before_claude_cli(self):
+        from orchestrator import CodexOrchestrator, ClaudeCliOrchestrator, Orchestrator
+        with patch("worker._oauth_enabled", return_value=True):
+            chain = self._o._emergency_chain()
+        types = [type(x) for x in chain]
+        self.assertIn(CodexOrchestrator, types)
+        self.assertIn(ClaudeCliOrchestrator, types)
+        self.assertLess(types.index(CodexOrchestrator), types.index(ClaudeCliOrchestrator),
+                        "Codex (independent sub) must precede Claude Max (shared pool)")
+        if Orchestrator in types:  # paid rungs present only when emergency provider is anthropic
+            self.assertLess(types.index(ClaudeCliOrchestrator), types.index(Orchestrator),
+                            "both $0 rungs must precede any paid Anthropic rung")
+
+    def test_medium_difficulty_inserts_claude_cli_after_codex(self):
+        from orchestrator import (make_orchestrator, CompositeOrchestrator,
+                                   CodexOrchestrator, ClaudeCliOrchestrator)
+        with patch("worker._oauth_enabled", return_value=True):
+            orch = make_orchestrator(provider="anthropic", difficulty="medium")
+        self.assertIsInstance(orch, CompositeOrchestrator)
+        self.assertIsInstance(orch._primary, CodexOrchestrator)
+        self.assertIsInstance(orch._emergency_chain[0], ClaudeCliOrchestrator,
+                              "Claude Max must be the first fallback after the Codex primary")
+
+    def test_medium_difficulty_claude_cli_primary_when_codex_off(self):
+        from orchestrator import make_orchestrator, CompositeOrchestrator, ClaudeCliOrchestrator
+        def only_claude(provider):
+            return provider == "claude_cli"
+        with patch("worker._oauth_enabled", side_effect=only_claude):
+            orch = make_orchestrator(provider="anthropic", difficulty="medium")
+        self.assertIsInstance(orch, CompositeOrchestrator)
+        self.assertIsInstance(orch._primary, ClaudeCliOrchestrator,
+                              "with Codex off, Claude Max becomes the free primary")
+
+
 class TestCompositeChain(unittest.TestCase):
     """(3) Generalized free-first chain: Codex → Sonnet → Opus, stop at first valid."""
 
@@ -2835,6 +2945,7 @@ if __name__ == "__main__":
         TestCreativeDirectorValidator,
         TestGeminiQuotaFailfast,
         TestCodexOrchestrator,
+        TestClaudeCliOrchestrator,
         TestCompositeChain,
         TestLlmJson,
         TestSchemaFailTokenPersist,

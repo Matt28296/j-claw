@@ -427,6 +427,44 @@ class CodexOrchestrator:
             raise RuntimeError(f"CodexOrchestrator failed validation: {exc}") from exc
 
 
+class ClaudeCliOrchestrator:
+    """Free-first ($0 OAuth) orchestrator rung backed by the operator's Claude Max subscription via
+    `claude -p`. Wraps worker._claude_cli_tier (reserve → one same-tier retry → parse → validate →
+    latch → telemetry), the same protocol CodexOrchestrator uses.
+
+    Slotted in the emergency chain AFTER CodexOrchestrator and BEFORE the metered Anthropic rungs, so
+    planning/heal re-plans get a SECOND $0 attempt before any spend. It goes after Codex (not first)
+    because the Max pool is SHARED with the operator's interactive Claude Code AND the worker
+    claude_cli rung, whereas Codex's ChatGPT sub is independent; CLAUDE_CLI_MAX_CALLS caps the TOTAL
+    Max use per run across all three, so this rung is deliberately conservative. Raises RuntimeError
+    (so CompositeOrchestrator falls through to the paid rungs) when Claude CLI is unavailable /
+    capacity-reserved-out / fails validation on both attempts."""
+
+    def __init__(self, model: str | None = None) -> None:
+        self._model = model
+        self._system_prompt = ORCHESTRATOR_PROMPT_PATH.read_text(encoding="utf-8")
+        self._provider_name = "claude_cli"
+
+    def call(self, payload: dict, max_retries: int = 2) -> dict:
+        import worker
+        state = payload.get("system_state", "INIT")
+        user_message = json.dumps(payload)
+        # Delegate the claude_cli protocol (reserve, one retry, parse, validate, latch, telemetry) to
+        # the shared worker._claude_cli_tier; convert its outcomes into the RuntimeError that
+        # CompositeOrchestrator expects so the chain falls through to the next (paid) rung. The shared
+        # CLAUDE_CLI_MAX_CALLS cap (enforced inside the default reserve) bounds Max use, so no separate
+        # planning reserve is needed (unlike Codex's CODEX_PLANNING_RESERVE).
+        try:
+            return worker._claude_cli_tier(
+                self._system_prompt, user_message,
+                lambda parsed: validate_response(state, parsed),
+                role=f"orch:{state}", model=self._model)
+        except worker._CodexTierUnavailable as exc:
+            raise RuntimeError(f"ClaudeCliOrchestrator unavailable: {exc}") from exc
+        except worker._CodexTierInvalid as exc:
+            raise RuntimeError(f"ClaudeCliOrchestrator failed validation: {exc}") from exc
+
+
 class CompositeOrchestrator:
     """Wraps a primary orchestrator with an emergency cross-provider fallback.
 
@@ -483,9 +521,10 @@ class CompositeOrchestrator:
 
 
 def _emergency_chain() -> list:
-    """Build the free-first ordered emergency fallback chain: Codex ($0 OAuth) → Sonnet (paid) →
-    Opus (paid). Codex is included only when the OAuth rung is enabled; the paid Anthropic rungs
-    only when ORCHESTRATOR_EMERGENCY_PROVIDER is anthropic and a key is present. Grok is NOT in the
+    """Build the free-first ordered emergency fallback chain: Codex ($0 OAuth) → Claude Max ($0 OAuth)
+    → Sonnet (paid) → Opus (paid). Each $0 OAuth rung is included only when enabled; the paid Anthropic
+    rungs only when ORCHESTRATOR_EMERGENCY_PROVIDER is anthropic and a key is present. Claude Max goes
+    AFTER Codex (Codex's sub is independent; Max is shared with interactive use). Grok is NOT in the
     chain — it's evidence-gated per the plan (added only if a shadow test proves valid orch JSON).
     """
     chain: list = []
@@ -493,6 +532,9 @@ def _emergency_chain() -> list:
         import worker
         if worker._oauth_enabled("codex"):
             chain.append(CodexOrchestrator())
+        # Second $0 tier before any spend: Claude Max via `claude -p`, after Codex.
+        if worker._oauth_enabled("claude_cli"):
+            chain.append(ClaudeCliOrchestrator())
     except Exception:  # noqa: BLE001 — worker import/flag issues must not break orchestrator setup
         pass
     if ORCHESTRATOR_EMERGENCY_PROVIDER == "anthropic" and ANTHROPIC_API_KEY:
@@ -543,19 +585,24 @@ def make_orchestrator(provider: str | None = None, *, manual: bool = False,
         return primary
 
     if difficulty == "medium":
-        # MVP builds: Codex-first (free) with a paid Sonnet emergency fallback.
-        # This mirrors the planning_call ladder: Codex handles the common case,
-        # Anthropic is the backstop. Codex unavailability falls straight to Sonnet.
+        # MVP builds: free-first ($0 OAuth) primary with a paid Anthropic backstop. Mirrors the
+        # planning_call ladder — the cheapest reliable tier handles the common case, Anthropic is the
+        # backstop. Both $0 rungs (Codex, then Claude Max) lead; the first enabled is the primary and
+        # any remaining free rung sits ahead of the paid Sonnet→Opus fallback.
         try:
             import worker
+            free_rungs = []
             if worker._oauth_enabled("codex"):
-                codex_primary = CodexOrchestrator()
+                free_rungs.append(CodexOrchestrator())
+            if worker._oauth_enabled("claude_cli"):
+                free_rungs.append(ClaudeCliOrchestrator())
+            if free_rungs:
                 paid_fallback = [Orchestrator(model=EMERGENCY_ORCHESTRATOR_MODEL),
                                  Orchestrator(model=OPUS_MODEL)]
-                return CompositeOrchestrator(codex_primary, paid_fallback)
+                return CompositeOrchestrator(free_rungs[0], free_rungs[1:] + paid_fallback)
         except Exception:  # noqa: BLE001 — worker import issues fall through to Sonnet
             pass
-        # Codex not enabled: fall through to Sonnet (same as None but explicit)
+        # No $0 OAuth rung enabled: fall through to Sonnet (same as None but explicit)
         return Orchestrator()
 
     if difficulty == "complex":

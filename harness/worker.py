@@ -1287,13 +1287,16 @@ def ladder_status_snapshot() -> list[dict]:
 
 
 class _CodexTierUnavailable(Exception):
-    """The Codex tier could not run / must be skipped: not enabled, latched off, OAuth capacity (or a
-    caller-supplied reserve gate) exhausted, or an auth/quota/exe failure. Callers decide what to do
-    with it (planning_call falls through to Anthropic; CodexOrchestrator converts it to RuntimeError)."""
+    """A free OAuth CLI tier (Codex or Claude Max) could not run / must be skipped: not enabled,
+    latched off, OAuth capacity (or a caller-supplied reserve gate) exhausted, or an auth/quota/exe
+    failure. Callers decide what to do with it (planning_call falls through to Anthropic; the
+    Codex/ClaudeCli orchestrators convert it to RuntimeError). Name kept for backward-compat — it now
+    covers both CLI tiers via _codex_tier and _claude_cli_tier."""
 
 
 class _CodexTierInvalid(Exception):
-    """Codex produced output that failed validation on both attempts (a capability failure)."""
+    """A free OAuth CLI tier (Codex or Claude Max) produced output that failed validation on both
+    attempts (a capability failure)."""
 
 
 def _codex_tier(system: str, user: str, validate_fn, *, role: str,
@@ -1346,6 +1349,59 @@ def _codex_tier(system: str, user: str, validate_fn, *, role: str,
             record_role_event(role, provider="codex", model=_model, success=False,
                               schema_fail=True, latency_s=time.monotonic() - _t0)
     raise _CodexTierInvalid(f"Codex failed validation after 2 attempts: {last_err}")
+
+
+def _claude_cli_tier(system: str, user: str, validate_fn, *, role: str,
+                     model: str | None = None, reserve_attempt=None) -> dict:
+    """Run the Claude Max CLI ($0 OAuth) tier — the planning/orchestration analog of _codex_tier.
+    Same protocol: up to 2 attempts (one same-tier retry for output wrapping/truncation), each
+    reserving capacity, shelling to `claude -p` via _call_claude_cli, parsing via
+    loads_llm_json_object, and gating on validate_fn. Returns the validated dict.
+
+    The claude_cli capacity cap (CLAUDE_CLI_MAX_CALLS) is SHARED with the worker rung AND the
+    operator's interactive Claude Max pool, so reserving here conservatively bounds total Max use
+    per run. Raises `_CodexTierUnavailable` when claude_cli is disabled / latched / capacity-
+    exhausted or hits an auth/quota/exe failure (latching `_claude_cli_disabled` in that last case);
+    raises `_CodexTierInvalid` when output fails validation on both attempts. `reserve_attempt()` is
+    called once per attempt BEFORE the call and must reserve capacity, raising `_CodexTierUnavailable`
+    if it can't — it defaults to a plain `_reserve_oauth_call('claude_cli')`. claude_cli-only: never
+    falls back to Anthropic (the caller owns escalation)."""
+    from llm_json import loads_llm_json_object
+    global _claude_cli_disabled
+
+    if not _oauth_enabled("claude_cli"):
+        raise _CodexTierUnavailable("Claude CLI not enabled")
+
+    if reserve_attempt is None:
+        def reserve_attempt():
+            if not _reserve_oauth_call("claude_cli"):
+                raise _CodexTierUnavailable("Claude CLI latched off or OAuth capacity exhausted")
+
+    _model = model or CLAUDE_CLI_MODEL
+    last_err: Exception | None = None
+    for _attempt in range(2):
+        reserve_attempt()  # may raise _CodexTierUnavailable (capacity / caller-supplied gate)
+        _t0 = time.monotonic()
+        try:
+            raw = _call_claude_cli(_model, system, user)
+            parsed = loads_llm_json_object(raw)
+            validate_fn(parsed)
+            record_role_event(role, provider="claude_cli", model=_model, success=True,
+                              latency_s=time.monotonic() - _t0)
+            return parsed
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            if _is_claude_cli_unavailable(exc):
+                with _oauth_lock:
+                    _claude_cli_disabled = True
+                    _record_rung_latched("claude_cli", exc)  # keep dashboard snapshot consistent with the latch
+                record_role_event(role, provider="claude_cli", model=_model, success=False,
+                                  latency_s=time.monotonic() - _t0)
+                raise _CodexTierUnavailable(str(exc)) from exc
+            # capability / validation failure → record schema_fail and retry once at this tier
+            record_role_event(role, provider="claude_cli", model=_model, success=False,
+                              schema_fail=True, latency_s=time.monotonic() - _t0)
+    raise _CodexTierInvalid(f"Claude CLI failed validation after 2 attempts: {last_err}")
 
 
 def planning_call(
