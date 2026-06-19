@@ -3041,6 +3041,49 @@ class TestProjectDisposition(unittest.TestCase):
         self.assertFalse(_build_disposition(True, False, []))
 
 
+class TestSubprojectEscapeValve(unittest.TestCase):
+    """#5 escape valve: an over-scoped sub-project may decompose one more level while
+    under MAX_FORMAT5_DEPTH, and is force-flattened at/above the cap. Activates the
+    previously-dead depth knob; backward-compatible with the old strict rule at cap=1."""
+
+    def test_top_level_always_allowed(self):
+        import main, config
+        with patch.object(config, "MAX_FORMAT5_DEPTH", 3), \
+             patch.object(main, "MAX_FORMAT5_DEPTH", 3):
+            self.assertTrue(main._subproject_decomposition_allowed(0))
+
+    def test_under_cap_allowed(self):
+        import main
+        with patch.object(main, "MAX_FORMAT5_DEPTH", 3):
+            self.assertTrue(main._subproject_decomposition_allowed(1))
+            self.assertTrue(main._subproject_decomposition_allowed(2))
+
+    def test_at_or_above_cap_flattens(self):
+        import main
+        with patch.object(main, "MAX_FORMAT5_DEPTH", 3):
+            self.assertFalse(main._subproject_decomposition_allowed(3))
+            self.assertFalse(main._subproject_decomposition_allowed(4))
+
+    def test_cap_one_restores_strict_old_behaviour(self):
+        # MAX_FORMAT5_DEPTH=1: top-level decomposes, sub-projects (depth>=1) never do.
+        import main
+        with patch.object(main, "MAX_FORMAT5_DEPTH", 1):
+            self.assertTrue(main._subproject_decomposition_allowed(0))
+            self.assertFalse(main._subproject_decomposition_allowed(1))
+
+    def test_prompt_contradiction_removed(self):
+        # The old prompt forbade FORMAT 5 whenever sub_project_depth was present, which
+        # contradicted the "Recursion is allowed" clause and blocked the escape valve.
+        from config import ORCHESTRATOR_PROMPT_PATH
+        text = ORCHESTRATOR_PROMPT_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("`decomposition_allowed: false` or `sub_project_depth` must", text,
+                         "stale contradiction (depth-presence forbids FORMAT 5) still in prompt")
+        self.assertIn("decomposition_allowed: true", text,
+                      "prompt must describe the under-cap headroom case")
+        # The anti-spiral guidance must survive the rewrite.
+        self.assertIn("Recursion is allowed", text)
+
+
 class TestStampHonesty(unittest.TestCase):
     """The OpenClaw 'ISSUES FOUND' stamp must never be reported as a clean ✅ PASS."""
 
@@ -3156,6 +3199,7 @@ if __name__ == "__main__":
         TestCostCeiling,
         TestProjectDisposition,
         TestStampHonesty,
+        TestSubprojectEscapeValve,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 

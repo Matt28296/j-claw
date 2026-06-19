@@ -867,19 +867,23 @@ Respond with **FORMAT 2** (task list only — no spec). Rules:
    cannot fit within a single 50-task project instance — emit FORMAT 5 from the top-level
    INIT only.
 
-   **FORMAT 5 is ONLY valid as a response to a top-level INIT call. It is NEVER valid
-   at any other pipeline state.** In particular:
-   - `SPEC_ACCEPTED` (task DAG) must ALWAYS answer with FORMAT 2 — never FORMAT 5.
-   - Any payload carrying `decomposition_allowed: false` or `sub_project_depth` must
-     NEVER receive FORMAT 5 in ANY state, including INIT.
+   **FORMAT 5 is valid at a top-level INIT call, and at a sub-project INIT call that the
+   harness says still has decomposition headroom.** It is forbidden once the harness
+   disallows it. In particular:
+   - `SPEC_ACCEPTED` (task DAG) should answer with FORMAT 2 — prefer a flat task list.
+   - Any payload carrying `decomposition_allowed: false` must NEVER receive FORMAT 5 in
+     ANY state, including INIT — emit the requested flat format instead.
    - A `decomposition_rejected` key in the payload means a previous FORMAT 5 response
      was already rejected — you must emit the requested flat format on this retry.
 
    **EXCEPTION — you may already BE a sub-project.** When the INIT payload contains
-   `sub_project_depth` (any value ≥ 1) or `decomposition_allowed: false`, you are planning
-   ONE scene/segment of an existing decomposition: emit a flat FORMAT 1 spec (≤50 tasks)
-   that builds that scene directly, and NEVER emit FORMAT 5. A scene does not decompose
-   into further sub-projects — recursive decomposition produces nothing but cost.
+   `sub_project_depth`, you are planning ONE scene/segment of an existing decomposition:
+   - If `decomposition_allowed: false` (you are at the recursion cap), emit a flat FORMAT 1
+     spec (≤50 tasks) that builds that scene directly, and NEVER emit FORMAT 5.
+   - If `decomposition_allowed: true` (you still have depth headroom), PREFER a flat
+     FORMAT 1 spec; emit FORMAT 5 ONLY when this scene/segment genuinely cannot fit within
+     a 50-task budget. Guard against runaway splitting — never decompose an atomic feature;
+     recursive decomposition of something that already fits produces nothing but cost.
 
    - Decompose the film into one sub-project per scene (or logical segment). Name sub-projects
      `scene_001`, `scene_002`, etc. Each scene sub-project depends on the previous scene so

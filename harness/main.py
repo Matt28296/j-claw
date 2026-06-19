@@ -200,6 +200,15 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
     return passed
 
 
+def _subproject_decomposition_allowed(depth: int) -> bool:
+    """Whether a project at this FORMAT-5 depth may still decompose further (#5 escape
+    valve). True at the top level (depth 0) and for sub-projects below MAX_FORMAT5_DEPTH;
+    False at/above the cap, where the sub-project must flatten to a ≤50-task spec. This
+    activates the previously-dead MAX_FORMAT5_DEPTH knob (the old guard force-flattened
+    every sub-project unconditionally). Set MAX_FORMAT5_DEPTH=1 to restore that strict rule."""
+    return depth < MAX_FORMAT5_DEPTH
+
+
 def _build_disposition(review_passed: bool, dynamic_passed: bool, failed_tasks: list) -> bool:
     """Honest overall build verdict (#6).
 
@@ -362,37 +371,42 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
     if wiring:
         init_payload["wiring"] = wiring
     if depth:
-        # Already a sub-project: one scene/segment of a FORMAT 5 decomposition.
-        # Recursive decomposition multiplies cost without producing anything
-        # (observed live: scene → scripts → … until the depth cap).
+        # Escape valve (#5): a sub-project that is itself over-scoped may decompose
+        # ONE more level while there is depth headroom, bounded by MAX_FORMAT5_DEPTH
+        # (and the hard backstop at run_project top, main.py:219). At/above the cap it
+        # is force-flattened — preserving the original anti-spiral behaviour that the
+        # earlier unconditional guard provided. Set MAX_FORMAT5_DEPTH=1 to restore the
+        # strict "sub-projects never decompose" rule.
         init_payload["sub_project_depth"] = depth
-        init_payload["decomposition_allowed"] = False
+        init_payload["decomposition_allowed"] = _subproject_decomposition_allowed(depth)
     spec = orch.call(init_payload)
     sw.on_agent_done()
 
     if spec.get("oversize"):
-        if depth:
-            # Runtime enforcement — never trust the prompt alone. One corrective
-            # retry, then an honest failure instead of a recursion spiral.
+        if not _subproject_decomposition_allowed(depth):
+            # At the recursion cap — runtime enforcement, never trust the prompt alone.
+            # One corrective retry, then an honest failure instead of a recursion spiral.
             console.print(
-                "  [yellow]Sub-project tried to decompose again (FORMAT 5 inside FORMAT 5) "
-                "— rejecting and requesting a flat FORMAT 1 spec.[/yellow]"
+                "  [yellow]Sub-project tried to decompose at the recursion cap "
+                f"(depth {depth} ≥ MAX_FORMAT5_DEPTH {MAX_FORMAT5_DEPTH}) — rejecting "
+                "and requesting a flat FORMAT 1 spec.[/yellow]"
             )
             sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "INIT")
             spec = orch.call({
                 **init_payload,
                 "decomposition_rejected": (
-                    f"You are already a sub-project at depth {depth} of a FORMAT 5 "
-                    "decomposition. Further decomposition is FORBIDDEN. Emit a flat "
-                    "FORMAT 1 spec (≤50 tasks) that builds this one scene/segment "
-                    "directly. Trim scope to fit if needed."
+                    f"You are a sub-project at depth {depth}, the recursion cap "
+                    f"(MAX_FORMAT5_DEPTH={MAX_FORMAT5_DEPTH}). Further decomposition is "
+                    "FORBIDDEN. Emit a flat FORMAT 1 spec (≤50 tasks) that builds this one "
+                    "scene/segment directly. Trim scope to fit if needed."
                 ),
             })
             sw.on_agent_done()
             if spec.get("oversize"):
-                console.print("  [red]Sub-project still demands decomposition — failing honestly.[/red]")
+                console.print("  [red]Sub-project still demands decomposition at the cap — failing honestly.[/red]")
                 return False
         else:
+            # Top-level (depth 0) OR an under-cap sub-project: allow decomposition.
             return _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual,
                                     intent=intent,
                                     parent_stack=(tech_spec or {}).get("confirmed_stack", ""))
@@ -412,8 +426,8 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
             "revision_feedback": feedback,
         })
         if spec.get("oversize"):
-            if depth:
-                console.print("  [red]Sub-project revision demands decomposition — failing honestly.[/red]")
+            if not _subproject_decomposition_allowed(depth):
+                console.print("  [red]Sub-project revision demands decomposition at the recursion cap — failing honestly.[/red]")
                 return False
             return _handle_oversize(spec, output_dir, depth, auto_accept=auto_accept, manual=manual,
                                     intent=intent,
@@ -431,35 +445,35 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
     if _lessons:
         _dag_payload["past_failure_lessons"] = _lessons
     if depth:
-        # Already inside a FORMAT 5 decomposition — the same guard that works at INIT
-        # must also apply here. Without it Gemini answers SPEC_ACCEPTED with another
-        # FORMAT 5 and doubles (or triples) the orchestrator call count per build,
-        # exhausting the free-tier quota before any task is executed.
+        # Mirror the INIT escape valve (#5): allow one more decomposition level while
+        # under MAX_FORMAT5_DEPTH, force-flatten at/above the cap. The cap is what
+        # bounds the orchestrator call-count amplification the original guard feared.
         _dag_payload["sub_project_depth"] = depth
-        _dag_payload["decomposition_allowed"] = False
+        _dag_payload["decomposition_allowed"] = _subproject_decomposition_allowed(depth)
     dag_response = orch.call(_dag_payload)
     sw.on_agent_done()
 
     if dag_response.get("oversize"):
-        if depth:
-            # Corrective retry — mirror the INIT guard pattern.
+        if not _subproject_decomposition_allowed(depth):
+            # At the recursion cap — corrective retry, mirror the INIT guard pattern.
             console.print(
-                "  [yellow]Sub-project tried to decompose at DAG stage (FORMAT 5 inside SPEC_ACCEPTED) "
-                "— rejecting and requesting a flat FORMAT 2 task list.[/yellow]"
+                "  [yellow]Sub-project tried to decompose at DAG stage at the recursion cap "
+                f"(depth {depth} ≥ MAX_FORMAT5_DEPTH {MAX_FORMAT5_DEPTH}) — rejecting and "
+                "requesting a flat FORMAT 2 task list.[/yellow]"
             )
             sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "SPEC_ACCEPTED")
             dag_response = orch.call({
                 **_dag_payload,
                 "decomposition_rejected": (
-                    f"You are already a sub-project at depth {depth} of a FORMAT 5 "
-                    "decomposition. FORMAT 5 is FORBIDDEN here. Emit a flat FORMAT 2 "
-                    "task list (≤50 tasks) that implements this scene/segment directly. "
-                    "Trim scope to fit if needed — do NOT emit oversize/FORMAT 5."
+                    f"You are a sub-project at depth {depth}, the recursion cap "
+                    f"(MAX_FORMAT5_DEPTH={MAX_FORMAT5_DEPTH}). FORMAT 5 is FORBIDDEN here. Emit a "
+                    "flat FORMAT 2 task list (≤50 tasks) that implements this scene/segment "
+                    "directly. Trim scope to fit if needed — do NOT emit oversize/FORMAT 5."
                 ),
             })
             sw.on_agent_done()
             if dag_response.get("oversize"):
-                console.print("  [red]Sub-project still demands decomposition at DAG stage — failing honestly.[/red]")
+                console.print("  [red]Sub-project still demands decomposition at DAG stage at the cap — failing honestly.[/red]")
                 return False
         else:
             return _handle_oversize(dag_response, output_dir, depth, auto_accept=auto_accept, manual=manual,
