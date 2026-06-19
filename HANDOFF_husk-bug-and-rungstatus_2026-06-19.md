@@ -1,6 +1,23 @@
 # Session Handoff — Reliability Hardening Wave (2026-06-19, updated EOD)
 
-Branch: `run/moba-monitored`. Operator: Matthew. **NOW PUSHED & IN SYNC with `origin/run/moba-monitored`** (`github.com/Matt28296/j-claw`) — `git rev-list --left-right --count` reads `0 0`. The earlier "local-only" status is superseded. ⚠️ **One caveat:** there are currently **UNCOMMITTED Wave 4 changes in the working tree** (8 `harness/*.py` files + 5 new `test_wave4_*.py`) from an in-flight orchestration — see the Wave 4 section. Do NOT commit/disturb the tree until that workflow reports its GO/NO-GO.
+Branch: `run/moba-monitored`. Operator: Matthew. **PUSHED & IN SYNC with `origin/run/moba-monitored`** (`github.com/Matt28296/j-claw`) — `git rev-list --left-right --count` reads `0 0`, working tree clean. (The earlier "UNCOMMITTED Wave 4" caveat is superseded — Wave 4 shipped as `236965d`.)
+
+---
+
+## ⏩⏩ LATEST (2026-06-19, late) — Gate 3 ran, cost-fix shipped, Phase 4 (minimal) shipped
+
+Head of branch: **`190705a`** (`0 0` vs origin). Sequence since Wave 4:
+
+1. **Gate 3 — RAN (supervised, metered) → honest FAIL.** Intent = non-game CLI devtoolkit. The Technical Architect scaled it to `mvp`/21 files, so it came out a **FLAT build and NEVER triggered FORMAT-5** — meaning **HK2 (husk on the *decomposing* path) is STILL UNPROVEN.** It honest-FAILed after 3 heal cycles (issues 13→14→11, never converged), cost **$0.85**, no ceiling trip, 120 files landed real, clean worktree teardown, ClaudeCli **live-validated** as a worker (6 tasks). ✅ All reliability machinery validated on the flat path (husk, HK1 namespacing, $0-ladder escalation, regression detection, honest gates / no false-pass, cost discipline). **KEY FINDING:** the build needed 60 tasks and still failed — the worker tier drifts on interface contracts in integration-heavy code → this is a **worker-quality/routing** problem (Phase 4), not a reliability regression.
+2. **Free-rung caps retuned in `.env`** (gitignored): `claude_cli 10→40`, `codex 20→40`, `CODEX_PLANNING_RESERVE 6→12`, `grok 40` — all free caps now exceed the paid backstop (`MAX_PAID_WORKER_CALLS=15`), so $0 rungs deplete before any paid call. (The old `claude_cli=10 < paid=15` was an inversion: paid spend started while free subscription headroom remained. Caps kept finite — the $5 ceiling guards only PAID, so the call cap is the only free-rung circuit-breaker.)
+3. **`0306d71` fix(cost):** `_handle_oversize` triangular-**double-counted** the reported aggregate cost on FORMAT-5 builds (operator-facing over-report; enforcement was correct). Found by reading the counter code; fixed (read build-global accumulator once) + regression test.
+4. **`190705a` feat(routing): Phase 4 minimal slice.** `route_task` now starts integration-heavy tasks (`deps>0` + non-trivial type) at the first **$0 OAuth rung (grok)** instead of the weak local model. Safety: never lowers rung, never jumps to a *metered* rung on its own (no-OAuth ladder → local-first). Toggle `INTEGRATION_FIRST_ROUTING` (default on). Suite **187 green**.
+
+**Settled plan order (debated w/ Codex):** A ✅ commit cost-fix → B ✅ Phase 4 minimal slice → **D1 NEXT: re-run the SAME Gate 3 flat intent with routing ON** (cheapest variable-isolated proof routing helped; metered but should cost < $0.85) → C `memory_lint.py` (staleness pre-flight) → D2 small live FORMAT-5 smoke (must explicitly validate HK1) → E MOBA. Rationale: critical-path-first, each step isolates one variable so failures stay diagnosable.
+
+**Immediate next action:** D1 — supervised re-run of the Gate 3 flat intent (`projects/_gate3_clitoolkit` style) with `INTEGRATION_FIRST_ROUTING=true`; success = issue count drops/converges. Needs operator go-ahead (metered).
+
+Housekeeping still open: prune the pre-existing stale `task-015` worktree (`C:\Users\Tyler\Desktop\.jclaw_worktrees`).
 
 ---
 
