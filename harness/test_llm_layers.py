@@ -3016,6 +3016,61 @@ class TestCostCeiling(unittest.TestCase):
             mock_client.assert_not_called()  # never spent
 
 
+class TestProjectDisposition(unittest.TestCase):
+    """Honest build verdict (#6): a task that failed verification and exhausted
+    retries must fail the build. Previously task statuses were ignored, letting a
+    broken build report PASS."""
+
+    def test_failed_task_fails_build(self):
+        from main import _build_disposition
+        fake_failed = [MagicMock()]  # one failed task
+        self.assertFalse(_build_disposition(True, True, fake_failed),
+                         "a failed/exhausted task must fail the build even if review+dynamic pass")
+
+    def test_clean_build_passes(self):
+        from main import _build_disposition
+        self.assertTrue(_build_disposition(True, True, []),
+                        "all checks pass + no failed tasks → PASS (no false-negative)")
+
+    def test_review_fail_fails(self):
+        from main import _build_disposition
+        self.assertFalse(_build_disposition(False, True, []))
+
+    def test_dynamic_fail_fails(self):
+        from main import _build_disposition
+        self.assertFalse(_build_disposition(True, False, []))
+
+
+class TestStampHonesty(unittest.TestCase):
+    """The OpenClaw 'ISSUES FOUND' stamp must never be reported as a clean ✅ PASS."""
+
+    def _headline(self, *, passed, stamp_issues):
+        import notify
+        captured = {}
+        with patch.object(notify, "send_telegram",
+                          side_effect=lambda msg: captured.setdefault("msg", msg) or True):
+            notify.notify_build_outcome(
+                project="proj", passed=passed, heal_cycles=0, max_heal=2,
+                stamp_issues=stamp_issues,
+            )
+        return captured["msg"].splitlines()[0]
+
+    def test_issues_found_not_reported_as_clean_pass(self):
+        head = self._headline(passed=True, stamp_issues=True)
+        self.assertNotIn("✅", head, "stamp ISSUES FOUND must not show a green-check PASS")
+        self.assertIn("ISSUES", head.upper())
+
+    def test_clean_pass_is_green(self):
+        head = self._headline(passed=True, stamp_issues=False)
+        self.assertIn("✅", head)
+        self.assertIn("PASSED", head)
+
+    def test_fail_is_red(self):
+        head = self._headline(passed=False, stamp_issues=False)
+        self.assertIn("❌", head)
+        self.assertIn("FAILED", head)
+
+
 class TestManualGateUnattended(unittest.TestCase):
     """Roadmap blocker #2: the manual verification gate must never crash an
     unattended (no-TTY) build. It used to call Confirm.ask() directly, which
@@ -3099,6 +3154,8 @@ if __name__ == "__main__":
         TestWorktreeHuskRegression,
         TestManualGateUnattended,
         TestCostCeiling,
+        TestProjectDisposition,
+        TestStampHonesty,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 

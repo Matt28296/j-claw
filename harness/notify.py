@@ -58,7 +58,10 @@ def notify_build_outcome(
     """Push the terminal verdict of a build. PASS can still carry caveats when
     the independent OpenClaw stamp disagreed with the pipeline verdict."""
     if passed and stamp_issues:
-        head = f"✅ J-Claw build PASSED (with caveats) — {project}"
+        # Honest reporting (#6): the pipeline verdict passed, but the independent
+        # OpenClaw stamp found unresolved issues. Do NOT show a clean ✅ — that would
+        # tell the operator the build is good when a reviewer disagreed.
+        head = f"⚠️ J-Claw build PASSED-PIPELINE / STAMP FLAGGED ISSUES — {project}"
     elif passed:
         head = f"✅ J-Claw build PASSED — {project}"
     else:

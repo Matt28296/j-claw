@@ -200,6 +200,17 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
     return passed
 
 
+def _build_disposition(review_passed: bool, dynamic_passed: bool, failed_tasks: list) -> bool:
+    """Honest overall build verdict (#6).
+
+    PASS requires the final review AND the dynamic checks to pass AND that no task
+    failed verification and exhausted its retries. Task statuses were previously
+    ignored — the verdict was only `review_passed and dynamic_passed` — so a build
+    with a hard-failed/stalled task could still report PASS. `failed_tasks` is the
+    list from ProjectInstance.failed_tasks(); a non-empty list fails the build."""
+    return bool(review_passed and dynamic_passed and not failed_tasks)
+
+
 def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = False, auto_accept: bool = False, wiring: dict | None = None) -> bool:
     """Run one project instance from intent to completion (recursive for FORMAT 5).
 
@@ -552,8 +563,20 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
             review_passed = run_final_review(output_dir, instance.spec)
             sw.on_final_review_result(review_passed, heal_cycle=heal_cycle)
             dynamic_passed, dynamic_issues = _run_dynamic_checks()
+            # Honest disposition (#6): a task that failed verification and exhausted its
+            # retries must FAIL the build. Previously the verdict was only
+            # `review_passed and dynamic_passed` — task statuses were never consulted, so a
+            # broken build (failed/stalled task) could still report PASS. Fold failed tasks
+            # into the verdict AND surface them as heal issues so the loop attempts a fix.
+            failed_tasks = instance.failed_tasks()
+            if failed_tasks:
+                dynamic_issues = list(dynamic_issues) + [
+                    f"Task {t.id} failed verification and exhausted retries: "
+                    f"{(t.error_log or '').strip()[:200]}"
+                    for t in failed_tasks
+                ]
             sw.on_dynamic_checks(dynamic_passed, dynamic_issues)
-            passed = review_passed and dynamic_passed
+            passed = _build_disposition(review_passed, dynamic_passed, failed_tasks)
             if passed or heal_cycle == _MAX_HEAL:
                 break
 
