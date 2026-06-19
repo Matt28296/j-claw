@@ -1,10 +1,42 @@
 # Session Handoff — Reliability Hardening Wave (2026-06-19, updated EOD)
 
-Branch: `run/moba-monitored`. Operator: Matthew. **PUSHED & IN SYNC with `origin/run/moba-monitored`** (`github.com/Matt28296/j-claw`) — head `85a9e81`, `0 0` vs origin, working tree clean, suite **208 green** (skipped=1). (The earlier "UNCOMMITTED Wave 4" caveat is superseded — Wave 4 shipped as `236965d`.)
+Branch: `run/moba-monitored`. Operator: Matthew. **PUSHED & IN SYNC with `origin/run/moba-monitored`** (`github.com/Matt28296/j-claw`) — head `eaf654e`, `0 0` vs origin, working tree clean, suite **221 green** (skipped=1). (The earlier "UNCOMMITTED Wave 4" caveat is superseded — Wave 4 shipped as `236965d`.)
 
 ---
 
-## ⏩⏩⏩⏩ LATEST (2026-06-19, night) — D1 take-2 RAN → 3 cost/reliability fixes shipped + pushed; verdict = cost-disciplined but worker-quality-gated
+## ⏩⏩⏩⏩⏩ LATEST (2026-06-19, late night) — D3 ran (OAuth-bypass bug found+FIXED), D4 re-run proving it, + FORCE_FORMAT5 knob + memory_lint shipped
+
+Head of branch: **`eaf654e`** (`0 0` vs origin, tree clean, suite **221 green**). Three commits since `85a9e81`: **`38baff1`** (OAuth fix), **`3498b2f`** (FORCE_FORMAT5), **`eaf654e`** (memory_lint). Supersedes the "NEXT: D3" plan below.
+
+**D3 (Gate-3 flat CLI-devtoolkit, all prior fixes live) — RAN → BUILD CONVERGED 14/14 on $0 rungs, then both REVIEW stages died "credit balance too low".** This exposed the session's headline bug.
+
+**🔑 OAuth-bypass bug — FIXED (`38baff1` fix(cost): final review + OpenClaw stamp run on OAuth, not the metered key).**
+- *Root cause:* Claude Code's non-interactive auth precedence puts `ANTHROPIC_API_KEY` AHEAD of the subscription OAuth. Any `claude` subprocess that inherits the key silently meters the "free" call — and **fails "credit balance too low" because the metered ANTHROPIC_API_KEY account has $0 credits**. The worker rung already scrubbed the key (so the *build* ran free), but the two control-plane review paths did NOT: `final_review.py` called the metered API directly (no OAuth path at all), and `handoff.py`'s OpenClaw stamp passed raw `os.environ` to the `claude` CLI.
+- *Fix:* new **`config.claude_cli_env()`** = single source of truth for the credential scrub (`CLAUDE_CLI_ENV_BLOCKLIST`); `handoff.py` stamp uses it; `final_review.py` gained a **CLI-first (OAuth) path** with the metered API only as fallback (and now reviews even on a box with NO API key); `worker.py` repointed at the shared helper. **+3 regression tests** (env scrub, overlay, final-review-prefers-CLI); fixed 2 tests that asserted API-only behavior.
+- *Proof:* live smoke `claude --print` with scrubbed env → `OAUTH_OK` rc 0, no credit error. Suite 211 green at that commit.
+
+**D4 (`blgkn8nej`, D3 re-run with the OAuth fix live) — RAN, IN PROGRESS at handoff time. The OAuth fix is CONFIRMED working.**
+- Build **converged 20/20 tasks entirely on $0 rungs** (FORCE_FORMAT5 was OFF, so still a FLAT build — 20-task DAG, not decomposing).
+- **Mid-build, grok AND codex BOTH exhausted their real auth/quota** (not the spurious-timeout bug — the latch fix `fda2e4d` was seen working live: *"grok timed out (transient) — NOT latching"*). The remaining tasks + ALL heal cycles rode the **claude_cli OAuth (Max subscription) rung** — graceful free-ladder degradation, **never touched paid, $0 throughout**.
+- **Both review stages now run on OAuth:** log shows `Running final Claude Code review … → via claude CLI (subscription OAuth)` — the exact path that died in D3. **No credit-balance error.** ✅ Headline fix proven end-to-end.
+- The OAuth final review **honestly flagged real issues** (5, then more: e.g. `pyproject.toml` missing `version`/`dynamic`) → heal cycles 1→2→3. Honest gate working (no false pass). Convergence is the SLOW part — same standing finding: **cost discipline airtight; convergence gated on worker output quality.** *(Final disposition + `est. cost` line not yet captured at handoff write — D4 still healing on OAuth at $0. Check tail of `harness/_d4_run.log`.)*
+- **Process lesson:** do NOT spawn a Codex subagent (e.g. codex-rescue) DURING a build that relies on the codex rung — they share the operator's Codex OAuth quota and contend (observed: codex rung died right after a codex-rescue debate agent was launched).
+
+**Two test-harness/reliability features shipped (settled via a design debate; Codex was rate-limited until Jun 20 00:29, so decided solo per the Codex-Gate-Fallback policy — reversible design → solo):**
+1. **`3498b2f` FORCE_FORMAT5 knob.** D3/D4 came out FLAT because the TA scales intents down (~17–20 files). New `config.FORCE_FORMAT5` (default off) + `MIN_SUBPROJECT_COUNT` (default 3): at depth 0 only, inject a `decomposition_required` directive into the orchestrator payload; retry once if still flat; then **abort honestly** (a flat build wouldn't exercise FORMAT 5). Sub-projects (depth>0) never forced. +3 tests.
+2. **`eaf654e` memory_lint.py** — warn-only `project_memory/` staleness pre-flight. Checks: `missing_file_citation`, `contract_no_source` (api_contracts route absent from source tree — high value: FORMAT-5 sub-projects SHARE api_contracts across worktrees), `orphan_meta`. **Never mutates/blocks**; writes `project_memory/lint_report.json` so unattended warnings aren't lost; always exits 0. Standalone CLI + `lint_project_memory()`. **Proven on real D3 memory** (caught `project_summary.md` citing `src/devtoolkit/cli_rename.py` + test files never built under those names). +7 tests. *Trigger-wiring into `--continue` + FORMAT-5 sub-project-start is a documented follow-up — module + CLI are done, the auto-hook is NOT yet wired.*
+
+**Settled plan for the FORMAT-5 smoke (the linchpin — still the ONLY HK2 proof):**
+- ① **Sequential** FORMAT-5 smoke with `FORCE_FORMAT5=1` (fresh dir `projects/_fmt5_smoke`) → proves **HK2** (husk on decomposing path) + flow. Success = goes FORMAT-5 **and** files survive in EVERY sub-project **and `api_contracts.md` present+non-empty in every sub-project output dir**.
+- ② **Controlled concurrent pair** (same output parent, different names) → proves **HK1** (a CONCURRENT-builds bug — a sequential run CANNOT prove it). **PAUSE before ② — needs operator go-ahead, run supervised** (concurrency stresses the husk hardest).
+
+**NEXT (immediate):** finish watching D4 to its honest verdict + `est. cost` (still running, $0). Then **item (3): launch the sequential FORMAT-5 smoke** (`FORCE_FORMAT5=1`, `projects/_fmt5_smoke`) once D4 releases the worktrees (never concurrent with D4 — HK1 risk). Then pause for go-ahead before the concurrent HK1 pair. Then pre-MOBA hardening → MOBA.
+
+**Open findings (NOT fixed):** (1) Windows `mission_control.json` atomic-rename race (`[WinError 5]`) — cosmetic, retry-with-backoff before MOBA-scale concurrency; (2) memory_lint trigger auto-wiring; (3) codex-subagent-during-build contention (process discipline).
+
+---
+
+## ⏩⏩⏩⏩ EARLIER (2026-06-19, night) — D1 take-2 RAN → 3 cost/reliability fixes shipped + pushed; verdict = cost-disciplined but worker-quality-gated
 
 Head of branch: **`85a9e81`** (`0 0` vs origin, tree clean, suite **208 green**). Repo deep-verified this session: remote `github.com/Matt28296/j-claw`, `.env` confirmed **untracked + gitignored** (real ANTHROPIC/GOOGLE keys safe), no stray untracked files to commit, all run artifacts (`projects/`, `.venv`, `*.log`) properly ignored. **Three commits shipped + PUSHED today.** Supersedes the "D1 take-2 NEXT" plan below.
 
