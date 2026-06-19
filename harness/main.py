@@ -813,10 +813,10 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
     # Known from the parent's tech spec before any sub-project runs; confirmed
     # per sub-project below (their specs may refine the stack).
     film_decomposition = parent_stack in ("film", "video-editor")
-    # Each sub-project's run_project() resets the global cost accumulator, so
-    # the aggregate cost must be summed here as each one finishes.
-    total_usd = 0.0
-    total_calls = 0
+    # C1: the cost accumulator is build-GLOBAL (reset only at depth 0), so it already
+    # holds the CUMULATIVE spend across every sub-project. Read it ONCE after the loop
+    # for the aggregate — summing cost_summary() per sub-project would double-count,
+    # because each read already includes all prior sub-projects' spend (triangular sum).
 
     for name in TopologicalSorter(graph).static_order():
         sp = next(s for s in sub_projects if s["name"] == name)
@@ -864,9 +864,6 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
             console.print(f"  [red]Sub-project {name} crashed: {exc} — continuing with remaining sub-projects.[/red]")
             ok = False
         results[name] = "passed" if ok else "failed"
-        _sub_cost = cost_summary()
-        total_usd += _sub_cost.get("total_usd", 0.0)
-        total_calls += _sub_cost.get("paid_calls", 0)
         if _sub_project_stack(sp_dir) in ("film", "video-editor"):
             film_decomposition = True
 
@@ -923,6 +920,12 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
 
     handoff_path = write_parent_handoff(base_dir, intent or response.get("reason", ""),
                                         results, final_video, assembly_note)
+
+    # Aggregate spend for the whole decomposition: the build-global cost accumulator
+    # already holds the cumulative total across every sub-project — read it once.
+    _agg = cost_summary()
+    total_usd = _agg.get("total_usd", 0.0)
+    total_calls = _agg.get("paid_calls", 0)
 
     # One aggregate push for the whole decomposition (sub-projects stay quiet).
     if depth == 0:

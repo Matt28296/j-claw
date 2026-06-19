@@ -131,6 +131,53 @@ class TestC1CostCeilingIsBuildGlobal(unittest.TestCase):
         self.assertEqual(ran, ["build scene a", "build scene b"],
                          "ceiling must trip on cumulative spend at the 2nd scene, halting the build")
 
+    def test_aggregate_cost_not_double_counted_across_subprojects(self):
+        # Regression for the build-global double-count: _handle_oversize used to SUM
+        # cost_summary() per sub-project, but the accumulator is build-global (never reset
+        # between scenes), so each read already includes prior scenes' spend → a triangular
+        # double-count in the reported aggregate (operator notification + dashboard).
+        # SP1 spends $3 and SP2 spends $3 → TRUE cumulative $6; the old per-iteration sum
+        # reported $9 (= $3 + $6). Also asserts decomposing-path output isolation: each
+        # sub-project's declared file lands in its OWN sp_dir.
+        import shutil
+        import tempfile
+
+        def _fake_run_project(goal, sp_dir, depth, manual=False, auto_accept=False, wiring=None):
+            # Mimic the proven Scheduler husk behavior (file lands in this scene's output_dir)
+            # and $3 of sonnet metered spend (1M input * $3/M). NO reset between scenes.
+            (Path(sp_dir) / "out.txt").write_text(goal, encoding="utf-8")
+            cost.record_usage(_Usage(i=1_000_000), "claude-sonnet-4-6", "worker")
+            return True
+
+        response = {
+            "reason": "oversize",
+            "sub_projects": [
+                {"name": "scene_a", "goal": "build scene a", "depends_on": []},
+                {"name": "scene_b", "goal": "build scene b", "depends_on": ["scene_a"]},
+            ],
+        }
+        base = Path(tempfile.mkdtemp(prefix="_w4_c1_agg_"))
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        sw_mock = MagicMock()
+        with patch.object(main, "run_project", side_effect=_fake_run_project), \
+             patch("config.MAX_BUILD_COST_USD", 100.0), \
+             patch.object(main, "sw", sw_mock), \
+             patch.object(main, "notify_build_outcome"), \
+             patch.object(main, "write_parent_handoff", return_value=base / "HANDOFF.md"):
+            ok = main._handle_oversize(response, base, depth=0, auto_accept=True, intent="x")
+
+        self.assertTrue(ok, "both sub-projects passed → aggregate should pass")
+        # Output isolation on the decomposing path: each scene's file landed in its OWN dir.
+        self.assertEqual((base / "scene_a" / "out.txt").read_text(encoding="utf-8"), "build scene a")
+        self.assertEqual((base / "scene_b" / "out.txt").read_text(encoding="utf-8"), "build scene b")
+        # The reported aggregate must equal the TRUE cumulative spend ($6), not the
+        # triangular double-count ($9) the old per-iteration sum produced.
+        on_cost_arg = sw_mock.on_cost.call_args[0][0]
+        self.assertAlmostEqual(on_cost_arg["total_usd"], 6.0, places=4,
+                               msg="aggregate cost must not double-count build-global spend")
+        self.assertEqual(on_cost_arg["paid_calls"], 2,
+                         "paid_calls must be the build-global count, not a per-scene sum")
+
 
 # ── H1: honest manual verdict ───────────────────────────────────────────────────
 
