@@ -179,6 +179,33 @@ GROK_TIMEOUT: int = _int_env("GROK_TIMEOUT", 300, lo=0)  # seconds per grok -p s
 CLAUDE_CLI_ENABLED: bool = os.getenv("CLAUDE_CLI_ENABLED", "false").lower() == "true"
 CLAUDE_CLI_HOME: str = os.getenv("CLAUDE_CLI_HOME", "")  # empty = use claude's default config dir (sets CLAUDE_CONFIG_DIR)
 CLAUDE_CLI_MODEL: str = os.getenv("CLAUDE_CLI_MODEL", "sonnet")  # alias the Claude CLI accepts (sonnet|opus|haiku) or a full id
+
+# Credentials that make `claude -p` bill the metered API key instead of the
+# subscription OAuth. Claude Code's non-interactive auth precedence puts an API
+# key / Bedrock / Vertex routing AHEAD of the Max subscription, so if this repo's
+# metered-rung ANTHROPIC_API_KEY (or a cloud-routing var) leaks into a `claude`
+# subprocess, the "free" OAuth call silently becomes a METERED one — and if that
+# API account is out of credits it fails outright. Scrub them on EVERY `claude`
+# subprocess (worker rung, final review, OpenClaw stamp) so it falls back to the
+# subscription OAuth (or a dedicated CLAUDE_CLI_HOME config dir).
+CLAUDE_CLI_ENV_BLOCKLIST = frozenset({
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_BEARER_TOKEN_BEDROCK",
+})
+
+
+def claude_cli_env(extra: dict | None = None) -> dict:
+    """Build a subprocess env for `claude -p` that uses the subscription OAuth,
+    NOT the metered ANTHROPIC_API_KEY. Strips CLAUDE_CLI_ENV_BLOCKLIST and points
+    at CLAUDE_CLI_HOME when configured. ``extra`` overlays additional vars."""
+    env = {k: v for k, v in os.environ.items() if k not in CLAUDE_CLI_ENV_BLOCKLIST}
+    if CLAUDE_CLI_HOME:
+        env["CLAUDE_CONFIG_DIR"] = CLAUDE_CLI_HOME
+    if extra:
+        env.update(extra)
+    return env
+
 # Per-run capacity cap — deliberately LOW because this shares the operator's interactive Max quota.
 CLAUDE_CLI_MAX_CALLS: int = _int_env("CLAUDE_CLI_MAX_CALLS", 10, lo=0)
 CLAUDE_CLI_TIMEOUT: int = _int_env("CLAUDE_CLI_TIMEOUT", 300, lo=0)  # seconds per claude -p subprocess

@@ -189,7 +189,10 @@ def _stamp_via_cli(handoff_path: Path, output_dir: Path) -> bool:
             text=True,
             timeout=180,
             cwd=output_dir,
-            env={**os.environ, "PYTHONUTF8": "1"},
+            # Scrub the metered ANTHROPIC_API_KEY so the stamp runs on the subscription
+            # OAuth, not the (possibly $0-credit) metered API. Without this the claude CLI
+            # inherits the key and silently meters — or fails "credit balance too low".
+            env=cfg.claude_cli_env({"PYTHONUTF8": "1"}),
             shell=use_shell,
         )
         verdict = result.stdout.strip() or result.stderr.strip()

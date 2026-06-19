@@ -4,13 +4,18 @@ Collects all project output files, sends them to Claude for a code review,
 writes the verdict to REVIEW.md, and returns True (pass) or False (issues found).
 """
 from __future__ import annotations
+import os
+import shutil
+import subprocess
+import tempfile
 import time
 
 import anthropic
 from pathlib import Path
 from rich.console import Console
 
-from config import ANTHROPIC_API_KEY, FINAL_REVIEW_MODEL
+from config import (ANTHROPIC_API_KEY, FINAL_REVIEW_MODEL, CLAUDE_CLI_MODEL,
+                    CLAUDE_CLI_TIMEOUT, claude_cli_env)
 from cache_telemetry import log_cache_usage
 from cost import record_usage, record_role_event, check_cost_ceiling
 
@@ -49,14 +54,67 @@ ISSUES:
 """
 
 
+def _review_via_cli(user_message: str, output_dir: Path) -> str | None:
+    """Run the final review through the `claude` CLI on the subscription OAuth (free).
+
+    Mirrors the worker rung: resolves claude/claude.cmd, scrubs the metered API key
+    from the env (claude_cli_env), feeds _SYSTEM via a system-prompt file and the
+    file dump via stdin (too large for an argv arg). Returns the review text, or
+    None if the CLI is unavailable / errored — the caller then falls back to the API.
+    """
+    exe = shutil.which("claude") or shutil.which("claude.cmd")
+    if not exe:
+        return None
+    console.print("  [dim]→ via claude CLI (subscription OAuth)[/dim]")
+    sysfd, sysfile = tempfile.mkstemp(suffix=".txt", prefix="review_sys_")
+    os.close(sysfd)
+    try:
+        with open(sysfile, "w", encoding="utf-8") as fh:
+            fh.write(_SYSTEM)
+        cmd = [
+            exe, "-p", "--model", CLAUDE_CLI_MODEL,
+            "--system-prompt-file", sysfile,
+            "--tools", "",
+            "--strict-mcp-config",
+            "--setting-sources", "",
+            "--disable-slash-commands",
+            "--no-session-persistence",
+        ]
+        result = subprocess.run(
+            cmd,
+            input=user_message,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=CLAUDE_CLI_TIMEOUT,
+            env=claude_cli_env(),
+            cwd=output_dir,
+        )
+        if result.returncode != 0:
+            tail = ((result.stderr or "") + (result.stdout or ""))[-200:]
+            console.print(f"  [yellow]claude CLI review exited {result.returncode} — falling back to API. …{tail}[/yellow]")
+            return None
+        return (result.stdout or "").strip() or None
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        console.print(f"  [yellow]claude CLI review unavailable ({type(exc).__name__}) — falling back to API.[/yellow]")
+        return None
+    finally:
+        try:
+            os.unlink(sysfile)
+        except OSError:
+            pass
+
+
 def run_final_review(output_dir: Path, spec: dict) -> bool:
     """
     Review all files in output_dir against the project spec.
     Returns True if review passes, False if issues found.
     Writes output_dir/REVIEW.md regardless of result.
     """
-    if not ANTHROPIC_API_KEY:
-        console.print("  [yellow]No ANTHROPIC_API_KEY — skipping final review.[/yellow]")
+    cli_available = bool(shutil.which("claude") or shutil.which("claude.cmd"))
+    if not ANTHROPIC_API_KEY and not cli_available:
+        console.print("  [yellow]No claude CLI and no ANTHROPIC_API_KEY — skipping final review.[/yellow]")
         return True
 
     goal = spec.get("goal", spec.get("description", "Unknown project goal"))
@@ -88,25 +146,35 @@ def run_final_review(output_dir: Path, spec: dict) -> bool:
 
     review_text = None
     _t0 = time.monotonic()
-    for attempt in (1, 2):
-        try:
-            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-            response = client.messages.create(
-                model=FINAL_REVIEW_MODEL,
-                max_tokens=1024,
-                system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": user_message}],
-            )
-            log_cache_usage(response.usage, "review")
-            record_usage(response.usage, FINAL_REVIEW_MODEL, "review")
-            review_text = response.content[0].text.strip()
-            record_role_event("review", provider="anthropic", model=FINAL_REVIEW_MODEL,
-                              success=True, latency_s=time.monotonic() - _t0)
-            break
-        except Exception as exc:  # noqa: BLE001
-            console.print(f"  [red]Final review API call failed (attempt {attempt}/2): {exc}[/red]")
-            if attempt == 1:
-                time.sleep(5)
+
+    # Free-first: run the final gate on the subscription OAuth via the claude CLI.
+    # Only fall back to the metered API if the CLI is unavailable — never spend
+    # when the subscription can do the job. (The metered API site here was the one
+    # that died "credit balance too low" while OAuth sat idle.)
+    review_text = _review_via_cli(user_message, output_dir)
+    if review_text is not None:
+        record_role_event("review", provider="claude_cli", model=CLAUDE_CLI_MODEL,
+                          success=True, latency_s=time.monotonic() - _t0)
+    elif ANTHROPIC_API_KEY:
+        for attempt in (1, 2):
+            try:
+                client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+                response = client.messages.create(
+                    model=FINAL_REVIEW_MODEL,
+                    max_tokens=1024,
+                    system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
+                    messages=[{"role": "user", "content": user_message}],
+                )
+                log_cache_usage(response.usage, "review")
+                record_usage(response.usage, FINAL_REVIEW_MODEL, "review")
+                review_text = response.content[0].text.strip()
+                record_role_event("review", provider="anthropic", model=FINAL_REVIEW_MODEL,
+                                  success=True, latency_s=time.monotonic() - _t0)
+                break
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"  [red]Final review API call failed (attempt {attempt}/2): {exc}[/red]")
+                if attempt == 1:
+                    time.sleep(5)
     if review_text is None:
         # Fail CLOSED: an unreviewed build must not pass. (Observed live: a
         # crashed review call returned True and green-lit a film scene whose

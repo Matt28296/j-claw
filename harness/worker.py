@@ -21,6 +21,7 @@ from config import (
     CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT, OAUTH_PROVIDERS, METERED_PROVIDERS,
     GROK_CLI_ENABLED, GROK_HOME, GROK_MODEL, GROK_MAX_CALLS, GROK_TIMEOUT,
     CLAUDE_CLI_ENABLED, CLAUDE_CLI_HOME, CLAUDE_CLI_MODEL, CLAUDE_CLI_MAX_CALLS, CLAUDE_CLI_TIMEOUT,
+    claude_cli_env,
     CODEX_WORKER_RESERVE, OAUTH_RATE_WINDOW_S, OAUTH_TIMEOUT_LATCH_THRESHOLD,
 )
 from experience_log import get_worker_hints, log_escalation
@@ -756,16 +757,9 @@ _grok_call_lock = threading.Lock()
 # future reservations, and can't race Claude Code's local session/config state.
 _claude_cli_call_lock = threading.Lock()
 
-# Credentials scrubbed from the `claude -p` subprocess env. Claude Code's auth precedence puts an
-# API key / Bedrock / Vertex routing AHEAD of the subscription OAuth in non-interactive mode, so if
-# this repo's metered-rung ANTHROPIC_API_KEY (or a cloud-routing var) leaks into the call, the
-# "free" Max rung silently becomes a METERED API call — defeating the whole rung. Stripped so
-# `claude -p` falls back to the subscription OAuth (or a dedicated CLAUDE_CLI_HOME config dir).
-_CLAUDE_CLI_ENV_BLOCKLIST = frozenset({
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
-    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_BEARER_TOKEN_BEDROCK",
-})
+# Credential scrubbing for the `claude -p` subprocess env now lives in config.claude_cli_env()
+# (shared by the worker rung, final review, and the OpenClaw stamp) — single source of truth so a
+# metered ANTHROPIC_API_KEY can't leak into ANY `claude` call and silently meter the "free" OAuth rung.
 
 
 def reset_paid_budget() -> None:
@@ -1881,7 +1875,7 @@ def _call_claude_cli(model: str, system: str, user: str) -> str:
       * --system-prompt-file   REPLACE Claude Code's coding-agent identity with j-claw's worker
                                prompt (a temp file — a huge --system-prompt argv would blow the
                                Windows command-line length limit); the task JSON is piped on stdin.
-    The subprocess env is SCRUBBED of API-key / Bedrock / Vertex credentials (_CLAUDE_CLI_ENV_BLOCKLIST)
+    The subprocess env is SCRUBBED of API-key / Bedrock / Vertex credentials (config.claude_cli_env)
     so Claude Code uses the subscription OAuth and not the metered API. Serialized behind
     _claude_cli_call_lock; runs in an isolated scratch cwd; UTF-8 forced (non-cp1252 glyphs, as Codex).
     CLAUDE_CLI_TIMEOUT bounds the call.
@@ -1904,9 +1898,7 @@ def _call_claude_cli(model: str, system: str, user: str) -> str:
         "--no-session-persistence",        # don't write session state to disk
     ]
     # Strip credentials that would override the subscription OAuth and silently meter the call.
-    env = {k: v for k, v in os.environ.items() if k not in _CLAUDE_CLI_ENV_BLOCKLIST}
-    if CLAUDE_CLI_HOME:
-        env["CLAUDE_CONFIG_DIR"] = CLAUDE_CLI_HOME
+    env = claude_cli_env()
 
     from permissions import observe
     observe("llm_cli", detail=f"claude -p ({model or CLAUDE_CLI_MODEL})")  # roadmap #6: observe-only

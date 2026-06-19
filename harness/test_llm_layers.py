@@ -617,7 +617,8 @@ class TestFinalReviewFailsClosed(unittest.TestCase):
         # Both API attempts fail — the function must return False (fail closed),
         # not True. (PR #23 regression guard: a crashed review must never pass.)
         # We create a dummy output file so _collect_files doesn't short-circuit.
-        with patch("final_review.anthropic.Anthropic") as mock_ant:
+        with patch("final_review.anthropic.Anthropic") as mock_ant, \
+             patch("final_review._review_via_cli", return_value=None):  # force API-fallback path
             mock_client = MagicMock()
             mock_ant.return_value = mock_client
             mock_client.messages.create.side_effect = ant.APIConnectionError(
@@ -3522,6 +3523,44 @@ class TestSalvageWrapperOutput(unittest.TestCase):
         self.assertEqual(result["files"][0]["path"], "a.py")
 
 
+class TestClaudeCliOAuthPath(unittest.TestCase):
+    """Regression lock: every `claude` subprocess (worker rung, final review, OpenClaw
+    stamp) must run on the subscription OAuth — the metered ANTHROPIC_API_KEY must never
+    leak into the env (it silently meters the 'free' call, or fails 'credit balance too
+    low' when that account is empty — the exact D3 failure)."""
+
+    def test_claude_cli_env_scrubs_metered_credentials(self):
+        import os as _os, config
+        with patch.dict(_os.environ, {"ANTHROPIC_API_KEY": "sk-leak",
+                                      "ANTHROPIC_BASE_URL": "http://meter",
+                                      "CLAUDE_CODE_USE_BEDROCK": "1",
+                                      "KEEP_ME": "yes"}, clear=False):
+            env = config.claude_cli_env()
+        for blocked in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK"):
+            self.assertNotIn(blocked, env, f"{blocked} must be scrubbed from claude env")
+        self.assertEqual(env.get("KEEP_ME"), "yes", "non-credential vars must pass through")
+
+    def test_claude_cli_env_extra_overlay(self):
+        import config
+        env = config.claude_cli_env({"PYTHONUTF8": "1"})
+        self.assertEqual(env.get("PYTHONUTF8"), "1")
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+
+    def test_final_review_prefers_cli_over_metered_api(self):
+        import final_review, tempfile
+        with patch("final_review.shutil.which", return_value="/usr/bin/claude"), \
+             patch("final_review._review_via_cli",
+                   return_value="VERDICT: PASS\nSUMMARY: looks complete"), \
+             patch("final_review.record_role_event"), \
+             patch("final_review.console"), \
+             patch("final_review.anthropic.Anthropic") as mock_ant:
+            with tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / "index.html").write_text("<html/>", encoding="utf-8")
+                result = final_review.run_final_review(Path(tmp), {"goal": "test"})
+        self.assertTrue(result, "CLI 'VERDICT: PASS' must pass the gate")
+        mock_ant.assert_not_called()  # OAuth CLI used → metered API never touched
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
@@ -3574,6 +3613,7 @@ if __name__ == "__main__":
         TestOauthTimeoutLatch,
         TestSalvageWrapperOutput,
         TestPaidOrchBudget,
+        TestClaudeCliOAuthPath,
         TestCostCeiling,
         TestProjectDisposition,
         TestStampHonesty,
