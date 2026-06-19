@@ -16,7 +16,8 @@ from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 
 from config import (
-    PROJECTS_DIR, MAX_FORMAT5_DEPTH, ORCHESTRATOR_PROVIDER, ORCHESTRATOR_MODEL,
+    PROJECTS_DIR, MAX_FORMAT5_DEPTH, FORCE_FORMAT5, MIN_SUBPROJECT_COUNT,
+    ORCHESTRATOR_PROVIDER, ORCHESTRATOR_MODEL,
     ORCHESTRATOR_API_MODEL, TECHNICAL_ARCHITECT_ENABLED, DASHBOARD_PORT, DASHBOARD_AUTOOPEN,
     PIPELINE_MAX_RETRIES,
     HEAL_MAX_CYCLES,
@@ -406,8 +407,45 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
         # strict "sub-projects never decompose" rule.
         init_payload["sub_project_depth"] = depth
         init_payload["decomposition_allowed"] = _subproject_decomposition_allowed(depth)
+    # Test-harness escape hatch (#FORCE_FORMAT5): at the top level only, hand the
+    # orchestrator a hard directive to decompose, bypassing its scale-down heuristic.
+    # Sub-projects (depth>0) are never forced — they must flatten per the recursion cap.
+    if FORCE_FORMAT5 and depth == 0:
+        init_payload["decomposition_required"] = (
+            f"FORCE_FORMAT5 is active for this run. You MUST emit an oversize FORMAT 5 "
+            f"spec that decomposes this intent into at least {MIN_SUBPROJECT_COUNT} "
+            f"independent, coherent sub-projects (oversize=true with a 'sub_projects' "
+            f"list). Do NOT flatten to a single FORMAT 1 spec even if the intent seems "
+            f"small — split it along natural service/module boundaries."
+        )
+
     spec = orch.call(init_payload)
     sw.on_agent_done()
+
+    # FORCE_FORMAT5 enforcement: if the orchestrator still returned a flat spec, re-request
+    # once with a sharper directive, then fail honestly rather than run a flat build that
+    # would silently NOT exercise the decomposing path (the whole point of the run).
+    if FORCE_FORMAT5 and depth == 0 and not spec.get("oversize"):
+        console.print(
+            "  [yellow]FORCE_FORMAT5: orchestrator returned a FLAT spec — re-requesting "
+            "decomposition.[/yellow]"
+        )
+        sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "INIT")
+        spec = orch.call({
+            **init_payload,
+            "decomposition_required": (
+                f"Your previous response was a FLAT spec. This run REQUIRES a FORMAT 5 "
+                f"decomposition into at least {MIN_SUBPROJECT_COUNT} independent sub-projects "
+                f"(oversize=true with a 'sub_projects' list). Emit that now."
+            ),
+        })
+        sw.on_agent_done()
+        if not spec.get("oversize"):
+            console.print(
+                "  [bold red]FORCE_FORMAT5: orchestrator refused to decompose after a retry. "
+                "Aborting — a flat build would not exercise FORMAT 5.[/bold red]"
+            )
+            return False
 
     if spec.get("oversize"):
         if not _subproject_decomposition_allowed(depth):

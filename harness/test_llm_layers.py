@@ -3561,6 +3561,79 @@ class TestClaudeCliOAuthPath(unittest.TestCase):
         mock_ant.assert_not_called()  # OAuth CLI used → metered API never touched
 
 
+class TestForceFormat5(unittest.TestCase):
+    """Locks the FORMAT-5 escape hatch: when FORCE_FORMAT5 is set, a top-level build
+    is hard-directed to decompose (bypassing the TA scale-down that flattened D3/D4),
+    and a build that stays flat after a retry aborts honestly rather than running flat."""
+
+    def test_config_defaults_off(self):
+        import config
+        self.assertFalse(config.FORCE_FORMAT5, "FORCE_FORMAT5 must default OFF")
+        self.assertGreaterEqual(config.MIN_SUBPROJECT_COUNT, 2)
+
+    def test_forces_directive_and_aborts_when_still_flat(self):
+        import main, tempfile
+        flat_spec = {"tasks": []}  # no "oversize" key → flat
+        mock_orch = MagicMock()
+        mock_orch.call.return_value = flat_spec
+        with patch.object(main, "FORCE_FORMAT5", True), \
+             patch.object(main, "MIN_SUBPROJECT_COUNT", 3), \
+             patch.object(main, "_start_dashboard"), \
+             patch.object(main, "sw"), \
+             patch.object(main, "console"), \
+             patch.object(main, "CreativeDirector") as _cd, \
+             patch.object(main, "TechnicalArchitect") as _ta, \
+             patch.object(main, "get_stack_lessons", return_value=[]), \
+             patch.object(main, "make_orchestrator", return_value=mock_orch):
+            _cd.return_value.interpret.return_value = {"scale": "mvp"}
+            _ta.return_value.review.return_value = {}
+            with tempfile.TemporaryDirectory() as d:
+                result = main._run_project_inner(
+                    "a tiny tool", Path(d), depth=0, manual=False,
+                    auto_accept=True, wiring=None, phase={"current": "x"})
+        # Persistently-flat under FORCE_FORMAT5 must abort (not run a flat build)
+        self.assertFalse(result, "forced + still-flat after retry must return False")
+        # Re-requested at least once after the first flat spec
+        self.assertGreaterEqual(mock_orch.call.call_count, 2,
+                                "should retry the orchestrator after a flat spec")
+        # The decomposition directive was injected into the payload
+        payloads = [c.args[0] for c in mock_orch.call.call_args_list if c.args]
+        self.assertTrue(any("decomposition_required" in p for p in payloads),
+                        "FORCE_FORMAT5 must inject a 'decomposition_required' directive")
+
+    def test_depth_gt_zero_not_forced(self):
+        # Sub-projects (depth>0) must NOT be forced to decompose — they flatten per the
+        # recursion cap. The force block runs BEFORE orch.call, so we stop the pipeline
+        # at orch.call (sentinel raise) and assert that first payload carries no directive.
+        import main, tempfile
+
+        class _Stop(Exception):
+            pass
+
+        mock_orch = MagicMock()
+        mock_orch.call.side_effect = _Stop  # halt right at the first orch.call
+        with patch.object(main, "FORCE_FORMAT5", True), \
+             patch.object(main, "_start_dashboard"), \
+             patch.object(main, "sw"), \
+             patch.object(main, "console"), \
+             patch.object(main, "CreativeDirector") as _cd, \
+             patch.object(main, "TechnicalArchitect") as _ta, \
+             patch.object(main, "get_stack_lessons", return_value=[]), \
+             patch.object(main, "make_orchestrator", return_value=mock_orch):
+            _cd.return_value.interpret.return_value = {"scale": "mvp"}
+            _ta.return_value.review.return_value = {}
+            with tempfile.TemporaryDirectory() as d:
+                with self.assertRaises(_Stop):
+                    main._run_project_inner(
+                        "a sub-project", Path(d), depth=1, manual=False,
+                        auto_accept=True, wiring=None, phase={"current": "x"})
+        # At depth>0 the force directive must NOT be injected into the (only) payload
+        payloads = [c.args[0] for c in mock_orch.call.call_args_list if c.args]
+        self.assertTrue(payloads, "orch.call should have been reached once")
+        self.assertFalse(any("decomposition_required" in p for p in payloads),
+                         "sub-projects (depth>0) must not be force-decomposed")
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
@@ -3614,6 +3687,7 @@ if __name__ == "__main__":
         TestSalvageWrapperOutput,
         TestPaidOrchBudget,
         TestClaudeCliOAuthPath,
+        TestForceFormat5,
         TestCostCeiling,
         TestProjectDisposition,
         TestStampHonesty,

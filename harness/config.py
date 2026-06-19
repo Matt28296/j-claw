@@ -352,6 +352,13 @@ CREATIVE_DIRECTOR_PROMPT_PATH: Path = Path(__file__).parent.parent / "creative_d
 # Floored at 1: MAX_FORMAT5_DEPTH=0 would make _subproject_decomposition_allowed(0)
 # compute 0 < 0 == False, silently disabling ALL decomposition (top-level included).
 MAX_FORMAT5_DEPTH: int = _int_env("MAX_FORMAT5_DEPTH", 3, lo=1)
+# Test-harness escape hatch: deterministically force top-level FORMAT 5 decomposition,
+# bypassing the Technical Architect's scale-down heuristic (which flattened the D3/D4
+# smoke builds to ~17 files and never exercised the decomposing path). When true, a
+# depth-0 build that comes back flat is re-requested as an oversize spec with at least
+# MIN_SUBPROJECT_COUNT sub-projects. OFF by default — only for FORMAT-5 validation runs.
+FORCE_FORMAT5: bool = os.getenv("FORCE_FORMAT5", "false").lower() == "true"
+MIN_SUBPROJECT_COUNT: int = _int_env("MIN_SUBPROJECT_COUNT", 3, lo=2)
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 EXPERIENCE_LOG: str = os.getenv("EXPERIENCE_LOG", "experience.jsonl")
 
