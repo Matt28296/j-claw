@@ -2925,6 +2925,97 @@ class TestWorktreeHuskRegression(unittest.TestCase):
                          "main HEAD moved — worktree branch leaked into main")
 
 
+class TestCostCeiling(unittest.TestCase):
+    """Per-build cost circuit-breaker: fail CLOSED before unbounded unattended spend.
+    Only metered Anthropic dollars count; $0 OAuth/local rungs must NOT trip it."""
+
+    def setUp(self):
+        import cost
+        self.cost = cost
+        cost.reset_costs()
+
+    class _U:
+        def __init__(self, i=0, o=0):
+            self.input_tokens = i
+            self.output_tokens = o
+            self.cache_read_input_tokens = 0
+            self.cache_creation_input_tokens = 0
+
+    def _spend(self, usd_model="claude-sonnet-4-6", out=1_000_000):
+        # sonnet output is $15/Mtok → 1M output = $15
+        self.cost.record_usage(self._U(o=out), usd_model, "worker-esc")
+
+    def test_trips_over_usd_ceiling(self):
+        import config
+        with patch.object(config, "MAX_BUILD_COST_USD", 5.0), \
+             patch.object(config, "MAX_BUILD_TOKENS", 0):
+            self._spend(out=1_000_000)  # $15 >= $5
+            with self.assertRaises(self.cost.BuildCostCeilingExceeded):
+                self.cost.check_cost_ceiling()
+
+    def test_under_ceiling_is_noop(self):
+        import config
+        with patch.object(config, "MAX_BUILD_COST_USD", 100.0), \
+             patch.object(config, "MAX_BUILD_TOKENS", 0), \
+             patch.object(config, "BUILD_COST_WARN_FRAC", 0.75):
+            self._spend(out=1_000_000)  # $15 < $100
+            self.cost.check_cost_ceiling()  # must not raise
+
+    def test_disabled_when_zero(self):
+        import config
+        with patch.object(config, "MAX_BUILD_COST_USD", 0.0), \
+             patch.object(config, "MAX_BUILD_TOKENS", 0):
+            self._spend(out=10_000_000)  # $150
+            self.cost.check_cost_ceiling()  # disabled → never raises
+
+    def test_oauth_and_local_do_not_count(self):
+        import config
+        with patch.object(config, "MAX_BUILD_COST_USD", 1.0), \
+             patch.object(config, "MAX_BUILD_TOKENS", 0):
+            for _ in range(1000):
+                self.cost.record_ollama_usage(5000, 2000)
+                self.cost.record_oauth_usage("codex", tokens=8000)
+                self.cost.record_usage(self._U(i=9000, o=9000), "ollama/qwen3:8b", "worker")
+            self.assertEqual(self.cost.cost_summary()["total_usd"], 0.0)
+            self.cost.check_cost_ceiling()  # free escalation must never trip it
+
+    def test_token_backstop(self):
+        import config
+        with patch.object(config, "MAX_BUILD_COST_USD", 10_000.0), \
+             patch.object(config, "MAX_BUILD_TOKENS", 1_000):
+            self._spend(out=5_000)  # well under USD ceiling, over token backstop
+            with self.assertRaises(self.cost.BuildCostCeilingExceeded):
+                self.cost.check_cost_ceiling()
+
+    def test_latch_sticky_then_reset_rearms(self):
+        import config
+        with patch.object(config, "MAX_BUILD_COST_USD", 5.0), \
+             patch.object(config, "MAX_BUILD_TOKENS", 0):
+            self._spend(out=1_000_000)
+            with self.assertRaises(self.cost.BuildCostCeilingExceeded):
+                self.cost.check_cost_ceiling()
+            # latch keeps it tripped even after a (hypothetical) reset of the total alone
+            with self.assertRaises(self.cost.BuildCostCeilingExceeded):
+                self.cost.check_cost_ceiling()
+        # full reset re-arms for the next build
+        self.cost.reset_costs()
+        with patch.object(config, "MAX_BUILD_COST_USD", 5.0), \
+             patch.object(config, "MAX_BUILD_TOKENS", 0):
+            self.cost.check_cost_ceiling()  # no spend yet → no raise
+
+    def test_worker_call_anthropic_refuses_when_tripped(self):
+        # Wiring guard: _call_anthropic must consult the ceiling BEFORE constructing
+        # the client / spending. A tripped ceiling raises before any API object is built.
+        import worker
+        with patch.object(worker, "ANTHROPIC_API_KEY", "sk-ant-test"), \
+             patch("cost.check_cost_ceiling",
+                   side_effect=self.cost.BuildCostCeilingExceeded("tripped")), \
+             patch("anthropic.Anthropic") as mock_client:
+            with self.assertRaises(self.cost.BuildCostCeilingExceeded):
+                worker._call_anthropic("claude-sonnet-4-6", "sys", "user")
+            mock_client.assert_not_called()  # never spent
+
+
 class TestManualGateUnattended(unittest.TestCase):
     """Roadmap blocker #2: the manual verification gate must never crash an
     unattended (no-TTY) build. It used to call Confirm.ask() directly, which
@@ -3007,6 +3098,7 @@ if __name__ == "__main__":
         TestRungStatusSnapshot,
         TestWorktreeHuskRegression,
         TestManualGateUnattended,
+        TestCostCeiling,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 

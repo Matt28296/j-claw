@@ -12,6 +12,7 @@ from project import ProjectInstance, Task
 from worker import execute_task, routed_rung
 from verification import run_verification, detect_ecosystem
 from completeness import check_completeness
+from cost import check_cost_ceiling
 from validator import validate_dag, OrchestratorOutputError
 from state_writer import writer as sw
 from asset_worker import generate_assets, can_generate
@@ -116,6 +117,11 @@ class Scheduler:
         with _ctx:
             while True:
                 while not self.instance.all_tasks_done():
+                    # Per-build cost circuit-breaker at the batch boundary: if the
+                    # ceiling was crossed, fail closed here (clean halt, no new batch
+                    # dispatched) rather than only mid-API-call. Raises out to main.py's
+                    # failure-handoff handler. A future kill-switch can join this check.
+                    check_cost_ceiling()
                     ready = self._ready_tasks()
 
                     if not ready:

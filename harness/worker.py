@@ -1501,7 +1501,10 @@ def _call_anthropic(model: str, system: str, user: str, label: str = "worker-esc
         raise RuntimeError("ANTHROPIC_API_KEY not set — cannot use anthropic worker provider")
     import anthropic
     from cache_telemetry import log_cache_usage
-    from cost import record_usage
+    from cost import record_usage, check_cost_ceiling
+    # Per-build cost circuit-breaker: refuse this metered call if cumulative spend
+    # already crossed the ceiling (fails closed — raises BuildCostCeilingExceeded).
+    check_cost_ceiling()
     # Bound the request like the ollama client (worker.py:_call_ollama) so a hung
     # escalation call can't stall the pipeline indefinitely; on timeout the SDK
     # raises and main.py's handler writes a terminal FAILED state.

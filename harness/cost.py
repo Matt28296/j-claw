@@ -63,12 +63,28 @@ _oauth_usage: dict[str, dict] = {}
 # "architect", "review", "orch:<STATE>", "worker". Surfaces in cost_summary()["roles"].
 _role_metrics: dict[str, dict] = {}
 
+# Per-build cost ceiling latch (roadmap: cost circuit-breaker). Once the running
+# metered total crosses the configured ceiling, the build FAILS CLOSED: the next
+# metered call is refused. The latch makes the trip sticky and the warning fire once.
+_ceiling_tripped: bool = False
+_cost_warned: bool = False
+
+
+class BuildCostCeilingExceeded(RuntimeError):
+    """Raised when cumulative METERED spend crosses the per-build ceiling.
+
+    A RuntimeError subclass so it rides the existing run_project() exception →
+    failure-handoff path (main.py) and halts the build cleanly + logged, rather
+    than draining money silently. $0 OAuth/local rungs never count toward it."""
+
 
 def reset_costs() -> None:
     """Zero the accumulator for a fresh run."""
-    global _total_usd, _calls
+    global _total_usd, _calls, _ceiling_tripped, _cost_warned
     _total_usd = 0.0
     _calls = 0
+    _ceiling_tripped = False
+    _cost_warned = False
     _by_label.clear()
     _by_model.clear()
     for k in _tokens:
@@ -114,6 +130,41 @@ def record_usage(usage, model: str | None, label: str) -> None:
         _tokens["output"] += getattr(usage, "output_tokens", 0) or 0
         _tokens["cache_read"] += getattr(usage, "cache_read_input_tokens", 0) or 0
         _tokens["cache_creation"] += getattr(usage, "cache_creation_input_tokens", 0) or 0
+
+
+def check_cost_ceiling() -> None:
+    """Fail CLOSED if cumulative metered spend crossed the per-build ceiling.
+
+    Call this immediately before every metered Anthropic request (worker and
+    orchestrator) and at the scheduler batch boundary. No-op when the ceiling is
+    disabled (MAX_BUILD_COST_USD == 0). Emits a one-time soft warning at
+    BUILD_COST_WARN_FRAC of the ceiling. $0 OAuth/local rungs price to zero, so
+    free escalation never trips this — only real Anthropic dollars do.
+
+    Raises BuildCostCeilingExceeded once the ceiling (USD or optional token
+    backstop) is reached; the latch keeps it raised for the rest of the build."""
+    global _ceiling_tripped, _cost_warned
+    from config import MAX_BUILD_COST_USD, BUILD_COST_WARN_FRAC, MAX_BUILD_TOKENS
+
+    metered_tokens = _tokens["input"] + _tokens["output"]
+    usd_hit = bool(MAX_BUILD_COST_USD) and _total_usd >= MAX_BUILD_COST_USD
+    tok_hit = bool(MAX_BUILD_TOKENS) and metered_tokens >= MAX_BUILD_TOKENS
+
+    if _ceiling_tripped or usd_hit or tok_hit:
+        _ceiling_tripped = True
+        why = (f"${_total_usd:.2f} >= ${MAX_BUILD_COST_USD:.2f}" if usd_hit
+               else f"{metered_tokens} tok >= {MAX_BUILD_TOKENS}" if tok_hit
+               else "ceiling already tripped")
+        raise BuildCostCeilingExceeded(
+            f"per-build cost ceiling reached ({why}) — failing closed")
+
+    if (not _cost_warned and MAX_BUILD_COST_USD and BUILD_COST_WARN_FRAC
+            and _total_usd >= MAX_BUILD_COST_USD * BUILD_COST_WARN_FRAC):
+        _cost_warned = True
+        # Soft warning only — does not halt. Stderr-free: leave I/O to callers'
+        # logging; expose via cost_summary if needed. Print here for operator visibility.
+        print(f"[cost] WARNING: build spend ${_total_usd:.2f} crossed "
+              f"{BUILD_COST_WARN_FRAC:.0%} of ${MAX_BUILD_COST_USD:.2f} ceiling")
 
 
 def record_ollama_usage(prompt_tokens: int, eval_tokens: int) -> None:

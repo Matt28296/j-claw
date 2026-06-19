@@ -66,6 +66,18 @@ WORKER_LADDER: list[tuple[str, str]] = _parse_fallbacks(
 # instead of paying. Prevents a multi-task project from silently burning the API budget.
 MAX_PAID_WORKER_CALLS: int = int(os.getenv("MAX_PAID_WORKER_CALLS", "15"))
 
+# Per-build HARD cost ceiling (USD). When cumulative METERED spend (cost._total_usd, which
+# counts only paid Anthropic dollars — $0 OAuth/local rungs never count) reaches this, the
+# build FAILS CLOSED: the next metered call is refused (cost.BuildCostCeilingExceeded) and the
+# run halts with a logged failure-handoff. This is the unattended-spend circuit-breaker that
+# stops a hung/looping build from silently draining the API budget. 0 = disabled (no ceiling).
+MAX_BUILD_COST_USD: float = float(os.getenv("MAX_BUILD_COST_USD", "5.0"))
+# Soft warning threshold as a fraction of the ceiling — logged once, does NOT halt. 0 = no warn.
+BUILD_COST_WARN_FRAC: float = float(os.getenv("BUILD_COST_WARN_FRAC", "0.75"))
+# Optional absolute metered-token backstop (input+output), independent of pricing drift.
+# 0 = disabled (rely on the USD ceiling).
+MAX_BUILD_TOKENS: int = int(os.getenv("MAX_BUILD_TOKENS", "0"))
+
 # Codex CLI worker rung — a flat-rate OAuth (ChatGPT Plus/Pro) escalation tier that sits
 # ABOVE local Ollama and BELOW Anthropic in WORKER_LADDER. Because it bills against a
 # subscription rather than per token, escalations that would otherwise cost Anthropic dollars

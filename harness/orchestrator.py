@@ -16,7 +16,7 @@ from config import (
 )
 from validator import validate_response, OrchestratorOutputError
 from cache_telemetry import log_cache_usage
-from cost import record_usage, record_role_event
+from cost import record_usage, record_role_event, check_cost_ceiling
 
 console = Console()
 
@@ -163,6 +163,10 @@ class Orchestrator:
         last_error: Exception | None = None
 
         for attempt in range(max_retries + 1):
+            # Per-build cost circuit-breaker: refuse before spending if the ceiling
+            # was crossed. Placed BEFORE the try so it fails closed (propagates out)
+            # instead of being swallowed by the retry handlers below.
+            check_cost_ceiling()
             try:
                 # A pinned model (emergency-chain rung) intentionally wins over the per-state
                 # EXECUTION_ERROR_MODEL: once we're on the paid Sonnet→Opus fallback the rung's
