@@ -105,7 +105,13 @@ class WorktreeManager:
         """
         suffix = secrets.token_hex(4)
         branch = f"wt-{task_id}-{suffix}"
-        wt_path = self._base / task_id
+        # Namespace the worktree DIRECTORY with the same random suffix as the
+        # branch (not just task_id). task_id resets to "task-001" per sub-project
+        # under FORMAT-5 decomposition, so two concurrent builds sharing an output
+        # base would otherwise collide on the same path — and the stale-dir rmtree
+        # below would wipe the OTHER run's live worktree (husk regression). The
+        # suffix makes every create() target a distinct directory.
+        wt_path = self._base / f"{task_id}-{suffix}"
 
         # Remove stale worktree dir if it exists from a previous crashed run, and
         # prune the corresponding git admin entry so the next add can succeed cleanly.

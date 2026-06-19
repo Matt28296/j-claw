@@ -6,6 +6,37 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _float_env(name: str, default: float, lo: float | None = None) -> float:
+    """Parse a float env var, falling back to ``default`` on empty/non-numeric
+    values instead of crashing the harness at import (bare ``float(os.getenv())``
+    raises ValueError on ``NAME=`` or ``NAME=abc``). When ``lo`` is given the
+    result is clamped UP to that floor so a malformed/too-low override can't
+    disable a guard (e.g. a depth that must stay >= 1)."""
+    raw = os.getenv(name)
+    try:
+        val = float(raw) if raw is not None and raw.strip() != "" else default
+    except (ValueError, TypeError):
+        val = default
+    if lo is not None and val < lo:
+        val = lo
+    return val
+
+
+def _int_env(name: str, default: int, lo: int | None = None) -> int:
+    """Integer counterpart of ``_float_env`` — same try/except + floor clamp.
+    Used for caps/depths so ``NAME=`` (empty) or ``NAME=abc`` can't crash import
+    and a sub-floor override (e.g. ``MAX_FORMAT5_DEPTH=0``) can't silently
+    disable the feature it bounds."""
+    raw = os.getenv(name)
+    try:
+        val = int(raw) if raw is not None and raw.strip() != "" else default
+    except (ValueError, TypeError):
+        val = default
+    if lo is not None and val < lo:
+        val = lo
+    return val
+
+
 def spec_stack(spec: dict) -> str:
     """Stack of a FORMAT 1 spec. The orchestrator nests it under architecture
     ('architecture': {'stack': 'film'}) with the top-level 'stack' usually
@@ -64,19 +95,19 @@ WORKER_LADDER: list[tuple[str, str]] = _parse_fallbacks(
 # Hard cap on the number of PAID (non-ollama) worker calls allowed per project run. Escalation
 # to a cloud rung is gated by this budget; once spent, tasks clamp to the strongest local rung
 # instead of paying. Prevents a multi-task project from silently burning the API budget.
-MAX_PAID_WORKER_CALLS: int = int(os.getenv("MAX_PAID_WORKER_CALLS", "15"))
+MAX_PAID_WORKER_CALLS: int = _int_env("MAX_PAID_WORKER_CALLS", 15, lo=0)
 
 # Per-build HARD cost ceiling (USD). When cumulative METERED spend (cost._total_usd, which
 # counts only paid Anthropic dollars — $0 OAuth/local rungs never count) reaches this, the
 # build FAILS CLOSED: the next metered call is refused (cost.BuildCostCeilingExceeded) and the
 # run halts with a logged failure-handoff. This is the unattended-spend circuit-breaker that
 # stops a hung/looping build from silently draining the API budget. 0 = disabled (no ceiling).
-MAX_BUILD_COST_USD: float = float(os.getenv("MAX_BUILD_COST_USD", "5.0"))
+MAX_BUILD_COST_USD: float = _float_env("MAX_BUILD_COST_USD", 5.0, lo=0)
 # Soft warning threshold as a fraction of the ceiling — logged once, does NOT halt. 0 = no warn.
-BUILD_COST_WARN_FRAC: float = float(os.getenv("BUILD_COST_WARN_FRAC", "0.75"))
+BUILD_COST_WARN_FRAC: float = _float_env("BUILD_COST_WARN_FRAC", 0.75, lo=0)
 # Optional absolute metered-token backstop (input+output), independent of pricing drift.
 # 0 = disabled (rely on the USD ceiling).
-MAX_BUILD_TOKENS: int = int(os.getenv("MAX_BUILD_TOKENS", "0"))
+MAX_BUILD_TOKENS: int = _int_env("MAX_BUILD_TOKENS", 0, lo=0)
 
 # Codex CLI worker rung — a flat-rate OAuth (ChatGPT Plus/Pro) escalation tier that sits
 # ABOVE local Ollama and BELOW Anthropic in WORKER_LADDER. Because it bills against a
@@ -90,8 +121,8 @@ CODEX_EFFORT: str = os.getenv("CODEX_EFFORT", "")      # empty = don't override 
 # Per-run capacity cap. NOT a dollar budget — Codex is flat-rate. This protects the
 # subscription's flat-rate rate-limit window so a multi-task run can't exhaust the quota and
 # trip an interactive reauth (which would hang the build).
-CODEX_CLI_MAX_CALLS: int = int(os.getenv("CODEX_CLI_MAX_CALLS", "20"))
-CODEX_TIMEOUT: int = int(os.getenv("CODEX_TIMEOUT", "300"))  # seconds per codex exec subprocess
+CODEX_CLI_MAX_CALLS: int = _int_env("CODEX_CLI_MAX_CALLS", 20, lo=0)
+CODEX_TIMEOUT: int = _int_env("CODEX_TIMEOUT", 300, lo=0)  # seconds per codex exec subprocess
 
 # Grok Build CLI worker rung — a second flat-rate OAuth (SuperGrok / X Premium+) escalation tier
 # that sits in WORKER_LADDER ABOVE local Ollama and BELOW Codex. Grok-first ordering: grok-build
@@ -105,8 +136,8 @@ GROK_MODEL: str = os.getenv("GROK_MODEL", "grok-build")  # agentic coding model 
 # Per-run capacity cap (build-safety bound), NOT a dollar budget — Grok is flat-rate. The plan's
 # true rolling DAILY quota (survives process restarts) is deferred; this in-memory counter resets
 # each run via reset_paid_budget(), sized conservatively below the subscription's daily quota.
-GROK_MAX_CALLS: int = int(os.getenv("GROK_MAX_CALLS", "40"))
-GROK_TIMEOUT: int = int(os.getenv("GROK_TIMEOUT", "300"))  # seconds per grok -p subprocess
+GROK_MAX_CALLS: int = _int_env("GROK_MAX_CALLS", 40, lo=0)
+GROK_TIMEOUT: int = _int_env("GROK_TIMEOUT", 300, lo=0)  # seconds per grok -p subprocess
 
 # Claude (Max subscription) CLI worker rung — a third flat-rate OAuth escalation tier. Headless
 # `claude -p` runs the same Sonnet/Opus models you'd otherwise reach via the metered Anthropic API,
@@ -139,8 +170,8 @@ CLAUDE_CLI_ENABLED: bool = os.getenv("CLAUDE_CLI_ENABLED", "false").lower() == "
 CLAUDE_CLI_HOME: str = os.getenv("CLAUDE_CLI_HOME", "")  # empty = use claude's default config dir (sets CLAUDE_CONFIG_DIR)
 CLAUDE_CLI_MODEL: str = os.getenv("CLAUDE_CLI_MODEL", "sonnet")  # alias the Claude CLI accepts (sonnet|opus|haiku) or a full id
 # Per-run capacity cap — deliberately LOW because this shares the operator's interactive Max quota.
-CLAUDE_CLI_MAX_CALLS: int = int(os.getenv("CLAUDE_CLI_MAX_CALLS", "10"))
-CLAUDE_CLI_TIMEOUT: int = int(os.getenv("CLAUDE_CLI_TIMEOUT", "300"))  # seconds per claude -p subprocess
+CLAUDE_CLI_MAX_CALLS: int = _int_env("CLAUDE_CLI_MAX_CALLS", 10, lo=0)
+CLAUDE_CLI_TIMEOUT: int = _int_env("CLAUDE_CLI_TIMEOUT", 300, lo=0)  # seconds per claude -p subprocess
 
 # Provider-class sets that make the worker's budget logic declarative. METERED providers bill
 # per token and consume the dollar budget MAX_PAID_WORKER_CALLS; OAUTH providers are flat-rate
@@ -158,13 +189,13 @@ OAUTH_PROVIDERS: set[str] = {"codex", "grok", "claude_cli"}
 # exe-missing / per-run-capacity latches get NO countdown (different, non-time-based states). Codex
 # (ChatGPT Plus) and Claude Max both enforce ~5h rolling windows; SuperGrok's is shorter.
 OAUTH_RATE_WINDOW_S: dict[str, int] = {
-    "codex": int(os.getenv("CODEX_RATE_WINDOW_S", "18000")),       # ~5h ChatGPT Plus rolling window
-    "grok": int(os.getenv("GROK_RATE_WINDOW_S", "7200")),          # ~2h SuperGrok (shorter window)
-    "claude_cli": int(os.getenv("CLAUDE_CLI_RATE_WINDOW_S", "18000")),  # ~5h Claude Max rolling window
+    "codex": _int_env("CODEX_RATE_WINDOW_S", 18000, lo=0),       # ~5h ChatGPT Plus rolling window
+    "grok": _int_env("GROK_RATE_WINDOW_S", 7200, lo=0),          # ~2h SuperGrok (shorter window)
+    "claude_cli": _int_env("CLAUDE_CLI_RATE_WINDOW_S", 18000, lo=0),  # ~5h Claude Max rolling window
 }
 
 # Maximum tasks to run in parallel (1 = sequential, 2-4 = parallel)
-MAX_PARALLEL_WORKERS: int = int(os.getenv("MAX_PARALLEL_WORKERS", "4"))
+MAX_PARALLEL_WORKERS: int = _int_env("MAX_PARALLEL_WORKERS", 4, lo=1)
 
 # Task types that prefer local Ollama (simple, low-token tasks)
 # Everything else prefers cloud (complex logic, multi-file, reasoning-heavy)
@@ -196,11 +227,11 @@ COMFYUI_CHECKPOINT_REALISTIC: str = os.getenv(
 COMFYUI_CHECKPOINT_ANIME: str = os.getenv(
     "COMFYUI_CHECKPOINT_ANIME", "animagine-xl-3.1.safetensors"
 )
-COMFYUI_WIDTH: int = int(os.getenv("COMFYUI_WIDTH", "768"))
-COMFYUI_HEIGHT: int = int(os.getenv("COMFYUI_HEIGHT", "512"))
+COMFYUI_WIDTH: int = _int_env("COMFYUI_WIDTH", 768, lo=1)
+COMFYUI_HEIGHT: int = _int_env("COMFYUI_HEIGHT", 512, lo=1)
 # Sampling quality knobs (dpmpp_2m + karras gives better detail than euler at no
 # extra cost; steps trade quality for CPU render time).
-COMFYUI_STEPS: int = int(os.getenv("COMFYUI_STEPS", "26"))
+COMFYUI_STEPS: int = _int_env("COMFYUI_STEPS", 26, lo=1)
 COMFYUI_SAMPLER: str = os.getenv("COMFYUI_SAMPLER", "dpmpp_2m")
 COMFYUI_SCHEDULER: str = os.getenv("COMFYUI_SCHEDULER", "karras")
 COQUI_API_URL: str = os.getenv("COQUI_API_URL", "http://localhost:5002")
@@ -216,11 +247,11 @@ FLUIDSYNTH_SOUNDFONT: str = os.getenv("FLUIDSYNTH_SOUNDFONT", r"E:\tools\soundfo
 # Optional deployment hook: command to run in the output dir after git commit.
 # Example: "vercel --prod --yes" or "netlify deploy --prod --dir=dist"
 DEPLOY_HOOK: str | None = os.getenv("DEPLOY_HOOK")  # None = no deployment
-DEPLOY_TIMEOUT: int = int(os.getenv("DEPLOY_TIMEOUT", "120"))  # seconds
+DEPLOY_TIMEOUT: int = _int_env("DEPLOY_TIMEOUT", 120, lo=0)  # seconds
 PROJECTS_DIR: Path = Path(os.getenv("PROJECTS_DIR", "./projects"))
-MAX_RETRIES_PER_TASK: int = int(os.getenv("MAX_RETRIES_PER_TASK", "3"))
-MAX_TASKS: int = int(os.getenv("MAX_TASKS", "75"))
-ORCHESTRATOR_MAX_TOKENS: int = int(os.getenv("ORCHESTRATOR_MAX_TOKENS", "16384"))
+MAX_RETRIES_PER_TASK: int = _int_env("MAX_RETRIES_PER_TASK", 3, lo=0)
+MAX_TASKS: int = _int_env("MAX_TASKS", 75, lo=1)
+ORCHESTRATOR_MAX_TOKENS: int = _int_env("ORCHESTRATOR_MAX_TOKENS", 16384, lo=1)
 CREATIVE_DIRECTOR_MODEL: str = os.getenv("CREATIVE_DIRECTOR_MODEL", "claude-haiku-4-5-20251001")
 EXECUTION_ERROR_MODEL: str = os.getenv("EXECUTION_ERROR_MODEL", "claude-haiku-4-5-20251001")
 FINAL_REVIEW_MODEL: str = os.getenv("FINAL_REVIEW_MODEL", "claude-haiku-4-5-20251001")
@@ -248,7 +279,7 @@ GEMINI_QUOTA_FAILFAST: bool = os.getenv("GEMINI_QUOTA_FAILFAST", "true").lower()
 # carved out of the shared CODEX_CLI_MAX_CALLS capacity so a long planning/heal run can't starve
 # worker rescue of Codex. The CodexOrchestrator stops drawing Codex once this many orchestrator
 # Codex calls have been made in the run and falls through to paid Sonnet/Opus instead.
-CODEX_PLANNING_RESERVE: int = int(os.getenv("CODEX_PLANNING_RESERVE", "6"))
+CODEX_PLANNING_RESERVE: int = _int_env("CODEX_PLANNING_RESERVE", 6, lo=0)
 
 # Hard per-run sub-cap for WORKER RESCUE Codex calls: the capacity left in the Codex budget
 # after the orchestrator planning reserve is carved out. This is a computed constant (not an
@@ -262,7 +293,9 @@ CODEX_WORKER_RESERVE: int = max(0, CODEX_CLI_MAX_CALLS - CODEX_PLANNING_RESERVE)
 # cheaper model is sufficient for planning/JSON orchestration. Override via HAIKU_MODEL.
 HAIKU_MODEL: str = os.getenv("HAIKU_MODEL", "claude-haiku-4-5-20251001")
 CREATIVE_DIRECTOR_PROMPT_PATH: Path = Path(__file__).parent.parent / "creative_director.txt"
-MAX_FORMAT5_DEPTH: int = int(os.getenv("MAX_FORMAT5_DEPTH", "3"))
+# Floored at 1: MAX_FORMAT5_DEPTH=0 would make _subproject_decomposition_allowed(0)
+# compute 0 < 0 == False, silently disabling ALL decomposition (top-level included).
+MAX_FORMAT5_DEPTH: int = _int_env("MAX_FORMAT5_DEPTH", 3, lo=1)
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 EXPERIENCE_LOG: str = os.getenv("EXPERIENCE_LOG", "experience.jsonl")
 
@@ -272,7 +305,7 @@ ORCHESTRATOR_PROMPT_PATH: Path = Path(__file__).parent.parent / "orchestrator.tx
 TECHNICAL_ARCHITECT_ENABLED: bool = os.getenv("TECHNICAL_ARCHITECT_ENABLED", "true") == "true"
 TECHNICAL_ARCHITECT_MODEL: str = os.getenv("TECHNICAL_ARCHITECT_MODEL", "claude-haiku-4-5-20251001")
 TECHNICAL_ARCHITECT_PROMPT_PATH: Path = Path(__file__).parent.parent / "technical_architect.txt"
-DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "8765"))
+DASHBOARD_PORT: int = _int_env("DASHBOARD_PORT", 8765, lo=0)
 DASHBOARD_AUTOOPEN: bool = os.getenv("DASHBOARD_AUTOOPEN", "true") == "true"
 GODOT_PATH: str = os.getenv("GODOT_PATH", "godot")
 PINATA_API_KEY: str = os.getenv("PINATA_API_KEY", "")
@@ -280,7 +313,7 @@ PINATA_SECRET_KEY: str = os.getenv("PINATA_SECRET_KEY", "")
 IPFS_AUTO_PIN: bool = os.getenv("IPFS_AUTO_PIN", "false").lower() == "true"
 
 # Pipeline resilience
-PIPELINE_MAX_RETRIES: int = int(os.getenv("PIPELINE_MAX_RETRIES", "2"))
-HEAL_MAX_CYCLES: int = int(os.getenv("HEAL_MAX_CYCLES", "3"))
-ORCHESTRATOR_TIMEOUT: int = int(os.getenv("ORCHESTRATOR_TIMEOUT", "300"))   # seconds per API call
-WORKER_TASK_TIMEOUT: int = int(os.getenv("WORKER_TASK_TIMEOUT", "600"))     # seconds per task batch
+PIPELINE_MAX_RETRIES: int = _int_env("PIPELINE_MAX_RETRIES", 2, lo=0)
+HEAL_MAX_CYCLES: int = _int_env("HEAL_MAX_CYCLES", 3, lo=0)
+ORCHESTRATOR_TIMEOUT: int = _int_env("ORCHESTRATOR_TIMEOUT", 300, lo=0)   # seconds per API call
+WORKER_TASK_TIMEOUT: int = _int_env("WORKER_TASK_TIMEOUT", 600, lo=0)     # seconds per task batch

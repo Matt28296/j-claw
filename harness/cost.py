@@ -15,6 +15,8 @@ Self-test: PYTHONUTF8=1 python harness/cost.py
 """
 from __future__ import annotations
 
+import threading
+
 # (input_per_mtok, output_per_mtok) keyed by a substring of the model id.
 _PRICING: dict[str, tuple[float, float]] = {
     "opus":   (5.0, 25.0),
@@ -69,6 +71,11 @@ _role_metrics: dict[str, dict] = {}
 _ceiling_tripped: bool = False
 _cost_warned: bool = False
 
+# The accumulator above is mutated from up to 4 concurrent scheduler workers
+# (ThreadPoolExecutor). Guard the read-modify-write bodies so check-then-record
+# is atomic and no update is lost. Same idiom as worker._paid_lock.
+_cost_lock = threading.Lock()
+
 
 class BuildCostCeilingExceeded(RuntimeError):
     """Raised when cumulative METERED spend crosses the per-build ceiling.
@@ -81,18 +88,19 @@ class BuildCostCeilingExceeded(RuntimeError):
 def reset_costs() -> None:
     """Zero the accumulator for a fresh run."""
     global _total_usd, _calls, _ceiling_tripped, _cost_warned
-    _total_usd = 0.0
-    _calls = 0
-    _ceiling_tripped = False
-    _cost_warned = False
-    _by_label.clear()
-    _by_model.clear()
-    for k in _tokens:
-        _tokens[k] = 0
-    for k in _ollama_tokens:
-        _ollama_tokens[k] = 0
-    _oauth_usage.clear()
-    _role_metrics.clear()
+    with _cost_lock:
+        _total_usd = 0.0
+        _calls = 0
+        _ceiling_tripped = False
+        _cost_warned = False
+        _by_label.clear()
+        _by_model.clear()
+        for k in _tokens:
+            _tokens[k] = 0
+        for k in _ollama_tokens:
+            _ollama_tokens[k] = 0
+        _oauth_usage.clear()
+        _role_metrics.clear()
 
 
 def call_cost(usage, model: str | None) -> float:
@@ -119,17 +127,18 @@ def record_usage(usage, model: str | None, label: str) -> None:
     (tolerates None / missing fields) and on local models (recorded as $0)."""
     global _total_usd, _calls
     cost = call_cost(usage, model)
-    _calls += 1
-    _total_usd += cost
-    if cost:
-        _by_label[label] = _by_label.get(label, 0.0) + cost
-        mkey = _family(model) or "other"
-        _by_model[mkey] = _by_model.get(mkey, 0.0) + cost
-    if usage is not None:
-        _tokens["input"] += getattr(usage, "input_tokens", 0) or 0
-        _tokens["output"] += getattr(usage, "output_tokens", 0) or 0
-        _tokens["cache_read"] += getattr(usage, "cache_read_input_tokens", 0) or 0
-        _tokens["cache_creation"] += getattr(usage, "cache_creation_input_tokens", 0) or 0
+    with _cost_lock:
+        _calls += 1
+        _total_usd += cost
+        if cost:
+            _by_label[label] = _by_label.get(label, 0.0) + cost
+            mkey = _family(model) or "other"
+            _by_model[mkey] = _by_model.get(mkey, 0.0) + cost
+        if usage is not None:
+            _tokens["input"] += getattr(usage, "input_tokens", 0) or 0
+            _tokens["output"] += getattr(usage, "output_tokens", 0) or 0
+            _tokens["cache_read"] += getattr(usage, "cache_read_input_tokens", 0) or 0
+            _tokens["cache_creation"] += getattr(usage, "cache_creation_input_tokens", 0) or 0
 
 
 def check_cost_ceiling() -> None:
@@ -146,24 +155,35 @@ def check_cost_ceiling() -> None:
     global _ceiling_tripped, _cost_warned
     from config import MAX_BUILD_COST_USD, BUILD_COST_WARN_FRAC, MAX_BUILD_TOKENS
 
-    metered_tokens = _tokens["input"] + _tokens["output"]
-    usd_hit = bool(MAX_BUILD_COST_USD) and _total_usd >= MAX_BUILD_COST_USD
-    tok_hit = bool(MAX_BUILD_TOKENS) and metered_tokens >= MAX_BUILD_TOKENS
+    # Read the accumulator and latch the trip atomically with record_usage's
+    # writes so check-then-record cannot race across the scheduler's workers.
+    # I/O (the soft warning) is deferred until after the lock is released.
+    warn_now = False
+    warn_total = 0.0
+    with _cost_lock:
+        metered_tokens = _tokens["input"] + _tokens["output"]
+        usd_hit = bool(MAX_BUILD_COST_USD) and _total_usd >= MAX_BUILD_COST_USD
+        tok_hit = bool(MAX_BUILD_TOKENS) and metered_tokens >= MAX_BUILD_TOKENS
 
-    if _ceiling_tripped or usd_hit or tok_hit:
-        _ceiling_tripped = True
-        why = (f"${_total_usd:.2f} >= ${MAX_BUILD_COST_USD:.2f}" if usd_hit
-               else f"{metered_tokens} tok >= {MAX_BUILD_TOKENS}" if tok_hit
-               else "ceiling already tripped")
-        raise BuildCostCeilingExceeded(
-            f"per-build cost ceiling reached ({why}) — failing closed")
+        if _ceiling_tripped or usd_hit or tok_hit:
+            _ceiling_tripped = True
+            why = (f"${_total_usd:.2f} >= ${MAX_BUILD_COST_USD:.2f}" if usd_hit
+                   else f"{metered_tokens} tok >= {MAX_BUILD_TOKENS}" if tok_hit
+                   else "ceiling already tripped")
+            raise BuildCostCeilingExceeded(
+                f"per-build cost ceiling reached ({why}) — failing closed")
 
-    if (not _cost_warned and MAX_BUILD_COST_USD and BUILD_COST_WARN_FRAC
-            and _total_usd >= MAX_BUILD_COST_USD * BUILD_COST_WARN_FRAC):
-        _cost_warned = True
+        if (not _cost_warned and MAX_BUILD_COST_USD and BUILD_COST_WARN_FRAC
+                and _total_usd >= MAX_BUILD_COST_USD * BUILD_COST_WARN_FRAC):
+            _cost_warned = True
+            warn_now = True
+            warn_total = _total_usd
+
+    if warn_now:
         # Soft warning only — does not halt. Stderr-free: leave I/O to callers'
-        # logging; expose via cost_summary if needed. Print here for operator visibility.
-        print(f"[cost] WARNING: build spend ${_total_usd:.2f} crossed "
+        # logging; expose via cost_summary if needed. Print here for operator
+        # visibility, outside the lock so logging never serializes the workers.
+        print(f"[cost] WARNING: build spend ${warn_total:.2f} crossed "
               f"{BUILD_COST_WARN_FRAC:.0%} of ${MAX_BUILD_COST_USD:.2f} ceiling")
 
 

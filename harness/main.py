@@ -41,7 +41,7 @@ from verification import detect_ecosystem, run_playwright_project_check
 from e2e_generator import generate_e2e_tests, run_e2e_tests
 from creative_director import CreativeDirector
 from technical_architect import TechnicalArchitect
-from cost import reset_costs, cost_summary, format_cost_line
+from cost import reset_costs, cost_summary, format_cost_line, BuildCostCeilingExceeded
 from notify import notify_build_outcome, notify_crash
 from experience_log import get_stack_lessons
 
@@ -68,12 +68,25 @@ def _write_failure_handoff(output_dir: Path, intent: str, phase: str, exc: Excep
 
 
 def _handoff_has_stamp_issues(handoff_path: Path) -> bool:
-    """True when the independent OpenClaw stamp appended an ISSUES FOUND verdict —
-    a PASS build can still carry caveats the heal loop never resolved."""
+    """True unless the independent OpenClaw stamp is an explicit, unambiguous APPROVED.
+
+    H4 — default NOT-clean. The old check was exact-string `"OPENCLAW: ISSUES FOUND"`
+    and defaulted GREEN on every other case: a missing stamp (claude CLI absent /
+    no API key), a timed-out stamp (nothing appended), an unreadable handoff, or a
+    paraphrased verdict that never emitted the literal marker. All of those silently
+    rendered a green check the stamp never actually granted. Invert the default:
+    render green ONLY when an explicit `OPENCLAW: APPROVED` marker is present AND no
+    `OPENCLAW: ISSUES FOUND` marker is — every other (missing/ambiguous/unreadable)
+    case is treated as not-clean (returns True = has issues)."""
     try:
-        return "OPENCLAW: ISSUES FOUND" in handoff_path.read_text(encoding="utf-8")
+        text = handoff_path.read_text(encoding="utf-8")
     except Exception:
-        return False
+        return True  # unreadable handoff — cannot confirm a clean stamp
+    if "OPENCLAW: ISSUES FOUND" in text:
+        return True
+    # Require the explicit APPROVED marker. A missing/paraphrased stamp is ambiguous
+    # and must not render green on the strength of absence alone.
+    return "OPENCLAW: APPROVED" not in text
 
 
 def _dashboard_running() -> bool:
@@ -209,15 +222,22 @@ def _subproject_decomposition_allowed(depth: int) -> bool:
     return depth < MAX_FORMAT5_DEPTH
 
 
-def _build_disposition(review_passed: bool, dynamic_passed: bool, failed_tasks: list) -> bool:
-    """Honest overall build verdict (#6).
+def _build_disposition(review_passed: bool, dynamic_passed: bool, failed_tasks: list,
+                       all_done: bool = True) -> bool:
+    """Honest overall build verdict (#6, #H2).
 
     PASS requires the final review AND the dynamic checks to pass AND that no task
-    failed verification and exhausted its retries. Task statuses were previously
-    ignored — the verdict was only `review_passed and dynamic_passed` — so a build
-    with a hard-failed/stalled task could still report PASS. `failed_tasks` is the
-    list from ProjectInstance.failed_tasks(); a non-empty list fails the build."""
-    return bool(review_passed and dynamic_passed and not failed_tasks)
+    failed verification and exhausted its retries AND that every task actually
+    finished. Task statuses were previously ignored — the verdict was only
+    `review_passed and dynamic_passed` — so a build with a hard-failed/stalled task
+    could still report PASS. `failed_tasks` is the list from
+    ProjectInstance.failed_tasks(); a non-empty list fails the build.
+
+    H2: a scheduler deadlock (unsatisfiable dependency cycle) leaves tasks stuck in
+    `pending` — never `failed` — so `failed_tasks` stays empty and the stalled build
+    used to PASS. `all_done` is ProjectInstance.all_tasks_done() read after the
+    scheduler returns; a False value (some task never ran) fails the build too."""
+    return bool(review_passed and dynamic_passed and not failed_tasks and all_done)
 
 
 def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = False, auto_accept: bool = False, wiring: dict | None = None) -> bool:
@@ -252,7 +272,14 @@ def run_project(intent: str, output_dir: Path, depth: int = 0, manual: bool = Fa
     from orchestrator import reset_orchestrator_run
     reset_paid_budget()
     reset_orchestrator_run()  # clear the Gemini quota latch so it can't persist across runs
-    reset_costs()
+    # C1: the cost ceiling is build-GLOBAL, not per-sub-project. Reset the cost
+    # accumulator ONCE for the top-level run (depth 0). A FORMAT-5 sub-project is
+    # itself a run_project() call (depth > 0); resetting there would re-arm a fresh
+    # budget per scene, letting a 10-scene build legally spend 10× the ceiling
+    # unattended. The accumulator must persist across the whole decomposition so a
+    # tripped ceiling halts the entire build.
+    if depth == 0:
+        reset_costs()
 
     # Mutable holder so the failure handoff below can report the phase the
     # pipeline actually crashed in (updated in-place by _run_project_inner).
@@ -589,8 +616,19 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
                     f"{(t.error_log or '').strip()[:200]}"
                     for t in failed_tasks
                 ]
+            # H2: include tasks the scheduler could never run (deadlock leaves them
+            # `pending`, not `failed`) in the verdict — a stalled build must not PASS.
+            all_done = instance.all_tasks_done()
+            if not all_done:
+                pending = [t for t in instance.tasks.values()
+                           if t.status not in ("done", "deprecated", "failed")]
+                dynamic_issues = list(dynamic_issues) + [
+                    f"Task {t.id} never completed (status={t.status}) — scheduler "
+                    "could not run it (likely unsatisfied dependency / deadlock)"
+                    for t in pending
+                ]
             sw.on_dynamic_checks(dynamic_passed, dynamic_issues)
-            passed = _build_disposition(review_passed, dynamic_passed, failed_tasks)
+            passed = _build_disposition(review_passed, dynamic_passed, failed_tasks, all_done)
             if passed or heal_cycle == _MAX_HEAL:
                 break
 
@@ -709,14 +747,32 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
 
         return passed
     else:
-        # Manual mode: surface dynamic checks for the operator (no automated gating).
+        # Manual mode: surface dynamic checks for the operator (no automated gating
+        # ACTIONS — no heal loop, no handoff/deploy), but report an HONEST verdict.
+        # H1 — the manual branch used to hard-return True, so a --manual run with a
+        # failed-and-exhausted task reported PASS, re-opening the exact false-PASS hole
+        # commit 760ec40 closed on the automated path. Compute the verdict from the same
+        # inputs the automated branch feeds _build_disposition(): the final review, the
+        # dynamic checks, and any task that failed verification and exhausted its retries.
+        review_passed = run_final_review(output_dir, instance.spec)
+        sw.on_final_review_result(review_passed, heal_cycle=0)
         dynamic_passed, dynamic_issues = _run_dynamic_checks()
+        failed_tasks = instance.failed_tasks()
+        if failed_tasks:
+            dynamic_issues = list(dynamic_issues) + [
+                f"Task {t.id} failed verification and exhausted retries: "
+                f"{(t.error_log or '').strip()[:200]}"
+                for t in failed_tasks
+            ]
+        # H2: a deadlock leaves tasks pending; fold not-done into the manual verdict too.
+        all_done = instance.all_tasks_done()
         sw.on_dynamic_checks(dynamic_passed, dynamic_issues)
+        passed = _build_disposition(review_passed, dynamic_passed, failed_tasks, all_done)
         sw.on_project_done(
-            "pass" if dynamic_passed else "needs_followup",
+            "pass" if passed else "needs_followup",
             "Manual run complete",
         )
-        return True
+        return passed
 
 
 def _sub_project_stack(sp_dir: Path) -> str:
@@ -792,6 +848,18 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
         try:
             ok = run_project(sp["goal"], sp_dir, depth + 1, manual=manual,
                              auto_accept=auto_accept, wiring=wiring)
+        except BuildCostCeilingExceeded:
+            # C1: the cost ceiling is build-GLOBAL. A tripped ceiling must halt the
+            # WHOLE decomposition, not just this scene — re-raise so it propagates out
+            # of the sub-project loop to run_project()'s failure-handoff handler instead
+            # of being swallowed by the broad `except Exception` below (which would
+            # continue the loop with a still-tripped — and now sticky — budget, spending
+            # nothing more useful but masking the honest "build halted on cost" verdict).
+            console.print(
+                f"  [bold red]Sub-project {name} hit the per-build cost ceiling — "
+                "halting the entire build.[/bold red]"
+            )
+            raise
         except Exception as exc:  # noqa: BLE001 — one crashed scene must not sink the rest
             console.print(f"  [red]Sub-project {name} crashed: {exc} — continuing with remaining sub-projects.[/red]")
             ok = False

@@ -278,6 +278,12 @@ class _OpenAICompatOrchestrator:
         model_idx = 0
 
         for attempt in range(max_retries + 1):
+            # Per-build cost circuit-breaker: refuse before spending if the ceiling
+            # was crossed. Mirrors the base Orchestrator; placed BEFORE the try so it
+            # fails closed (propagates out) instead of being swallowed by the retry
+            # handlers below. $0 OAuth/local rungs price to zero so a healthy free
+            # build never trips this — only real Anthropic dollars do.
+            check_cost_ceiling()
             try:
                 _t0 = time.monotonic()
                 response = self._client.chat.completions.create(

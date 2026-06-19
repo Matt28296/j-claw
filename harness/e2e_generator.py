@@ -12,6 +12,7 @@ from pathlib import Path
 from rich.console import Console
 
 from config import WORKER_MODEL, WORKER_PROVIDER, WORKER_FALLBACKS, OLLAMA_HOST
+from cost import record_usage, check_cost_ceiling, BuildCostCeilingExceeded
 
 console = Console()
 
@@ -177,6 +178,12 @@ def _call_worker(system: str, user: str) -> str | None:
                 if not ANTHROPIC_API_KEY:
                     continue
                 import anthropic as _anthropic
+                # Per-build cost circuit-breaker: refuse before spending if the
+                # ceiling was already crossed. Raises BuildCostCeilingExceeded,
+                # re-raised by the dedicated except below so it is NOT swallowed
+                # by the broad provider-chain handler (which would fall through to
+                # the next provider) — it fails the build closed.
+                check_cost_ceiling()
                 client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
                 resp = client.messages.create(
                     model=model,
@@ -184,6 +191,7 @@ def _call_worker(system: str, user: str) -> str | None:
                     system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
                     messages=[{"role": "user", "content": user}],
                 )
+                record_usage(resp.usage, model, "e2e")
                 return resp.content[0].text.strip()
 
             elif provider == "openrouter":
@@ -207,6 +215,10 @@ def _call_worker(system: str, user: str) -> str | None:
                 )
                 return resp.choices[0].message.content.strip()
 
+        except BuildCostCeilingExceeded:
+            # Fail closed: the per-build ceiling has tripped. Do NOT fall through
+            # to the next provider — propagate so the build halts cleanly.
+            raise
         except Exception as exc:  # noqa: BLE001
             console.print(f"  [yellow]E2E generator: {provider}/{model} error: {exc!r} — trying next…[/yellow]")
             continue

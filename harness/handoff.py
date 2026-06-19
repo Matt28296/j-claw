@@ -12,6 +12,7 @@ import anthropic
 from rich.console import Console
 
 from config import ANTHROPIC_API_KEY, ORCHESTRATOR_MODEL, HEAL_MAX_CYCLES
+from cost import record_usage, check_cost_ceiling
 from verification import SKIP_PREFIX
 import config as cfg
 from state_writer import writer as sw
@@ -222,6 +223,11 @@ def _stamp_via_api(handoff_path: Path, output_dir: Path) -> None:
         "  OPENCLAW: APPROVED\n"
         "  OPENCLAW: ISSUES FOUND"
     )
+    # Per-build cost circuit-breaker: refuse before spending if the ceiling was
+    # already crossed. Placed BEFORE the try so BuildCostCeilingExceeded (a
+    # RuntimeError) is NOT masked by the broad except below — it propagates out
+    # and fails the stamp closed rather than draining money on the failure path.
+    check_cost_ceiling()
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
@@ -230,6 +236,7 @@ def _stamp_via_api(handoff_path: Path, output_dir: Path) -> None:
             system=system,
             messages=[{"role": "user", "content": context}],
         )
+        record_usage(response.usage, ORCHESTRATOR_MODEL, "stamp")
         verdict = response.content[0].text.strip()
     except Exception as exc:  # noqa: BLE001
         console.print(f"  [yellow]OpenClaw API stamp failed: {exc} — skipping.[/yellow]")

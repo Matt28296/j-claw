@@ -134,8 +134,11 @@ class TestWorktreeManagerCreate(unittest.TestCase):
     def test_create_returns_correct_path(self):
         with patch("worktree_manager._run", return_value=_ok()):
             path = self._wt.create("task_003")
-        expected = self._repo.parent / ".jclaw_worktrees" / "task_003"
-        self.assertEqual(path, expected)
+        # The worktree dir is namespaced as "<task_id>-<random suffix>" (HK1 fix)
+        # so concurrent builds sharing an output base can't collide on the same path.
+        self.assertEqual(path.parent, self._repo.parent / ".jclaw_worktrees")
+        self.assertTrue(path.name.startswith("task_003-"),
+                        f"expected namespaced 'task_003-<suffix>', got {path.name!r}")
 
     def test_create_raises_on_git_failure(self):
         with patch("worktree_manager._run", return_value=_fail("some git error")):
@@ -447,8 +450,10 @@ class TestWorktreeManagerDegradation(unittest.TestCase):
         """Bug-4 regression: if a stale wt_path directory exists, git worktree prune is called
         after removing it so the crashed run's admin entry doesn't block the new add."""
         wt = WorktreeManager(self._repo)
-        # Create a fake stale directory that looks like a leftover from a crashed run.
-        stale_path = self._repo.parent / ".jclaw_worktrees" / "task_stale"
+        # The worktree dir is namespaced "<task_id>-<suffix>" (HK1 fix), so pin the
+        # random suffix to stage the stale dir at the exact path create() will target.
+        fixed_suffix = "deadbeef"
+        stale_path = self._repo.parent / ".jclaw_worktrees" / f"task_stale-{fixed_suffix}"
         stale_path.mkdir(parents=True, exist_ok=True)
 
         prune_calls = []
@@ -458,7 +463,8 @@ class TestWorktreeManagerDegradation(unittest.TestCase):
                 prune_calls.append(args)
             return _ok()
 
-        with patch("worktree_manager._run", side_effect=_side_effect):
+        with patch("worktree_manager.secrets.token_hex", return_value=fixed_suffix), \
+                patch("worktree_manager._run", side_effect=_side_effect):
             wt.create("task_stale")
 
         self.assertTrue(prune_calls, "git worktree prune must be called after removing a stale dir")

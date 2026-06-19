@@ -150,7 +150,7 @@ j-claw/
     ├── session_log.py            Append-only replayable per-run JSONL transcript (sessions/)
     ├── permissions.py            Action-risk classifier + observe() logging (roadmap #6)
     ├── risk_evidence.py          Aggregates risk_classified events for threshold tuning
-    ├── worktree_manager.py       Per-task git worktree isolation (create/merge/remove)
+    ├── worktree_manager.py       Per-task git worktree isolation (create/copy-out/remove; no git-merge)
     ├── interpretation_risk.py    Deterministic brief-difficulty scoring → role routing
     ├── telegram_bot.py           Telegram bot — /run /status /cancel /projects
     ├── start_bot.py              Bot entry point

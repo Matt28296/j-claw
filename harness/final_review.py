@@ -12,7 +12,7 @@ from rich.console import Console
 
 from config import ANTHROPIC_API_KEY, FINAL_REVIEW_MODEL
 from cache_telemetry import log_cache_usage
-from cost import record_usage, record_role_event
+from cost import record_usage, record_role_event, check_cost_ceiling
 
 console = Console()
 
@@ -79,6 +79,12 @@ def run_final_review(output_dir: Path, spec: dict) -> bool:
         user_message += chunk
         total += len(chunk)
         included.append(rel)
+
+    # Per-build cost circuit-breaker: refuse before spending if the ceiling was
+    # already crossed. Placed BEFORE the retry loop so BuildCostCeilingExceeded
+    # (a RuntimeError) propagates out and fails the build closed instead of being
+    # swallowed by the broad except below and retried into more spend.
+    check_cost_ceiling()
 
     review_text = None
     _t0 = time.monotonic()

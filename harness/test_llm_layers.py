@@ -3198,6 +3198,21 @@ class TestManualGateUnattended(unittest.TestCase):
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
+    # Wave 4 reliability-fix regression modules (TestCase-based). The other wave4
+    # modules (test_wave4_costlock/_env/_worktree) are standalone scripts run
+    # separately; tests/test_worktree_manager.py is also its own module.
+    from test_wave4_verdict import (
+        TestC1CostCeilingIsBuildGlobal,
+        TestH1ManualVerdictHonest,
+        TestH2PendingTasksFailVerdict,
+        TestH4StampDefaultNotGreen,
+    )
+    from test_wave4_metered import (
+        TestFinalReviewCeiling,
+        TestStampCeiling,
+        TestE2EGeneratorCeiling,
+        TestOpenAICompatOrchestratorCeiling,
+    )
     for cls in [
         TestParseRetryDelay,
         TestOpenAICompatOrchestrator,
@@ -3232,6 +3247,15 @@ if __name__ == "__main__":
         TestStampHonesty,
         TestSubprojectEscapeValve,
         TestAssetOutputTypeAccepted,
+        # Wave 4 reliability-fix regressions
+        TestC1CostCeilingIsBuildGlobal,
+        TestH1ManualVerdictHonest,
+        TestH2PendingTasksFailVerdict,
+        TestH4StampDefaultNotGreen,
+        TestFinalReviewCeiling,
+        TestStampCeiling,
+        TestE2EGeneratorCeiling,
+        TestOpenAICompatOrchestratorCeiling,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 
