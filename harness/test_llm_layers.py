@@ -2925,6 +2925,56 @@ class TestWorktreeHuskRegression(unittest.TestCase):
                          "main HEAD moved — worktree branch leaked into main")
 
 
+class TestManualGateUnattended(unittest.TestCase):
+    """Roadmap blocker #2: the manual verification gate must never crash an
+    unattended (no-TTY) build. It used to call Confirm.ask() directly, which
+    raised EOFError on closed stdin → killed the whole build + burned the ladder.
+    It must now fail CLOSED (False) cleanly without prompting."""
+
+    def _task(self):
+        t = MagicMock()
+        t.id = "task-9"
+        t.objective = "do a thing"
+        t.files = ["a.txt"]
+        t.acceptance_criteria = ["looks right"]
+        return t
+
+    def test_no_tty_fails_closed_without_prompting(self):
+        import verification
+        fake_stdin = MagicMock()
+        fake_stdin.isatty.return_value = False
+        with patch.object(verification, "console"), \
+             patch.object(verification.sys, "stdin", fake_stdin), \
+             patch.object(verification, "Confirm") as mock_confirm:
+            passed, msg = verification._run_manual(self._task())
+        self.assertFalse(passed, "unattended manual gate must fail closed, not pass")
+        mock_confirm.ask.assert_not_called()  # never prompt with no TTY
+        self.assertIn("unattended", msg.lower())
+
+    def test_eof_mid_prompt_fails_closed(self):
+        import verification
+        fake_stdin = MagicMock()
+        fake_stdin.isatty.return_value = True  # looked interactive...
+        with patch.object(verification, "console"), \
+             patch.object(verification.sys, "stdin", fake_stdin), \
+             patch.object(verification, "Confirm") as mock_confirm:
+            mock_confirm.ask.side_effect = EOFError()  # ...but stdin closed
+            passed, msg = verification._run_manual(self._task())
+        self.assertFalse(passed, "EOF mid-prompt must fail closed, not crash")
+        self.assertIn("closed", msg.lower())
+
+    def test_tty_yes_still_passes(self):
+        import verification
+        fake_stdin = MagicMock()
+        fake_stdin.isatty.return_value = True
+        with patch.object(verification, "console"), \
+             patch.object(verification.sys, "stdin", fake_stdin), \
+             patch.object(verification, "Confirm") as mock_confirm:
+            mock_confirm.ask.return_value = True
+            passed, _ = verification._run_manual(self._task())
+        self.assertTrue(passed, "attended approval must still pass through")
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
@@ -2956,6 +3006,7 @@ if __name__ == "__main__":
         TestPerRoleCodexSubCap,
         TestRungStatusSnapshot,
         TestWorktreeHuskRegression,
+        TestManualGateUnattended,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 

@@ -1205,7 +1205,25 @@ def _run_manual(task, prompt: str | None = None) -> tuple[bool, str]:
     for criterion in task.acceptance_criteria:
         console.print(f"    • {criterion}")
     question = prompt or "Does this task pass?"
-    passed = Confirm.ask(f"  {question}")
+
+    # Unattended runs (autorun/telegram/background) have no TTY: a human cannot
+    # answer this gate. Prompting there raised EOFError, which crashed the whole
+    # build and burned the retry ladder. Fail CLOSED instead — absence of a human
+    # verdict is NOT approval — and return cleanly so the normal failure/refine
+    # path handles it rather than an unhandled exception killing the process.
+    if not sys.stdin.isatty():
+        msg = ("manual gate FAILED unattended: no TTY/operator to approve "
+               "(fail-closed — absence of approval is not approval)")
+        console.print(f"  [red]{msg}[/red]")
+        return False, msg
+
+    try:
+        passed = Confirm.ask(f"  {question}")
+    except (EOFError, KeyboardInterrupt):
+        # stdin closed/interrupted mid-prompt even though it looked interactive.
+        msg = "manual gate FAILED: input stream closed/interrupted (fail-closed)"
+        console.print(f"  [red]{msg}[/red]")
+        return False, msg
     return passed, "" if passed else "Rejected at manual gate"
 
 
