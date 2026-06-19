@@ -3561,6 +3561,90 @@ class TestClaudeCliOAuthPath(unittest.TestCase):
         mock_ant.assert_not_called()  # OAuth CLI used → metered API never touched
 
 
+class TestMemoryLint(unittest.TestCase):
+    """memory_lint.py — warn-only staleness pre-flight over project_memory/."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.mkdtemp(prefix="memlint_")
+        self.proj = Path(self._tmp)
+        self.mem = self.proj / "project_memory"
+        self.mem.mkdir()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write(self, rel, text):
+        p = self.proj / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+
+    def test_no_memory_dir_is_skipped(self):
+        import memory_lint, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            rep = memory_lint.lint_project_memory(Path(d))
+        self.assertFalse(rep["memory_present"])
+        self.assertEqual(rep["total"], 0)
+
+    def test_clean_memory_no_findings(self):
+        import memory_lint
+        self._write("app.py", "print('hi')\n")
+        self._write("project_memory/project_summary.md", "Built app.py for the user.")
+        self._write("project_memory/project_summary.md.meta.json", "{}")
+        rep = memory_lint.lint_project_memory(self.proj)
+        self.assertEqual(rep["total"], 0, rep["findings"])
+
+    def test_missing_file_citation_flagged(self):
+        import memory_lint
+        self._write("project_memory/project_summary.md",
+                    "The core lives in src/ghost_module.py and is great.")
+        self._write("project_memory/project_summary.md.meta.json", "{}")
+        rep = memory_lint.lint_project_memory(self.proj)
+        kinds = [f["kind"] for f in rep["findings"]]
+        self.assertIn("missing_file_citation", kinds)
+        self.assertTrue(any("ghost_module.py" in f["detail"] for f in rep["findings"]))
+
+    def test_citation_satisfied_by_basename(self):
+        import memory_lint
+        # Memory cites a path with a different dir but the basename exists → not stale.
+        self._write("devtoolkit/cli_rename.py", "x = 1\n")
+        self._write("project_memory/project_summary.md", "see src/cli_rename.py")
+        self._write("project_memory/project_summary.md.meta.json", "{}")
+        rep = memory_lint.lint_project_memory(self.proj)
+        self.assertFalse(any(f["kind"] == "missing_file_citation" for f in rep["findings"]),
+                         rep["findings"])
+
+    def test_contract_no_source_flagged_and_present_ok(self):
+        import memory_lint
+        self._write("server.py", 'app.get("/users")  # implemented\n')
+        self._write("project_memory/api_contracts.md",
+                    "## `GET /users`\n\n## `POST /ghosts`\n\n~~`DELETE /old`~~ *(deprecated)*\n")
+        self._write("project_memory/api_contracts.md.meta.json", "{}")
+        rep = memory_lint.lint_project_memory(self.proj)
+        details = [f["detail"] for f in rep["findings"] if f["kind"] == "contract_no_source"]
+        self.assertTrue(any("/ghosts" in d for d in details), details)      # absent → flagged
+        self.assertFalse(any("/users" in d for d in details), details)      # present → ok
+        self.assertFalse(any("/old" in d for d in details), details)        # deprecated → ignored
+
+    def test_orphan_meta_flagged(self):
+        import memory_lint
+        # .meta.json with no owning memory file
+        self._write("project_memory/api_contracts.md.meta.json", "{}")
+        rep = memory_lint.lint_project_memory(self.proj)
+        self.assertTrue(any(f["kind"] == "orphan_meta" for f in rep["findings"]), rep["findings"])
+
+    def test_report_artifact_written_and_exit_zero(self):
+        import memory_lint
+        self._write("project_memory/project_summary.md", "cites missing.py here")
+        rep = memory_lint.lint_project_memory(self.proj)
+        artifact = self.mem / "lint_report.json"
+        self.assertTrue(artifact.exists(), "lint_report.json must be written")
+        # WARN-ONLY: main() always exits 0 even with findings
+        self.assertEqual(memory_lint.main([str(self.proj)]), 0)
+        self.assertGreater(rep["total"], 0)
+
+
 class TestForceFormat5(unittest.TestCase):
     """Locks the FORMAT-5 escape hatch: when FORCE_FORMAT5 is set, a top-level build
     is hard-directed to decompose (bypassing the TA scale-down that flattened D3/D4),
@@ -3687,6 +3771,7 @@ if __name__ == "__main__":
         TestSalvageWrapperOutput,
         TestPaidOrchBudget,
         TestClaudeCliOAuthPath,
+        TestMemoryLint,
         TestForceFormat5,
         TestCostCeiling,
         TestProjectDisposition,
