@@ -3412,6 +3412,57 @@ class TestOauthTimeoutLatch(unittest.TestCase):
                         "a second consecutive timeout reaches the threshold → latch the rung")
 
 
+class TestSalvageWrapperOutput(unittest.TestCase):
+    """_parse_and_validate must recover a single-file task's body when the worker (esp. the grok
+    rung) wraps it in a chat-style envelope — {"response": ...} / {"output": ...} / {"result": ...}
+    — instead of the {"files":[...]} contract. This was the dominant convergence killer on the
+    2026-06-19 D1 runs: single-file rewrite tasks hard-failed with "missing 'files' list. Got keys:
+    ['response']" and stalled the heal loop. Multi-file and input-echo shapes stay unsalvageable."""
+
+    class _Task:
+        def __init__(self, files):
+            self.files = files
+
+    def test_response_wrapper_with_fenced_code_salvaged(self):
+        import worker as w
+        body = "import math\n\n\ndef human_readable_bytes(n):\n    return str(n)\n"
+        raw = json.dumps({"response": f"Here is the file you asked for:\n```python\n{body}```\nDone."})
+        result = w._parse_and_validate(raw, self._Task(["devtoolkit/utils/formatting.py"]))
+        self.assertEqual(len(result["files"]), 1)
+        self.assertEqual(result["files"][0]["path"], "devtoolkit/utils/formatting.py")
+        self.assertIn("def human_readable_bytes", result["files"][0]["content"])
+        self.assertNotIn("Here is the file", result["files"][0]["content"])
+
+    def test_response_wrapper_raw_body_salvaged(self):
+        import worker as w
+        body = "import pytest\nfrom click.testing import CliRunner\n\n\ndef test_smoke():\n    assert True\n"
+        raw = json.dumps({"output": body})  # no fence — take the string as-is
+        result = w._parse_and_validate(raw, self._Task(["tests/test_dirsize.py"]))
+        self.assertEqual(result["files"][0]["path"], "tests/test_dirsize.py")
+        self.assertIn("def test_smoke", result["files"][0]["content"])
+
+    def test_multifile_response_wrapper_not_salvaged(self):
+        import worker as w
+        raw = json.dumps({"response": "some single blob of text that cannot be split safely " * 3})
+        with self.assertRaises(ValueError):
+            w._parse_and_validate(raw, self._Task(["a.py", "b.py"]))  # 2 files → unsafe to guess
+
+    def test_input_echo_not_salvaged(self):
+        import worker as w
+        # grok parroting the dispatch object back has no recoverable body → honest failure.
+        raw = json.dumps({"task": "x", "project_context": {}, "existing_dependency_files": [],
+                          "memory_context": ""})
+        with self.assertRaises(ValueError) as ctx:
+            w._parse_and_validate(raw, self._Task(["tests/test_x.py"]))
+        self.assertIn("missing 'files' list", str(ctx.exception))
+
+    def test_proper_files_contract_unaffected(self):
+        import worker as w
+        raw = json.dumps({"files": [{"path": "a.py", "content": "print('ok')\n" * 5}]})
+        result = w._parse_and_validate(raw, self._Task(["a.py"]))
+        self.assertEqual(result["files"][0]["path"], "a.py")
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
@@ -3462,6 +3513,7 @@ if __name__ == "__main__":
         TestManualGateUnattended,
         TestPythonBuildManifest,
         TestOauthTimeoutLatch,
+        TestSalvageWrapperOutput,
         TestCostCeiling,
         TestProjectDisposition,
         TestStampHonesty,

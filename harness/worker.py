@@ -1968,10 +1968,20 @@ def _salvage_single_file(raw: str, parsed, task) -> dict | None:
     """Conservatively recover a single-file task's content from malformed output.
 
     Only fires when the task declares exactly one output file (multi-file guessing is unsafe).
-    Sources, in order: an explicit content/code/file string field, then the largest fenced
-    code block. Returns a reconstructed {files:[...]} dict, or None to let the caller escalate.
-    This cuts the paid-escalation tax on "write a script" tasks where the local model produces
-    valid code but botches the surrounding JSON.
+    Sources, in order: a known content-bearing string field, then the largest fenced code block.
+
+    The string fields cover the two wrapper shapes the workers (esp. the grok rung) emit instead
+    of the {"files":[...]} contract:
+      • a direct body key — {"content": "..."} / {"code": "..."} / {"file": "..."}
+      • a chat-style wrapper — {"response": "..."} / {"output": ...} / {"result": ...} /
+        {"answer": ...} / {"text": ...}, where the file is buried (often inside a ```lang fence)
+        in the assistant's reply. For each candidate we prefer a fenced code block extracted from
+        the DECODED string value (real newlines, so the fence regex matches), else the string
+        as-is. This recovers the common "grok wrapped the file in {'response': ...}" failure that
+        otherwise hard-fails a single-file task and stalls the build.
+
+    Returns a reconstructed {files:[...]} dict, or None to let the caller escalate. Multi-file and
+    input-echo shapes (e.g. grok parroting the dispatch object back) are deliberately NOT salvaged.
     """
     files = getattr(task, "files", None) if task is not None else None
     if not files or len(files) != 1:
@@ -1980,10 +1990,12 @@ def _salvage_single_file(raw: str, parsed, task) -> dict | None:
 
     content: str | None = None
     if isinstance(parsed, dict):
-        for key in ("content", "code", "file"):
+        for key in ("content", "code", "file", "response", "output", "result", "answer", "text"):
             val = parsed.get(key)
             if isinstance(val, str) and val.strip():
-                content = val
+                # A wrapper value often embeds the file in a fenced block amid prose; prefer that,
+                # else take the whole string (it may be the raw file body).
+                content = _extract_code_block(val) or val
                 break
     if content is None:
         content = _extract_code_block(raw)
