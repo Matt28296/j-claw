@@ -21,7 +21,7 @@ from config import (
     CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT, OAUTH_PROVIDERS, METERED_PROVIDERS,
     GROK_CLI_ENABLED, GROK_HOME, GROK_MODEL, GROK_MAX_CALLS, GROK_TIMEOUT,
     CLAUDE_CLI_ENABLED, CLAUDE_CLI_HOME, CLAUDE_CLI_MODEL, CLAUDE_CLI_MAX_CALLS, CLAUDE_CLI_TIMEOUT,
-    CODEX_WORKER_RESERVE,
+    CODEX_WORKER_RESERVE, OAUTH_RATE_WINDOW_S,
 )
 from experience_log import get_worker_hints, log_escalation
 from cost import record_role_event
@@ -717,6 +717,16 @@ _codex_disabled = False
 _grok_disabled = False
 _claude_cli_disabled = False
 
+# Observability sidecar for the disable-latches above (dashboard "rung status" feature). The booleans
+# carry no WHY/WHEN, so when an OAuth rung latches off we also record a structured entry here, keyed by
+# provider: {"reason": <class>, "disabled_at": <epoch>, "detail": <short msg>}. `reason` is one of
+# RATE_LIMIT / QUOTA / AUTH / TIMEOUT / EXE_MISSING / UNKNOWN (see _classify_oauth_failure). Only the
+# subscription-cap classes (RATE_LIMIT/QUOTA) earn a modeled-window countdown in the snapshot; AUTH /
+# capacity-exhaustion are distinct, non-time-based states (a countdown there would mislead — the catch
+# Codex raised about _reserve_oauth_call conflating "latched" with "capacity-exhausted"). Read-only for
+# the dashboard via ladder_status_snapshot(); guarded by _oauth_lock alongside the latch booleans.
+_rung_status: dict[str, dict] = {}
+
 # Per-role Codex sub-caps (Phase 4). Codex capacity is shared between two caller roles:
 # - planning: Creative Director / Technical Architect calls via planning_call (bounded by
 #   CODEX_PLANNING_RESERVE in orchestrator.py's _codex_planning_calls counter, not here)
@@ -755,6 +765,7 @@ def reset_paid_budget() -> None:
         _paid_calls_made = 0
     with _oauth_lock:
         _oauth_calls_made.clear()
+        _rung_status.clear()
         _codex_disabled = False
         _grok_disabled = False
         _claude_cli_disabled = False
@@ -1058,6 +1069,9 @@ def execute_task(
                         _grok_disabled = True
                     elif provider == "claude_cli":
                         _claude_cli_disabled = True
+                    # Record WHY/WHEN under the same lock so the dashboard rung-status snapshot is
+                    # consistent with the latch it describes (see ladder_status_snapshot).
+                    _record_rung_latched(provider, exc)
                 console.print(
                     f"  [yellow]{provider} unavailable (auth/quota) — disabling {provider} rung "
                     f"for this run, escalating to next rung.[/yellow]"
@@ -1166,6 +1180,112 @@ def _oauth_unavailable(provider: str, exc: Exception) -> bool:
     return False
 
 
+# Latch-reason classes for the dashboard rung-status sidecar. Only RATE_LIMIT / QUOTA earn a
+# modeled-window countdown; AUTH / EXE_MISSING / TIMEOUT / UNKNOWN are non-time-based states.
+_REASON_RATE_LIMIT = "RATE_LIMIT"   # transient/window throttle (429 / rate limit / too many requests)
+_REASON_QUOTA = "QUOTA"             # subscription cap exhausted (usage limit / quota / daily / credits)
+_REASON_AUTH = "AUTH"               # not logged in / unauthorized / 401 / 403 — needs re-login, no timer
+_REASON_TIMEOUT = "TIMEOUT"         # subprocess timed out — transient, no timer
+_REASON_EXE_MISSING = "EXE_MISSING" # CLI binary not found — config/install issue, no timer
+_REASON_UNKNOWN = "UNKNOWN"         # latched-unavailable but unclassified — no timer
+
+
+def _classify_oauth_failure(provider: str, exc: Exception) -> str:
+    """Classify WHY an OAuth rung latched off, for the dashboard rung-status sidecar. Called ONLY at
+    the latch site (never on the happy path), AFTER _oauth_unavailable() already returned True — so
+    this only refines an already-confirmed unavailability into a reason class. Phrase-matches the same
+    substrings the _is_*_unavailable classifiers use, ordered most-specific-first (QUOTA before
+    RATE_LIMIT, since 'usage limit'/'quota' is a harder cap than a bare 429). Returns a _REASON_* const."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return _REASON_TIMEOUT
+    if isinstance(exc, FileNotFoundError):
+        return _REASON_EXE_MISSING
+    msg = str(exc).lower()
+    if any(k in msg for k in ("usage limit", "reached your usage", "limit reached", "quota",
+                              "daily limit", "out of credits")):
+        return _REASON_QUOTA
+    if any(k in msg for k in ("429", "rate limit", "too many requests", "throttl")):
+        return _REASON_RATE_LIMIT
+    if any(k in msg for k in ("not logged in", "not signed in", "unauthorized", "401", "403",
+                              "login required", "please run", "run codex login", "run grok login",
+                              "/login", "sign in", "no auth", "subscription required", "subscription")):
+        return _REASON_AUTH
+    return _REASON_UNKNOWN
+
+
+# Reason classes that represent a recoverable subscription-window cap, so the dashboard models a
+# "back in action" countdown (disabled_at + OAUTH_RATE_WINDOW_S[provider]). Everything else gets none.
+_COUNTDOWN_REASONS = frozenset({_REASON_RATE_LIMIT, _REASON_QUOTA})
+
+
+def _record_rung_latched(provider: str, exc: Exception) -> None:
+    """Record WHY/WHEN an OAuth rung latched off, for ladder_status_snapshot(). MUST be called while
+    holding _oauth_lock (same lock that guards the disable booleans), so the latch and its metadata
+    are written atomically together."""
+    _rung_status[provider] = {
+        "reason": _classify_oauth_failure(provider, exc),
+        "disabled_at": time.time(),
+        "detail": str(exc)[:160],
+    }
+
+
+def ladder_status_snapshot() -> list[dict]:
+    """Read-only snapshot of every WORKER_LADDER rung's current availability, for the Mission Control
+    dashboard's rung-status chain. One entry per rung, in ladder order. Pure read under _oauth_lock —
+    NEVER mutates state, so it's safe to poll from a state-writer tick. The dashboard overlays the
+    momentary 'active' rung itself from active_agent.provider/rung; this snapshot is about availability.
+
+    Per-rung `state` (and what the dashboard renders):
+      available           → green   (local Ollama, or an OAuth/metered rung with capacity left)
+      rate_limited         → red + "~est." countdown (OAuth latched on RATE_LIMIT/QUOTA)
+      auth_failed          → red, no timer ("needs re-login"; OAuth latched on AUTH)
+      unavailable          → red, no timer (OAuth latched on TIMEOUT/EXE_MISSING/UNKNOWN)
+      capacity_exhausted   → grey ("resets next run"; OAuth per-run cap hit, not latched)
+      budget_exhausted     → grey ("paid budget spent"; metered dollar budget hit)
+      disabled_off         → grey ("off"; OAuth rung globally disabled in config)
+    """
+    out: list[dict] = []
+    # _paid_calls_made is read lock-free: a single int read is GIL-atomic, and a snapshot tolerates a
+    # one-tick-stale value. Holding only _oauth_lock (never nesting it with _paid_lock) keeps this read
+    # path free of any lock-order inversion with the reserve/reset paths.
+    paid_spent = _paid_calls_made >= MAX_PAID_WORKER_CALLS
+    with _oauth_lock:
+        latched = {"codex": _codex_disabled, "grok": _grok_disabled, "claude_cli": _claude_cli_disabled}
+        for rung, (provider, model) in enumerate(WORKER_LADDER):
+            entry = {"rung": rung, "provider": provider, "model": model}
+            if provider == "ollama":
+                entry["state"] = "available"  # local + free; never rate-limited or capped
+            elif provider in OAUTH_PROVIDERS:
+                cap = {"codex": CODEX_CLI_MAX_CALLS, "grok": GROK_MAX_CALLS,
+                       "claude_cli": CLAUDE_CLI_MAX_CALLS}.get(provider, 0)
+                if not _oauth_enabled(provider):
+                    entry["state"] = "disabled_off"
+                elif latched.get(provider):
+                    meta = _rung_status.get(provider, {})
+                    reason = meta.get("reason", _REASON_UNKNOWN)
+                    entry["reason"] = reason
+                    entry["disabled_at"] = meta.get("disabled_at")
+                    if reason in _COUNTDOWN_REASONS:
+                        entry["state"] = "rate_limited"
+                        da = meta.get("disabled_at")
+                        win = OAUTH_RATE_WINDOW_S.get(provider, 0)
+                        entry["retry_until"] = (da + win) if (da and win) else None
+                    elif reason == _REASON_AUTH:
+                        entry["state"] = "auth_failed"
+                    else:
+                        entry["state"] = "unavailable"
+                elif _oauth_calls_made.get(provider, 0) >= cap:
+                    entry["state"] = "capacity_exhausted"
+                else:
+                    entry["state"] = "available"
+            elif provider in METERED_PROVIDERS:
+                entry["state"] = "budget_exhausted" if paid_spent else "available"
+            else:
+                entry["state"] = "available"
+            out.append(entry)
+    return out
+
+
 class _CodexTierUnavailable(Exception):
     """The Codex tier could not run / must be skipped: not enabled, latched off, OAuth capacity (or a
     caller-supplied reserve gate) exhausted, or an auth/quota/exe failure. Callers decide what to do
@@ -1218,6 +1338,7 @@ def _codex_tier(system: str, user: str, validate_fn, *, role: str,
             if _is_codex_unavailable(exc):
                 with _oauth_lock:
                     _codex_disabled = True
+                    _record_rung_latched("codex", exc)  # keep dashboard snapshot consistent with the latch
                 record_role_event(role, provider="codex", model=_model, success=False,
                                   latency_s=time.monotonic() - _t0)
                 raise _CodexTierUnavailable(str(exc)) from exc

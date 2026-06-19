@@ -272,6 +272,51 @@ body::before {
 .rung-badge.sonnet { background: rgba(245,215,110,.15); color: var(--amber); }
 .rung-badge.opus   { background: rgba(255,94,94,.18);  color: var(--red); }
 
+/* Worker ladder / fallback chain (rung availability + rate-limit status) */
+.ladder-head { display: flex; align-items: baseline; justify-content: space-between; margin: 12px 0 5px; }
+.panel-subtitle { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; font-weight: bold; }
+.ladder-legend { font-size: 8px; color: var(--muted); letter-spacing: .2px; }
+.worker-ladder { display: flex; flex-wrap: wrap; align-items: stretch; gap: 3px; }
+.ladder-rung {
+  position: relative; border: 1px solid var(--border); border-radius: 5px;
+  padding: 5px 7px; background: rgba(1,10,5,.72); min-width: 0; flex: 1 1 auto;
+  display: flex; flex-direction: column; gap: 1px;
+}
+.ladder-arrow { align-self: center; color: var(--muted); font-size: 10px; flex: 0 0 auto; }
+.ladder-rung-top { display: flex; align-items: center; gap: 4px; }
+.ladder-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; background: var(--muted); }
+.ladder-prov { font-size: 10px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ladder-model { color: var(--muted); font-size: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ladder-note { font-size: 8px; margin-top: 1px; white-space: nowrap; }
+/* state colorways */
+.ladder-rung.s-available  .ladder-dot { background: var(--green); box-shadow: 0 0 5px rgba(50,255,126,.5); }
+.ladder-rung.s-available  .ladder-prov { color: var(--green); }
+.ladder-rung.s-rate_limited { border-color: var(--red); background: rgba(40,6,6,.72); }
+.ladder-rung.s-rate_limited .ladder-dot { background: var(--red); box-shadow: 0 0 6px rgba(255,94,94,.6); }
+.ladder-rung.s-rate_limited .ladder-prov { color: var(--red); }
+.ladder-rung.s-rate_limited .ladder-note { color: #ff8f8f; }
+.ladder-rung.s-auth_failed,
+.ladder-rung.s-unavailable { border-color: var(--red); }
+.ladder-rung.s-auth_failed .ladder-dot,
+.ladder-rung.s-unavailable .ladder-dot { background: var(--red); }
+.ladder-rung.s-auth_failed .ladder-prov,
+.ladder-rung.s-unavailable .ladder-prov { color: var(--red); }
+.ladder-rung.s-auth_failed .ladder-note,
+.ladder-rung.s-unavailable .ladder-note { color: #ff8f8f; }
+.ladder-rung.s-capacity_exhausted,
+.ladder-rung.s-budget_exhausted,
+.ladder-rung.s-disabled_off { opacity: .58; }
+.ladder-rung.s-capacity_exhausted .ladder-dot,
+.ladder-rung.s-budget_exhausted .ladder-dot { background: var(--amber); }
+.ladder-rung.s-capacity_exhausted .ladder-note,
+.ladder-rung.s-budget_exhausted .ladder-note { color: var(--amber); }
+.ladder-rung.s-disabled_off .ladder-note { color: var(--muted); }
+.ladder-rung.active { box-shadow: 0 0 0 1px var(--green), 0 0 10px rgba(50,255,126,.28); }
+.ladder-rung.active::after {
+  content: '▶ active'; position: absolute; top: -7px; right: 5px; font-size: 7px;
+  color: var(--green); background: var(--bg, #020a05); padding: 0 3px; letter-spacing: .3px;
+}
+
 /* Build health bar */
 .build-health { margin-bottom: 6px; }
 .health-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 3px; display: flex; justify-content: space-between; }
@@ -749,6 +794,11 @@ body::before {
       </div>
       <div id="build-health" class="build-health" style="display:none"></div>
       <div id="agent-network" class="agent-network"></div>
+      <div class="ladder-head">
+        <span class="panel-subtitle">Worker Ladder</span>
+        <span id="ladder-legend" class="ladder-legend"></span>
+      </div>
+      <div id="worker-ladder" class="worker-ladder"><div class="empty">No ladder telemetry.</div></div>
     </div>
     <div class="tasks-section">
       <div class="panel-title">Tasks</div>
@@ -1236,6 +1286,66 @@ function renderAgentNetwork(d) {
   }).join('');
 }
 
+// Human "time left" for a modeled rate-limit window. Returns e.g. "~2h 14m left" or "~ready".
+function ladderCountdown(retryUntil) {
+  if (!retryUntil) return '';
+  const secs = Math.round(Number(retryUntil) - Date.now() / 1000);
+  if (secs <= 0) return '~ready';
+  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60);
+  return '~' + (h ? h + 'h ' : '') + m + 'm left';
+}
+
+const LADDER_NOTE = {
+  available: () => '',
+  rate_limited: e => ladderCountdown(e.retry_until) + ' (est.)',
+  auth_failed: () => 'needs re-login',
+  unavailable: e => (e.reason || 'down').toLowerCase(),
+  capacity_exhausted: () => 'cap hit · resets next run',
+  budget_exhausted: () => 'paid budget spent',
+  disabled_off: () => 'off',
+};
+
+function renderWorkerLadder(d) {
+  const el = document.getElementById('worker-ladder');
+  const legend = document.getElementById('ladder-legend');
+  const ladder = Array.isArray(d.worker_ladder) ? d.worker_ladder : [];
+  if (!ladder.length) {
+    el.innerHTML = '<div class="empty">No ladder telemetry.</div>';
+    if (legend) legend.textContent = '';
+    return;
+  }
+  // The momentary "active" rung comes from active_agent (existing data), not the snapshot.
+  const aa = isActiveState(d.pipeline_state || 'IDLE') ? (d.active_agent || null) : null;
+  const activeRung = aa && aa.rung != null ? Number(aa.rung) : null;
+  const activeProv = aa ? aa.provider : null;
+
+  const pills = ladder.map(e => {
+    const state = e.state || 'available';
+    const note = (LADDER_NOTE[state] || (() => state))(e);
+    const isActive = activeRung != null && Number(e.rung) === activeRung &&
+                     (!activeProv || activeProv === e.provider);
+    const title = `rung ${e.rung} · ${e.provider}/${e.model} · ${state}` +
+                  (e.detail ? ' · ' + e.detail : '');
+    return `<div class="ladder-rung s-${esc(state)}${isActive ? ' active' : ''}" title="${esc(title)}">
+      <div class="ladder-rung-top">
+        <span class="ladder-dot"></span>
+        <span class="ladder-prov">${esc(e.provider)}</span>
+      </div>
+      <div class="ladder-model">${esc(shortModel(e.model) || e.model || '')}</div>
+      ${note ? `<div class="ladder-note">${esc(note)}</div>` : ''}
+    </div>`;
+  });
+  el.innerHTML = pills.join('<span class="ladder-arrow">→</span>');
+
+  const rl = ladder.filter(e => e.state === 'rate_limited').length;
+  const downN = ladder.filter(e => ['auth_failed', 'unavailable'].includes(e.state)).length;
+  if (legend) {
+    legend.textContent = rl || downN
+      ? `${rl ? rl + ' rate-limited' : ''}${rl && downN ? ' · ' : ''}${downN ? downN + ' down' : ''}`
+      : 'all rungs available';
+  }
+}
+
 function projectBaseUrl(d) {
   const base = d.project?.output_url;
   if (!base) return null;
@@ -1664,6 +1774,7 @@ function render(d) {
   }
   renderBuildHealth(d);
   renderAgentNetwork(d);
+  renderWorkerLadder(d);
 
   // Tasks
   const tasks = d.tasks || [];

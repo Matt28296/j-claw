@@ -137,6 +137,20 @@ CLAUDE_CLI_TIMEOUT: int = int(os.getenv("CLAUDE_CLI_TIMEOUT", "300"))  # seconds
 METERED_PROVIDERS: set[str] = {"anthropic", "openrouter"}
 OAUTH_PROVIDERS: set[str] = {"codex", "grok", "claude_cli"}
 
+# Modeled rate-limit windows (seconds) used ONLY by the dashboard's rung-status countdown, and ONLY
+# for a subscription-cap-class latch (rate_limit / usage / quota). When an OAuth rung latches off
+# for that reason, the dashboard estimates "back in action" as disabled_at + this window. It is an
+# ESTIMATE (the providers don't publish an exact reset epoch over the CLI), surfaced as "~est." — it
+# does NOT auto-re-enable the rung in-process (the latch still holds until the next run's
+# reset_paid_budget()); it tells the operator when a fresh run could expect the rung back. Auth /
+# exe-missing / per-run-capacity latches get NO countdown (different, non-time-based states). Codex
+# (ChatGPT Plus) and Claude Max both enforce ~5h rolling windows; SuperGrok's is shorter.
+OAUTH_RATE_WINDOW_S: dict[str, int] = {
+    "codex": int(os.getenv("CODEX_RATE_WINDOW_S", "18000")),       # ~5h ChatGPT Plus rolling window
+    "grok": int(os.getenv("GROK_RATE_WINDOW_S", "7200")),          # ~2h SuperGrok (shorter window)
+    "claude_cli": int(os.getenv("CLAUDE_CLI_RATE_WINDOW_S", "18000")),  # ~5h Claude Max rolling window
+}
+
 # Maximum tasks to run in parallel (1 = sequential, 2-4 = parallel)
 MAX_PARALLEL_WORKERS: int = int(os.getenv("MAX_PARALLEL_WORKERS", "4"))
 

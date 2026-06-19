@@ -30,6 +30,7 @@ class StateWriter:
             "tasks": [],
             "active_agent": None,
             "agent_nodes": {},
+            "worker_ladder": [],
             "events": [],
             "output_files": [],
             "started_at": None,
@@ -593,7 +594,20 @@ class StateWriter:
                 node["updated_at_epoch"] = now
         self._event(message)
 
+    def _refresh_worker_ladder(self) -> None:
+        """Pull the current per-rung availability snapshot from the worker module into the state, so the
+        dashboard can render the fallback chain (green/red/countdown). Lazy-imported and best-effort:
+        worker is always loaded in the pipeline process by the time builds run, but state_writer is also
+        imported by lighter contexts (bot, tooling) where worker may be absent — a failure here must
+        never break a state write, so it's swallowed and the prior ladder value is left untouched."""
+        try:
+            from worker import ladder_status_snapshot
+            self._state["worker_ladder"] = ladder_status_snapshot()
+        except Exception:  # noqa: BLE001 — telemetry only; never block a state write
+            pass
+
     def _write(self) -> None:
+        self._refresh_worker_ladder()
         with _lock:
             now = _now()
             if self._start_time:

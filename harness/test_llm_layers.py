@@ -2572,9 +2572,248 @@ def _make_task(task_id: str, task_type: str):
     return t
 
 
+class TestRungStatusSnapshot(unittest.TestCase):
+    """Dashboard rung-status sidecar: _classify_oauth_failure + ladder_status_snapshot.
+
+    Covers the design Claude and Codex settled on: reason-classified states (not a blanket
+    countdown), countdown ONLY for subscription-cap classes, and the conflation Codex flagged
+    between a latched rung and a per-run-capacity-exhausted rung being rendered distinctly."""
+
+    def setUp(self):
+        import worker as w
+        self._w = w
+        self._orig_ladder = w.WORKER_LADDER
+        # A deterministic ladder spanning all three provider classes.
+        w.WORKER_LADDER = [
+            ("ollama", "qwen3:8b"),
+            ("grok", "grok-build"),
+            ("codex", "gpt-5.5"),
+            ("anthropic", "claude-sonnet-4-6"),
+        ]
+        w.reset_paid_budget()
+        # Ensure the OAuth rungs read as globally enabled so disabled_off doesn't mask states.
+        self._orig_enabled = (w.CODEX_CLI_ENABLED, w.GROK_CLI_ENABLED)
+        w.CODEX_CLI_ENABLED = True
+        w.GROK_CLI_ENABLED = True
+
+    def tearDown(self):
+        w = self._w
+        w.WORKER_LADDER = self._orig_ladder
+        w.CODEX_CLI_ENABLED, w.GROK_CLI_ENABLED = self._orig_enabled
+        w.reset_paid_budget()
+
+    def _by_provider(self):
+        return {e["provider"]: e for e in self._w.ladder_status_snapshot()}
+
+    def test_classify_reasons(self):
+        w = self._w
+        self.assertEqual(w._classify_oauth_failure("codex", RuntimeError("429 too many requests")),
+                         w._REASON_RATE_LIMIT)
+        self.assertEqual(w._classify_oauth_failure("codex", RuntimeError("You hit your usage limit")),
+                         w._REASON_QUOTA)
+        self.assertEqual(w._classify_oauth_failure("grok", RuntimeError("not logged in")),
+                         w._REASON_AUTH)
+        self.assertEqual(w._classify_oauth_failure("codex", RuntimeError("401 unauthorized")),
+                         w._REASON_AUTH)
+        import subprocess
+        self.assertEqual(w._classify_oauth_failure("codex", subprocess.TimeoutExpired("codex", 1)),
+                         w._REASON_TIMEOUT)
+        self.assertEqual(w._classify_oauth_failure("codex", FileNotFoundError("codex")),
+                         w._REASON_EXE_MISSING)
+        self.assertEqual(w._classify_oauth_failure("codex", RuntimeError("garbled nonsense")),
+                         w._REASON_UNKNOWN)
+        # QUOTA must win over RATE_LIMIT when both phrases appear (harder cap dominates).
+        self.assertEqual(w._classify_oauth_failure("codex", RuntimeError("429: usage limit reached")),
+                         w._REASON_QUOTA)
+
+    def test_baseline_all_available(self):
+        snap = self._by_provider()
+        self.assertEqual(snap["ollama"]["state"], "available")
+        self.assertEqual(snap["grok"]["state"], "available")
+        self.assertEqual(snap["codex"]["state"], "available")
+        self.assertEqual(snap["anthropic"]["state"], "available")
+
+    def test_rate_limit_latch_gets_countdown(self):
+        w = self._w
+        with w._oauth_lock:
+            w._codex_disabled = True
+            w._record_rung_latched("codex", RuntimeError("429 rate limit"))
+        cx = self._by_provider()["codex"]
+        self.assertEqual(cx["state"], "rate_limited")
+        self.assertIsNotNone(cx.get("retry_until"))
+        # retry_until ≈ disabled_at + modeled window for codex.
+        self.assertAlmostEqual(cx["retry_until"] - cx["disabled_at"],
+                               w.OAUTH_RATE_WINDOW_S["codex"], delta=2)
+
+    def test_auth_latch_has_no_countdown(self):
+        w = self._w
+        with w._oauth_lock:
+            w._grok_disabled = True
+            w._record_rung_latched("grok", RuntimeError("not logged in"))
+        gk = self._by_provider()["grok"]
+        self.assertEqual(gk["state"], "auth_failed")
+        self.assertIsNone(gk.get("retry_until"))
+
+    def test_capacity_exhausted_distinct_from_latched(self):
+        """Codex's catch: a rung out of per-run capacity is NOT 'rate_limited' and gets no countdown."""
+        w = self._w
+        with w._oauth_lock:
+            w._oauth_calls_made["grok"] = w.GROK_MAX_CALLS  # cap reached, but NOT latched
+        gk = self._by_provider()["grok"]
+        self.assertEqual(gk["state"], "capacity_exhausted")
+        self.assertIsNone(gk.get("retry_until"))
+
+    def test_metered_budget_exhausted(self):
+        w = self._w
+        with w._paid_lock:
+            w._paid_calls_made = w.MAX_PAID_WORKER_CALLS
+        an = self._by_provider()["anthropic"]
+        self.assertEqual(an["state"], "budget_exhausted")
+
+    def test_disabled_off_when_config_off(self):
+        w = self._w
+        w.CODEX_CLI_ENABLED = False
+        cx = self._by_provider()["codex"]
+        self.assertEqual(cx["state"], "disabled_off")
+
+    def test_reset_clears_status(self):
+        w = self._w
+        with w._oauth_lock:
+            w._codex_disabled = True
+            w._record_rung_latched("codex", RuntimeError("429 rate limit"))
+        w.reset_paid_budget()
+        self.assertEqual(self._by_provider()["codex"]["state"], "available")
+        self.assertEqual(w._rung_status, {})
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Runner
 # ══════════════════════════════════════════════════════════════════════════════
+
+class TestWorktreeHuskRegression(unittest.TestCase):
+    """Regression guard for the empty-husk bug (memory: #1 critical).
+
+    A passing code task MUST deliver its declared source files into the REAL
+    output_dir — not just into the throwaway worktree. The original defect ran
+    merge_and_remove() (which DELETED the worktree) BEFORE _copy_tree() read from
+    it, so the copy source was already gone and nothing landed: the task reported
+    PASS but produced an empty husk. It also merged the wt branch into harness
+    `main`, polluting it with stray "wt-task-*" commits.
+
+    This test exercises the real Scheduler._run_task over a real WorktreeManager on
+    a throwaway git repo and asserts: (1) the declared file lands in output_dir with
+    its content, (2) the worktree directory is gone afterward, and (3) `main` is
+    byte-for-byte unchanged (no stray merge commit)."""
+
+    def setUp(self):
+        import tempfile
+        import subprocess
+        import scheduler as sch
+        self.sch = sch
+        self.subprocess = subprocess
+        self._tmp = tempfile.mkdtemp(prefix="husk_test_")
+        self.repo = Path(self._tmp) / "repo"
+        self.repo.mkdir()
+        # Minimal git repo with one commit so `git worktree add -b` has a HEAD.
+        env = {**os.environ}
+        def g(*args):
+            return subprocess.run(
+                ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                cwd=str(self.repo), capture_output=True, text=True, env=env, check=True,
+            )
+        self._g = g
+        g("init", "-q")
+        (self.repo / "README.md").write_text("seed\n", encoding="utf-8")
+        g("add", "-A")
+        g("commit", "-q", "-m", "seed")
+        # Ensure the default branch is named `main` regardless of git's init default.
+        g("branch", "-M", "main")
+        self.main_head_before = g("rev-parse", "main").stdout.strip()
+        # Sub-project output dir lives INSIDE the repo — the exact condition that
+        # made _find_repo_root resolve worktrees to the harness repo in production.
+        self.output_dir = self.repo / "projects" / "demo"
+        self.output_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        # Best-effort prune of any worktree admin entries, then nuke the temp tree.
+        try:
+            self.subprocess.run(["git", "worktree", "prune"], cwd=str(self.repo),
+                                capture_output=True, check=False)
+        except Exception:
+            pass
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _task(self):
+        class _T:
+            id = "task-1"
+            type = "frontend"
+            objective = "build the app entrypoint"
+            files = ["app.js"]
+            dependencies = []
+            acceptance_criteria = []
+            verification = "none"
+            retry_count = 0
+            status = "pending"
+            output_files = {}
+            error_log = ""
+        return _T()
+
+    def _instance(self):
+        outer = self
+        class _Inst:
+            output_dir = outer.output_dir
+            spec = {"architecture": {"stack": "vanilla"}}
+            tasks = {}
+            def get_dependency_files(self, task):
+                return {}
+        return _Inst()
+
+    def test_passing_code_task_delivers_file_and_leaves_main_clean(self):
+        sch = self.sch
+        delivered = "export const APP = 42;\n"  # no stub keywords
+
+        instance = self._instance()
+        scheduler = sch.Scheduler(instance, orchestrator=MagicMock())
+        # WorktreeManager must have resolved to our throwaway repo, not the harness repo.
+        self.assertIsNotNone(scheduler._wt_manager, "worktree isolation should be active")
+        self.assertEqual(scheduler._wt_manager.repo.resolve(), self.repo.resolve())
+
+        task = self._task()
+
+        def fake_execute(_task, _spec, _deps, _ctx):
+            return {"files": [{"path": "app.js", "content": delivered}],
+                    "model_used": "ollama/qwen3:8b"}
+
+        with patch.object(sch, "execute_task", side_effect=fake_execute), \
+             patch.object(sch, "run_verification", return_value=(True, "")), \
+             patch.object(sch, "detect_ecosystem", return_value="static"), \
+             patch.object(sch, "check_completeness", return_value=(True, [])), \
+             patch.object(sch, "routed_rung", return_value=0), \
+             patch.object(sch, "_build_context", return_value=None), \
+             patch.object(sch, "sw", MagicMock()), \
+             patch.object(scheduler, "_start_worker_telemetry"), \
+             patch.object(scheduler, "_finish_worker_telemetry"):
+            scheduler._run_task(task)
+
+        # 1. Task succeeded.
+        self.assertEqual(task.status, "done", f"task did not pass: {task.error_log}")
+
+        # 2. THE HUSK CHECK: declared file landed in the REAL output_dir with content.
+        landed = self.output_dir / "app.js"
+        self.assertTrue(landed.exists(),
+                        "declared file missing from output_dir — empty-husk regression")
+        self.assertEqual(landed.read_text(encoding="utf-8"), delivered)
+
+        # 3. The throwaway worktree was removed.
+        wt_dir = self.repo.parent / ".jclaw_worktrees" / "task-1"
+        self.assertFalse(wt_dir.exists(), "worktree was not cleaned up")
+
+        # 4. `main` is byte-for-byte unchanged — no stray "wt-task-*" merge pollution.
+        main_head_after = self._g("rev-parse", "main").stdout.strip()
+        self.assertEqual(main_head_after, self.main_head_before,
+                         "main HEAD moved — worktree branch leaked into main")
+
 
 if __name__ == "__main__":
     loader = unittest.TestLoader()
@@ -2604,6 +2843,8 @@ if __name__ == "__main__":
         TestCodexWorkerReserve,
         TestDifficultyRouting,
         TestPerRoleCodexSubCap,
+        TestRungStatusSnapshot,
+        TestWorktreeHuskRegression,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 

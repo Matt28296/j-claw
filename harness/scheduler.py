@@ -493,21 +493,30 @@ class Scheduler:
                 log = (log + "\n" if log else "") + "Completeness gate failed:\n" + _comp
             sw.on_verification_result(task.id, task.verification, ecosystem, passed, log)
             if passed:
-                # Verification passed — commit the worktree branch first (git integrity),
-                # then copy files to the real output dir.  Order matters: merge before copy
-                # ensures git history and output_dir never desync (a failed merge leaves
-                # output_dir untouched; a failed copy after a successful merge is recoverable).
+                # Verification passed — promote the worktree's files into the REAL output_dir,
+                # then discard the isolated worktree.
+                #
+                # CRITICAL ORDER: copy BEFORE removing the worktree. The prior code called
+                # merge_and_remove() FIRST, which DELETED the worktree, so the subsequent
+                # _copy_tree() read an already-deleted directory and silently delivered nothing —
+                # the root cause of the empty-husk bug (code tasks reported PASS but no source
+                # landed on disk). The copy IS the delivery.
+                #
+                # We also no longer git-merge the worktree branch: output_dir lives INSIDE the
+                # harness repo, so _find_repo_root() resolved the worktree to the HARNESS repo and
+                # merge_and_remove(into_branch="main") merged generated code into harness `main`
+                # (stray "wt-task-*" commits) while delivering nothing useful. The isolated branch
+                # is throwaway and is simply removed.
                 if _use_wt and _wt_path is not None:
-                    try:
-                        self._wt_manager.merge_and_remove(task.id)
-                    except Exception as _merge_exc:  # noqa: BLE001
-                        # Merge failure is non-fatal: copy still proceeds so the build
-                        # continues — the git branch just won't be recorded.
-                        console.print(
-                            f"  [yellow]Worktree merge warning ({_merge_exc}) "
-                            "— branch not merged, files still copied.[/yellow]"
-                        )
                     _copy_tree(_eff_output_dir, self.instance.output_dir)
+                    try:
+                        self._wt_manager.remove(task.id)
+                    except Exception as _wt_rm_exc:  # noqa: BLE001
+                        # Cleanup failure is non-fatal: files are already in output_dir.
+                        console.print(
+                            f"  [yellow]Worktree cleanup warning ({_wt_rm_exc}) "
+                            "— files already copied to output_dir.[/yellow]"
+                        )
                 model_used = result.get("model_used", WORKER_MODEL)
                 task.status = "done"
                 self._finish_worker_telemetry(
