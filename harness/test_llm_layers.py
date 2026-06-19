@@ -3331,6 +3331,87 @@ class TestPythonBuildManifest(unittest.TestCase):
         mock_run.assert_not_called()
 
 
+class TestOauthTimeoutLatch(unittest.TestCase):
+    """A transient subprocess TIMEOUT must NOT latch a free OAuth rung off for the whole run — only
+    OAUTH_TIMEOUT_LATCH_THRESHOLD CONSECUTIVE timeouts do. A real auth/quota failure still latches
+    immediately. This prevents one stall (e.g. the shared Max pool momentarily busy) from cascading
+    a whole build onto paid. Regression for the 2026-06-19 D1 spurious-latch finding."""
+
+    def setUp(self):
+        import worker as w
+        import subprocess
+        self._w = w
+        self._subprocess = subprocess
+        w.reset_paid_budget()  # clears _oauth_timeouts + disable latches
+        self._patch = patch.object(w, "OAUTH_TIMEOUT_LATCH_THRESHOLD", 2)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+        self._w.reset_paid_budget()
+
+    # ── _should_latch_oauth: timeout tolerance + immediate auth latch ──────────
+    def test_single_timeout_does_not_latch(self):
+        w = self._w
+        exc = self._subprocess.TimeoutExpired("claude", 1)
+        self.assertFalse(w._should_latch_oauth("claude_cli", exc),
+                         "a lone transient timeout must NOT latch the rung")
+        self.assertEqual(w._oauth_timeouts.get("claude_cli"), 1)
+
+    def test_consecutive_timeouts_latch_at_threshold(self):
+        w = self._w
+        exc = self._subprocess.TimeoutExpired("codex", 1)
+        self.assertFalse(w._should_latch_oauth("codex", exc), "1st timeout: no latch")
+        self.assertTrue(w._should_latch_oauth("codex", exc),
+                        "2nd consecutive timeout reaches the threshold → latch")
+
+    def test_auth_failure_latches_immediately(self):
+        w = self._w
+        # Non-timeout unavailability (auth/quota/exe) is permanent within a run → latch on the 1st.
+        self.assertTrue(w._should_latch_oauth("codex", RuntimeError("not logged in")))
+        self.assertTrue(w._should_latch_oauth("grok", FileNotFoundError("grok")))
+        self.assertEqual(w._oauth_timeouts.get("codex", 0), 0,
+                         "a non-timeout failure must not touch the timeout counter")
+
+    def test_success_resets_timeout_streak(self):
+        w = self._w
+        exc = self._subprocess.TimeoutExpired("claude", 1)
+        self.assertFalse(w._should_latch_oauth("claude_cli", exc))  # streak = 1
+        w._note_oauth_success("claude_cli")                          # streak reset
+        self.assertEqual(w._oauth_timeouts.get("claude_cli"), 0)
+        self.assertFalse(w._should_latch_oauth("claude_cli", exc),
+                         "after a success the next timeout is again the 1st → no latch")
+
+    def test_note_oauth_success_ignores_non_oauth(self):
+        w = self._w
+        w._note_oauth_success("ollama")  # must be a no-op, never KeyError
+        w._note_oauth_success("anthropic")
+
+    # ── integration: _claude_cli_tier leaves the rung eligible after one timeout ─
+    def test_tier_single_timeout_does_not_latch_rung(self):
+        w = self._w
+        with patch.object(w, "_oauth_enabled", return_value=True), \
+             patch.object(w, "_call_claude_cli",
+                          side_effect=self._subprocess.TimeoutExpired("claude", 1)), \
+             patch("worker.record_role_event"):
+            with self.assertRaises(w._CodexTierUnavailable):
+                w._claude_cli_tier("sys", "usr", lambda d: None, role="orchestrator")
+        self.assertFalse(w._claude_cli_disabled,
+                         "one timeout must skip this call but leave the rung eligible for later tasks")
+
+    def test_tier_second_consecutive_timeout_latches_rung(self):
+        w = self._w
+        with patch.object(w, "_oauth_enabled", return_value=True), \
+             patch.object(w, "_call_claude_cli",
+                          side_effect=self._subprocess.TimeoutExpired("claude", 1)), \
+             patch("worker.record_role_event"):
+            for _ in range(2):
+                with self.assertRaises(w._CodexTierUnavailable):
+                    w._claude_cli_tier("sys", "usr", lambda d: None, role="orchestrator")
+        self.assertTrue(w._claude_cli_disabled,
+                        "a second consecutive timeout reaches the threshold → latch the rung")
+
+
 if __name__ == "__main__":
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
@@ -3380,6 +3461,7 @@ if __name__ == "__main__":
         TestWorktreeHuskRegression,
         TestManualGateUnattended,
         TestPythonBuildManifest,
+        TestOauthTimeoutLatch,
         TestCostCeiling,
         TestProjectDisposition,
         TestStampHonesty,

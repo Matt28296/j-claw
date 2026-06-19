@@ -173,6 +173,15 @@ CLAUDE_CLI_MODEL: str = os.getenv("CLAUDE_CLI_MODEL", "sonnet")  # alias the Cla
 CLAUDE_CLI_MAX_CALLS: int = _int_env("CLAUDE_CLI_MAX_CALLS", 10, lo=0)
 CLAUDE_CLI_TIMEOUT: int = _int_env("CLAUDE_CLI_TIMEOUT", 300, lo=0)  # seconds per claude -p subprocess
 
+# How many subprocess TIMEOUTS an OAuth rung may incur before it latches off for the rest of the run.
+# A real auth/quota/rate-limit/exe failure latches IMMEDIATELY (re-probing within a run is pointless),
+# but a subprocess timeout is transient — often the shared Max pool being momentarily busy with the
+# operator's own interactive session. A single transient stall must NOT take a free rung out for the
+# whole build and cascade downstream work onto paid. Counter is per-provider and resets on any success
+# (consecutive timeouts), so scattered stalls across a long build never accumulate into a latch.
+# Set to 1 to restore the old "latch on the first timeout" behavior.
+OAUTH_TIMEOUT_LATCH_THRESHOLD: int = _int_env("OAUTH_TIMEOUT_LATCH_THRESHOLD", 2, lo=1)
+
 # Provider-class sets that make the worker's budget logic declarative. METERED providers bill
 # per token and consume the dollar budget MAX_PAID_WORKER_CALLS; OAUTH providers are flat-rate
 # subscriptions that consume a SEPARATE per-run capacity counter (CODEX_CLI_MAX_CALLS) instead,

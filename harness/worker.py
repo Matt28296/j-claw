@@ -21,7 +21,7 @@ from config import (
     CODEX_CLI_MAX_CALLS, CODEX_TIMEOUT, OAUTH_PROVIDERS, METERED_PROVIDERS,
     GROK_CLI_ENABLED, GROK_HOME, GROK_MODEL, GROK_MAX_CALLS, GROK_TIMEOUT,
     CLAUDE_CLI_ENABLED, CLAUDE_CLI_HOME, CLAUDE_CLI_MODEL, CLAUDE_CLI_MAX_CALLS, CLAUDE_CLI_TIMEOUT,
-    CODEX_WORKER_RESERVE, OAUTH_RATE_WINDOW_S,
+    CODEX_WORKER_RESERVE, OAUTH_RATE_WINDOW_S, OAUTH_TIMEOUT_LATCH_THRESHOLD,
 )
 from experience_log import get_worker_hints, log_escalation
 from cost import record_role_event
@@ -716,6 +716,11 @@ _oauth_lock = threading.Lock()
 _codex_disabled = False
 _grok_disabled = False
 _claude_cli_disabled = False
+# Consecutive subprocess-TIMEOUT count per OAuth provider (guarded by _oauth_lock). A transient
+# timeout is NOT a reason to latch a free rung off for the whole run — only OAUTH_TIMEOUT_LATCH_THRESHOLD
+# consecutive timeouts are. Reset to 0 on any successful call by _note_oauth_success, so scattered
+# stalls across a long build never accumulate into a latch. See _should_latch_oauth.
+_oauth_timeouts: dict[str, int] = {}
 
 # Observability sidecar for the disable-latches above (dashboard "rung status" feature). The booleans
 # carry no WHY/WHEN, so when an OAuth rung latches off we also record a structured entry here, keyed by
@@ -765,6 +770,7 @@ def reset_paid_budget() -> None:
         _paid_calls_made = 0
     with _oauth_lock:
         _oauth_calls_made.clear()
+        _oauth_timeouts.clear()
         _rung_status.clear()
         _codex_disabled = False
         _grok_disabled = False
@@ -1036,6 +1042,7 @@ def execute_task(
                     )
             record_role_event("worker", provider=provider, model=model, success=True,
                               fallback=bool(failed_attempts), latency_s=time.monotonic() - _t0)
+            _note_oauth_success(provider)  # clear any transient-timeout streak on success
             _accum_tokens(label)
             if tokens_by_model:
                 parsed["tokens_by_model"] = dict(tokens_by_model)
@@ -1086,20 +1093,30 @@ def execute_task(
             # must NOT hard-raise like ollama — it skips cleanly to the next rung so the build
             # still completes. Latch the rung off for the rest of the run to avoid re-probing.
             if provider in OAUTH_PROVIDERS and _oauth_unavailable(provider, exc):
-                with _oauth_lock:
-                    if provider == "codex":
-                        _codex_disabled = True
-                    elif provider == "grok":
-                        _grok_disabled = True
-                    elif provider == "claude_cli":
-                        _claude_cli_disabled = True
-                    # Record WHY/WHEN under the same lock so the dashboard rung-status snapshot is
-                    # consistent with the latch it describes (see ladder_status_snapshot).
-                    _record_rung_latched(provider, exc)
-                console.print(
-                    f"  [yellow]{provider} unavailable (auth/quota) — disabling {provider} rung "
-                    f"for this run, escalating to next rung.[/yellow]"
-                )
+                # A confirmed-unavailable failure skips to the next rung regardless, but only a
+                # PERMANENT one (auth/quota/exe, or repeated timeouts) latches the rung off for the
+                # rest of the run. A lone transient timeout stays eligible for later tasks so one stall
+                # can't cascade the whole build onto paid (see _should_latch_oauth).
+                if _should_latch_oauth(provider, exc):
+                    with _oauth_lock:
+                        if provider == "codex":
+                            _codex_disabled = True
+                        elif provider == "grok":
+                            _grok_disabled = True
+                        elif provider == "claude_cli":
+                            _claude_cli_disabled = True
+                        # Record WHY/WHEN under the same lock so the dashboard rung-status snapshot is
+                        # consistent with the latch it describes (see ladder_status_snapshot).
+                        _record_rung_latched(provider, exc)
+                    console.print(
+                        f"  [yellow]{provider} unavailable (auth/quota) — disabling {provider} rung "
+                        f"for this run, escalating to next rung.[/yellow]"
+                    )
+                else:
+                    console.print(
+                        f"  [yellow]{provider} timed out (transient) — NOT latching; escalating this "
+                        f"attempt, {provider} stays eligible for later tasks.[/yellow]"
+                    )
                 failed_attempts.append((provider, model, str(exc)[:200]))
                 continue
             last_err = exc
@@ -1193,8 +1210,11 @@ def _is_claude_cli_unavailable(exc: Exception) -> bool:
 
 
 def _oauth_unavailable(provider: str, exc: Exception) -> bool:
-    """Dispatch an OAuth-rung failure to the provider's availability classifier. True → latch the
-    rung off + skip to next rung; False → treat as a normal capability failure (escalate)."""
+    """Dispatch an OAuth-rung failure to the provider's availability classifier. True → the rung is
+    unavailable for this attempt, so skip to the next rung; False → treat as a normal capability
+    failure (escalate). NB: "unavailable for this attempt" is NOT the same as "latch off for the whole
+    run" — see _should_latch_oauth, which decides whether a confirmed-unavailable failure is permanent
+    (auth/quota/exe → latch now) or transient (a lone timeout → skip but stay eligible)."""
     if provider == "codex":
         return _is_codex_unavailable(exc)
     if provider == "grok":
@@ -1202,6 +1222,39 @@ def _oauth_unavailable(provider: str, exc: Exception) -> bool:
     if provider == "claude_cli":
         return _is_claude_cli_unavailable(exc)
     return False
+
+
+def _should_latch_oauth(provider: str, exc: Exception) -> bool:
+    """Decide whether an already-confirmed-unavailable OAuth failure (i.e. _oauth_unavailable returned
+    True) should LATCH the rung off for the REST OF THE RUN, or merely skip this one attempt.
+
+    Real auth / quota / rate-limit / missing-exe failures latch immediately — they won't clear within a
+    build, so re-probing them every task is pure waste. A subprocess TIMEOUT, however, is transient:
+    most often the shared Claude-Max pool being momentarily busy with the operator's own interactive
+    session, or a single slow network call. Latching the whole rung on ONE such stall is what cascaded
+    an entire build onto paid. So a timeout only latches after OAUTH_TIMEOUT_LATCH_THRESHOLD CONSECUTIVE
+    timeouts (counter reset on any success via _note_oauth_success) — a persistently-hung rung still
+    latches and stops eating the full timeout on every task, but a lone transient stall does not.
+
+    Counts the timeout under _oauth_lock; the caller sets the disable flag (also under _oauth_lock) only
+    when this returns True."""
+    if not isinstance(exc, subprocess.TimeoutExpired):
+        return True  # auth / quota / rate-limit / exe-missing: latch immediately, as before
+    with _oauth_lock:
+        n = _oauth_timeouts.get(provider, 0) + 1
+        _oauth_timeouts[provider] = n
+        return n >= OAUTH_TIMEOUT_LATCH_THRESHOLD
+
+
+def _note_oauth_success(provider: str) -> None:
+    """Reset a provider's consecutive-timeout counter after a successful OAuth call, so scattered
+    transient stalls across a long build never accumulate into a latch. No-op for non-OAuth providers
+    and when the counter is already clear."""
+    if provider not in OAUTH_PROVIDERS:
+        return
+    with _oauth_lock:
+        if _oauth_timeouts.get(provider):
+            _oauth_timeouts[provider] = 0
 
 
 # Latch-reason classes for the dashboard rung-status sidecar. Only RATE_LIMIT / QUOTA earn a
@@ -1359,13 +1412,18 @@ def _codex_tier(system: str, user: str, validate_fn, *, role: str,
             validate_fn(parsed)
             record_role_event(role, provider="codex", model=_model, success=True,
                               latency_s=time.monotonic() - _t0)
+            _note_oauth_success("codex")  # clear any transient-timeout streak on success
             return parsed
         except Exception as exc:  # noqa: BLE001
             last_err = exc
             if _is_codex_unavailable(exc):
-                with _oauth_lock:
-                    _codex_disabled = True
-                    _record_rung_latched("codex", exc)  # keep dashboard snapshot consistent with the latch
+                # Latch off only on a PERMANENT failure (auth/quota/exe, or repeated timeouts); a lone
+                # transient timeout raises _CodexTierUnavailable for this call but leaves the rung
+                # eligible for later planning/heal calls (see _should_latch_oauth).
+                if _should_latch_oauth("codex", exc):
+                    with _oauth_lock:
+                        _codex_disabled = True
+                        _record_rung_latched("codex", exc)  # keep dashboard snapshot consistent with the latch
                 record_role_event(role, provider="codex", model=_model, success=False,
                                   latency_s=time.monotonic() - _t0)
                 raise _CodexTierUnavailable(str(exc)) from exc
@@ -1412,13 +1470,18 @@ def _claude_cli_tier(system: str, user: str, validate_fn, *, role: str,
             validate_fn(parsed)
             record_role_event(role, provider="claude_cli", model=_model, success=True,
                               latency_s=time.monotonic() - _t0)
+            _note_oauth_success("claude_cli")  # clear any transient-timeout streak on success
             return parsed
         except Exception as exc:  # noqa: BLE001
             last_err = exc
             if _is_claude_cli_unavailable(exc):
-                with _oauth_lock:
-                    _claude_cli_disabled = True
-                    _record_rung_latched("claude_cli", exc)  # keep dashboard snapshot consistent with the latch
+                # Latch off only on a PERMANENT failure (auth/quota/exe, or repeated timeouts); a lone
+                # transient timeout raises _CodexTierUnavailable for this call but leaves the rung
+                # eligible for later planning/heal calls (see _should_latch_oauth).
+                if _should_latch_oauth("claude_cli", exc):
+                    with _oauth_lock:
+                        _claude_cli_disabled = True
+                        _record_rung_latched("claude_cli", exc)  # keep dashboard snapshot consistent with the latch
                 record_role_event(role, provider="claude_cli", model=_model, success=False,
                                   latency_s=time.monotonic() - _t0)
                 raise _CodexTierUnavailable(str(exc)) from exc
