@@ -2874,6 +2874,130 @@ class TestPaidOrchDisabled(unittest.TestCase):
                 self.assertIn("PIPELINE FAILURE", handoff.read_text(encoding="utf-8"))
 
 
+class TestMeteredLeakGuards(unittest.TestCase):
+    """PAID_ORCH_ENABLED must gate the THREE orchestrator-side metered sites that the kill-switch
+    originally missed (it only hard-gated orchestrator.py): the Creative Director high-risk shortcut,
+    the final-review metered fallback, and the OpenClaw handoff stamp. On a $0 box (knob false) none
+    of them may issue a metered Anthropic request. (2026-06-19 cost-policy audit follow-up.)"""
+
+    _BRIEF = {"output_type": "app", "scale": "mvp", "features": ["x"], "visual_identity": {"k": "v"}}
+
+    def setUp(self):
+        import worker as w
+        w.reset_paid_budget()
+
+    # ── LEAK-1: Creative Director high-risk path ──────────────────────────────
+    def test_cd_high_risk_disabled_skips_metered_uses_planning(self):
+        import creative_director as cd, worker as w
+        with patch("creative_director.PAID_ORCH_ENABLED", False), \
+             patch("creative_director.score_interpretation_risk", return_value=0.9), \
+             patch("creative_director.console"), \
+             patch.object(w, "planning_call", return_value=dict(self._BRIEF)) as mpc, \
+             patch.object(w, "_call_anthropic") as mca:
+            result = cd.CreativeDirector().interpret("ambiguous novel constraint-heavy ask")
+        mca.assert_not_called()          # NO metered call when paid is disabled
+        mpc.assert_called_once()         # falls through to Codex-first planning_call
+        self.assertEqual(result["output_type"], "app")
+
+    def test_cd_high_risk_enabled_uses_metered(self):
+        import json, creative_director as cd, worker as w
+        with patch("creative_director.PAID_ORCH_ENABLED", True), \
+             patch("creative_director.score_interpretation_risk", return_value=0.6), \
+             patch("creative_director.console"), \
+             patch("cost.record_role_event"), \
+             patch.object(w, "_reserve_paid_orch_call", return_value=True), \
+             patch.object(w, "_call_anthropic", return_value=json.dumps(self._BRIEF)) as mca, \
+             patch.object(w, "planning_call") as mpc:
+            result = cd.CreativeDirector().interpret("ambiguous ask")
+        mca.assert_called_once()         # metered path taken when explicitly enabled
+        mpc.assert_not_called()
+        self.assertEqual(result["output_type"], "app")
+
+    def test_cd_high_risk_enabled_budget_exhausted_falls_through(self):
+        """Even with the knob ON, the CD direct loop now reserves against MAX_PAID_ORCH_CALLS;
+        when the budget is gone it must NOT call the API and must fall through to planning_call."""
+        import creative_director as cd, worker as w
+        with patch("creative_director.PAID_ORCH_ENABLED", True), \
+             patch("creative_director.score_interpretation_risk", return_value=0.9), \
+             patch("creative_director.console"), \
+             patch.object(w, "_reserve_paid_orch_call", return_value=False), \
+             patch.object(w, "_call_anthropic") as mca, \
+             patch.object(w, "planning_call", return_value=dict(self._BRIEF)) as mpc:
+            cd.CreativeDirector().interpret("ambiguous ask")
+        mca.assert_not_called()
+        mpc.assert_called_once()
+
+    # ── LEAK-2: final-review metered fallback ─────────────────────────────────
+    def test_final_review_disabled_no_cli_skips_pass(self):
+        import final_review as fr
+        with patch("final_review.PAID_ORCH_ENABLED", False), \
+             patch("final_review.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("final_review.shutil.which", return_value=None), \
+             patch("final_review.console"), \
+             patch("final_review.anthropic") as ma:
+            result = fr.run_final_review(Path("."), {"goal": "g"})
+        self.assertTrue(result, "no CLI + metered disabled = no reviewer → skip-pass, don't block")
+        ma.Anthropic.assert_not_called()
+
+    def test_final_review_disabled_cli_broken_fails_closed(self):
+        import final_review as fr
+        with patch("final_review.PAID_ORCH_ENABLED", False), \
+             patch("final_review.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("final_review.shutil.which", return_value="/usr/bin/claude"), \
+             patch("final_review._collect_files", return_value=[("a.py", "print(1)")]), \
+             patch("final_review._review_via_cli", return_value=None), \
+             patch("final_review.check_cost_ceiling"), \
+             patch("final_review.record_role_event"), \
+             patch("final_review.console"), \
+             patch("final_review.anthropic") as ma:
+            result = fr.run_final_review(Path("."), {"goal": "g"})
+        self.assertFalse(result, "CLI present-but-broken + metered disabled must fail closed")
+        ma.Anthropic.assert_not_called()  # never reaches the metered branch
+
+    def test_final_review_enabled_no_cli_attempts_metered(self):
+        import tempfile, final_review as fr
+        resp = MagicMock()
+        resp.content = [MagicMock(text="VERDICT: PASS\n\nSUMMARY: looks fine")]
+        client = MagicMock()
+        client.messages.create.return_value = resp
+        with tempfile.TemporaryDirectory() as d, \
+             patch("final_review.PAID_ORCH_ENABLED", True), \
+             patch("final_review.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("final_review.shutil.which", return_value=None), \
+             patch("final_review._collect_files", return_value=[("a.py", "print(1)")]), \
+             patch("final_review.check_cost_ceiling"), \
+             patch("final_review.log_cache_usage"), \
+             patch("final_review.record_usage"), \
+             patch("final_review.record_role_event"), \
+             patch("final_review.console"), \
+             patch("final_review.anthropic") as ma:
+            ma.Anthropic.return_value = client
+            result = fr.run_final_review(Path(d), {"goal": "g"})
+        ma.Anthropic.assert_called_once()  # metered fallback IS used when explicitly enabled
+        self.assertTrue(result)
+
+    # ── LEAK-3: OpenClaw handoff stamp ────────────────────────────────────────
+    def test_stamp_disabled_no_cli_skips_api(self):
+        import handoff as h
+        with patch("handoff.shutil.which", return_value=None), \
+             patch("handoff.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("handoff.PAID_ORCH_ENABLED", False), \
+             patch("handoff.console"), \
+             patch("handoff._stamp_via_api") as msa:
+            h.try_claude_stamp(Path("HANDOFF.md"), Path("."))
+        msa.assert_not_called()
+
+    def test_stamp_enabled_no_cli_calls_api(self):
+        import handoff as h
+        with patch("handoff.shutil.which", return_value=None), \
+             patch("handoff.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("handoff.PAID_ORCH_ENABLED", True), \
+             patch("handoff.console"), \
+             patch("handoff._stamp_via_api") as msa:
+            h.try_claude_stamp(Path("HANDOFF.md"), Path("."))
+        msa.assert_called_once()
+
+
 class TestPerRoleCodexSubCap(unittest.TestCase):
     """Per-role Codex sub-caps: planning can't exceed CODEX_PLANNING_RESERVE;
     worker can't exceed CODEX_WORKER_RESERVE; no lending between roles."""
@@ -3954,6 +4078,7 @@ if __name__ == "__main__":
         TestAnthropicOrchestrator,
         TestCompositeOrchestrator,
         TestPaidOrchDisabled,
+        TestMeteredLeakGuards,
         TestRoutedRung,
         TestPhase4IntegrationRouting,
         TestExecuteTask,

@@ -15,7 +15,7 @@ from pathlib import Path
 from rich.console import Console
 
 from config import (ANTHROPIC_API_KEY, FINAL_REVIEW_MODEL, CLAUDE_CLI_MODEL,
-                    CLAUDE_CLI_TIMEOUT, claude_cli_env)
+                    CLAUDE_CLI_TIMEOUT, claude_cli_env, PAID_ORCH_ENABLED)
 from cache_telemetry import log_cache_usage
 from cost import record_usage, record_role_event, check_cost_ceiling
 
@@ -113,8 +113,12 @@ def run_final_review(output_dir: Path, spec: dict) -> bool:
     Writes output_dir/REVIEW.md regardless of result.
     """
     cli_available = bool(shutil.which("claude") or shutil.which("claude.cmd"))
-    if not ANTHROPIC_API_KEY and not cli_available:
-        console.print("  [yellow]No claude CLI and no ANTHROPIC_API_KEY — skipping final review.[/yellow]")
+    # The metered API fallback is only a real reviewer when PAID_ORCH_ENABLED is on (a $0-credit box
+    # leaves it false). When neither the free OAuth CLI nor a usable metered reviewer exists, there is
+    # no reviewer at all — skip like the no-key case rather than failing every build closed.
+    metered_available = bool(ANTHROPIC_API_KEY and PAID_ORCH_ENABLED)
+    if not metered_available and not cli_available:
+        console.print("  [yellow]No claude CLI and metered review disabled/unavailable — skipping final review.[/yellow]")
         return True
 
     goal = spec.get("goal", spec.get("description", "Unknown project goal"))
@@ -155,7 +159,11 @@ def run_final_review(output_dir: Path, spec: dict) -> bool:
     if review_text is not None:
         record_role_event("review", provider="claude_cli", model=CLAUDE_CLI_MODEL,
                           success=True, latency_s=time.monotonic() - _t0)
-    elif ANTHROPIC_API_KEY:
+    elif ANTHROPIC_API_KEY and PAID_ORCH_ENABLED:
+        # Metered fallback — only reached when the free OAuth CLI is unavailable AND paid
+        # orchestration is explicitly enabled. On a $0 box (knob false) this branch is skipped:
+        # if the CLI was present-but-broken review_text stays None and we fail closed below;
+        # if no reviewer exists at all the early skip-pass guard already returned True.
         for attempt in (1, 2):
             try:
                 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)

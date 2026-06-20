@@ -1,7 +1,7 @@
 from __future__ import annotations
 from rich.console import Console
 
-from config import CREATIVE_DIRECTOR_PROMPT_PATH, OPUS_MODEL
+from config import CREATIVE_DIRECTOR_PROMPT_PATH, OPUS_MODEL, PAID_ORCH_ENABLED
 from interpretation_risk import score_interpretation_risk, HIGH_RISK_THRESHOLD
 
 console = Console()
@@ -79,15 +79,22 @@ class CreativeDirector:
         planning_call handles telemetry + fallback; its Codex path is still available for low-risk
         intents as before. Raises RuntimeError only if every tier fails.
         """
-        from worker import planning_call, _call_anthropic
+        from worker import planning_call, _call_anthropic, _reserve_paid_orch_call
 
         risk = score_interpretation_risk(intent)
-        console.print(
-            f"  [dim]Interpretation risk: {risk:.2f} "
-            f"({'high — routing to Sonnet' if risk >= HIGH_RISK_THRESHOLD else 'low — Codex-first'})[/dim]"
-        )
+        # The high-risk shortcut goes DIRECTLY to the metered Anthropic API, so it is gated by
+        # PAID_ORCH_ENABLED exactly like the orchestrator rung — on a $0-credit box (knob false)
+        # it must NOT issue a metered call, it falls through to Codex-first planning_call instead.
+        high_risk_paid = risk >= HIGH_RISK_THRESHOLD and PAID_ORCH_ENABLED
+        if risk >= HIGH_RISK_THRESHOLD and not PAID_ORCH_ENABLED:
+            routing = "high — paid disabled, Codex-first"
+        elif risk >= HIGH_RISK_THRESHOLD:
+            routing = "high — routing to Sonnet"
+        else:
+            routing = "low — Codex-first"
+        console.print(f"  [dim]Interpretation risk: {risk:.2f} ({routing})[/dim]")
 
-        if risk >= HIGH_RISK_THRESHOLD:
+        if high_risk_paid:
             # High-risk path: skip Codex, go directly to Sonnet primary.
             # Codex is less reliable on ambiguous / novel / constraint-heavy intents,
             # so we avoid wasting an OAuth slot on output likely to fail validation.
@@ -108,6 +115,12 @@ class CreativeDirector:
             last_err: Exception | None = None
             brief: dict | None = None
             for _model in _models_to_try:
+                # Control-plane paid budget: this direct loop previously bypassed MAX_PAID_ORCH_CALLS
+                # (its own loop, not planning_call). Reserve here so a latched-free-rung build can't
+                # rack up uncapped metered CD calls; on exhaustion fall through to planning_call.
+                if not _reserve_paid_orch_call():
+                    last_err = RuntimeError("paid orch budget (MAX_PAID_ORCH_CALLS) exhausted")
+                    break
                 _t0 = _time.monotonic()
                 try:
                     raw = _call_anthropic(_model, self._system_prompt, intent, label="creative")
@@ -136,7 +149,9 @@ class CreativeDirector:
                 )
                 brief = planning_call(self._system_prompt, intent, _validate, role="creative")
         else:
-            # Low-risk path: existing Codex-first planning_call (Phase 3 behavior).
+            # Low-risk path, OR high-risk with paid orchestration disabled: Codex-first planning_call
+            # (Phase 3 behavior). planning_call's own Anthropic tiers are budget-gated via
+            # _reserve_paid_orch_call, so this stays $0 when Codex is available.
             brief = planning_call(self._system_prompt, intent, _validate, role="creative")
 
         console.print(

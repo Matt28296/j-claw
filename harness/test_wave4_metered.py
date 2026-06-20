@@ -81,6 +81,8 @@ class TestFinalReviewCeiling(unittest.TestCase):
         with patch.object(config, "MAX_BUILD_COST_USD", 5.0), \
              patch.object(config, "MAX_BUILD_TOKENS", 0), \
              patch.object(final_review, "ANTHROPIC_API_KEY", "sk-ant-test"), \
+             patch.object(final_review, "PAID_ORCH_ENABLED", True), \
+             patch.object(final_review, "_review_via_cli", return_value=None), \
              patch("anthropic.Anthropic") as mock_client:
             _trip_ceiling()
             import tempfile
@@ -97,6 +99,7 @@ class TestFinalReviewCeiling(unittest.TestCase):
         with patch.object(config, "MAX_BUILD_COST_USD", 1000.0), \
              patch.object(config, "MAX_BUILD_TOKENS", 0), \
              patch.object(final_review, "ANTHROPIC_API_KEY", "sk-ant-test"), \
+             patch.object(final_review, "PAID_ORCH_ENABLED", True), \
              patch.object(final_review, "FINAL_REVIEW_MODEL", "claude-sonnet-4-6"), \
              patch.object(final_review, "_review_via_cli", return_value=None), \
              patch("anthropic.Anthropic") as mock_client:

@@ -11,7 +11,7 @@ from pathlib import Path
 import anthropic
 from rich.console import Console
 
-from config import ANTHROPIC_API_KEY, ORCHESTRATOR_MODEL, HEAL_MAX_CYCLES
+from config import ANTHROPIC_API_KEY, ORCHESTRATOR_MODEL, HEAL_MAX_CYCLES, PAID_ORCH_ENABLED
 from cost import record_usage, check_cost_ceiling
 from verification import SKIP_PREFIX
 import config as cfg
@@ -155,11 +155,15 @@ def try_claude_stamp(handoff_path: Path, output_dir: Path) -> None:
     cli_ok = shutil.which("claude") and _stamp_via_cli(handoff_path, output_dir)
     if cli_ok:
         return
-    if ANTHROPIC_API_KEY:
+    # Metered API stamp is gated by PAID_ORCH_ENABLED — on a $0-credit box (knob false) the stamp
+    # is a non-critical QA nicety, so skip it rather than issue a metered call that only 400s.
+    if ANTHROPIC_API_KEY and PAID_ORCH_ENABLED:
         _stamp_via_api(handoff_path, output_dir)
     else:
+        reason = ("no ANTHROPIC_API_KEY" if not ANTHROPIC_API_KEY
+                  else "metered stamp disabled (PAID_ORCH_ENABLED=false)")
         console.print(
-            "\n  [dim]claude CLI not found and no ANTHROPIC_API_KEY "
+            f"\n  [dim]claude CLI not found and {reason} "
             "— skipping autonomous stamp.[/dim]\n"
             f"  To run OpenClaw manually: cd \"{output_dir}\" && claude\n"
             "  Then ask Claude to review HANDOFF.md."
