@@ -695,6 +695,32 @@ class Scheduler:
         # run()'s outer loop will now re-enter the execution loop and run these tasks.
         return True
 
+    # ── context manager (kill-switch / clean-abort) ───────────────────────────
+
+    def __enter__(self) -> "Scheduler":
+        """Allow ``with Scheduler(...) as s: s.run()`` for a belt-and-suspenders
+        cleanup guarantee at the call-site level.  The primary cleanup path is the
+        ``with _ctx:`` block inside :meth:`run`; this outer context manager ensures
+        that if something raises *between* construction and the first call to
+        :meth:`run`, any worktrees that were somehow pre-registered are still
+        discarded (unlikely in practice, but the invariant is then provably
+        unconditional)."""
+        return self
+
+    def __exit__(self, *_) -> None:
+        """Discard every remaining worktree on any exit path (normal, exception,
+        KeyboardInterrupt, BuildCostCeilingExceeded).  This is a true safety net:
+        :meth:`run` already wraps its body in ``with _ctx:`` so by the time
+        __exit__ fires here every worktree should already be gone.  The double
+        cleanup is idempotent because WorktreeManager._worktrees is popped on
+        every successful remove() call."""
+        if self._wt_manager is not None:
+            # __exit__ on WorktreeManager iterates and cleans any remaining entries.
+            try:
+                self._wt_manager.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+
     # ── helpers ───────────────────────────────────────────────────────────────
 
     # ── helpers ───────────────────────────────────────────────────────────────

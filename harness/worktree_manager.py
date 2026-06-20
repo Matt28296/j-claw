@@ -11,17 +11,17 @@ is a subdirectory of that repo — so git tracks them and worktrees can isolate 
 Usage (lifecycle managed by Scheduler.run):
 
     with WorktreeManager(repo_root) as wt:
-        wt_path = wt.create(task_id)          # isolated branch
+        wt_path = wt.create(task_id)   # isolated branch
         # worker writes to wt_path / relative_output
-        wt.merge_and_remove(task_id, "main")  # verification passed
-        # -- OR --
-        wt.remove(task_id)                    # verification failed
+        # _copy_tree copies files to the real output_dir, then:
+        wt.remove(task_id)             # discard the worktree (pass or fail)
 """
 from __future__ import annotations
 
 import os
 import secrets
 import shutil
+import stat
 import subprocess
 import threading
 from pathlib import Path
@@ -37,6 +37,17 @@ _GIT_ENV = {
     "GIT_COMMITTER_NAME": "j-claw",
     "GIT_COMMITTER_EMAIL": "jclaw@local",
 }
+
+
+def _force_remove_readonly(func, path, excinfo):
+    """shutil.rmtree onerror handler: on Windows, git objects/pack files are
+    marked read-only, so the default rmtree fails to delete them.  Make the
+    offending path writable and retry the removal.  Never raises out of cleanup."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except Exception:
+        pass
 
 
 def _run(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
@@ -115,8 +126,11 @@ class WorktreeManager:
 
         # Remove stale worktree dir if it exists from a previous crashed run, and
         # prune the corresponding git admin entry so the next add can succeed cleanly.
+        # Use the read-only handler (not ignore_errors) so stale read-only git
+        # objects are actually deleted — otherwise the dir lingers and the
+        # subsequent `git worktree add` fails because the path is not empty.
         if wt_path.exists():
-            shutil.rmtree(wt_path, ignore_errors=True)
+            shutil.rmtree(wt_path, onerror=_force_remove_readonly)
             _run(["git", "worktree", "prune"], cwd=self.repo, check=False)
 
         self._base.mkdir(parents=True, exist_ok=True)
@@ -133,83 +147,6 @@ class WorktreeManager:
 
         self._worktrees[task_id] = (wt_path, branch)
         return wt_path
-
-    def merge_and_remove(self, task_id: str, into_branch: str = "main") -> None:
-        """Merge the worktree branch into *into_branch*, then clean up.
-
-        Checks out *into_branch* in the main repo before merging, then
-        restores the original HEAD branch.  Merge operations are serialized
-        with a lock because git does not support concurrent merges into the
-        same working tree.
-
-        Calls ``git merge --no-ff <branch>`` so the isolation is always
-        recorded as a merge commit for auditability.
-        """
-        if task_id not in self._worktrees:
-            return
-        wt_path, branch = self._worktrees[task_id]
-
-        # Stage and commit any uncommitted changes inside the worktree first
-        # so that ``git merge`` sees the content.
-        _run(["git", "add", "--all"], cwd=wt_path, check=False)
-        _run(
-            ["git", "commit", "-m", f"wt: task {task_id}"],
-            cwd=wt_path,
-            check=False,  # No-op if nothing to commit is not an error.
-        )
-
-        # Serialize all merge operations: concurrent merges into the same
-        # working tree corrupt the git index.
-        with self._merge_lock:
-            # Remember current HEAD so we can restore it after merging.
-            head_result = _run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=self.repo,
-                check=False,
-            )
-            original_branch = head_result.stdout.strip() if head_result.returncode == 0 else None
-            # "HEAD" means the repo is in detached-HEAD state — there is no branch
-            # name to restore, so skip the checkout-restore at the end.
-            if original_branch == "HEAD":
-                original_branch = None
-
-            # Check out the target branch before merging.
-            checkout = _run(
-                ["git", "checkout", into_branch],
-                cwd=self.repo,
-                check=False,
-            )
-            if checkout.returncode != 0:
-                self._cleanup_worktree(task_id, wt_path, branch)
-                raise RuntimeError(
-                    f"git checkout {into_branch!r} failed for task {task_id!r}:\n"
-                    f"{checkout.stderr.strip()}"
-                )
-
-            # Merge into the target branch from within the main repo checkout.
-            merge = _run(
-                ["git", "merge", "--no-ff", branch],
-                cwd=self.repo,
-                check=False,
-            )
-            if merge.returncode != 0:
-                # Abort the merge and fall through to removal — callers will
-                # decide whether to propagate the error.
-                _run(["git", "merge", "--abort"], cwd=self.repo, check=False)
-                self._cleanup_worktree(task_id, wt_path, branch)
-                # Restore original branch even on failure.
-                if original_branch and original_branch != into_branch:
-                    _run(["git", "checkout", original_branch], cwd=self.repo, check=False)
-                raise RuntimeError(
-                    f"git merge failed for task {task_id!r} (branch {branch!r}):\n"
-                    f"{merge.stderr.strip()}"
-                )
-
-            self._cleanup_worktree(task_id, wt_path, branch)
-
-            # Restore the original branch so the repo HEAD is unchanged.
-            if original_branch and original_branch != into_branch:
-                _run(["git", "checkout", original_branch], cwd=self.repo, check=False)
 
     def remove(self, task_id: str) -> None:
         """Discard the worktree without merging (verification failed or error)."""
@@ -229,8 +166,11 @@ class WorktreeManager:
             check=False,
         )
         # Belt-and-suspenders: remove the directory if git left it behind.
+        # On Windows, git objects/pack files are marked read-only; the onerror
+        # handler chmods them writable before retrying the unlink so they are
+        # actually deleted instead of silently skipped.
         if wt_path.exists():
-            shutil.rmtree(wt_path, ignore_errors=True)
+            shutil.rmtree(wt_path, onerror=_force_remove_readonly)
         # Prune stale .git/worktrees/<name> admin entries left by crashes.
         _run(["git", "worktree", "prune"], cwd=self.repo, check=False)
         _run(

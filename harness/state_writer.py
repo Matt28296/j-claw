@@ -3,6 +3,7 @@ import json
 import os
 import time
 import threading
+import warnings
 from pathlib import Path
 
 from session_log import SessionLog, new_mission_id
@@ -625,7 +626,28 @@ def _write_json_atomic(path: Path, data: dict) -> None:
             fh.write(json.dumps(data, indent=2))
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        # On Windows, os.replace can raise PermissionError/OSError [WinError 5]
+        # when another process briefly holds the destination file open.
+        # Retry with escalating backoff; a dropped update is cosmetic and must
+        # never crash the build.
+        _REPLACE_DELAYS = (0.01, 0.02, 0.05, 0.1)  # ~0.18 s total
+        for attempt, delay in enumerate(_REPLACE_DELAYS):
+            try:
+                os.replace(tmp, path)
+                break  # success
+            except (PermissionError, OSError) as exc:
+                if attempt == len(_REPLACE_DELAYS) - 1:
+                    # Final attempt failed — drop the update gracefully, but emit a
+                    # warning so a non-transient cause (disk full, bad path) is
+                    # diagnosable in logs rather than a silently frozen dashboard.
+                    warnings.warn(
+                        f"_write_json_atomic: state update to {path.name} dropped "
+                        f"after {len(_REPLACE_DELAYS)} attempts: {exc!r}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    return
+                time.sleep(delay)
     finally:
         try:
             if tmp.exists():

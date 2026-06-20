@@ -45,8 +45,25 @@ from technical_architect import TechnicalArchitect
 from cost import reset_costs, cost_summary, format_cost_line, BuildCostCeilingExceeded
 from notify import notify_build_outcome, notify_crash
 from experience_log import get_stack_lessons
+from memory_lint import lint_project_memory, format_report as _ml_format_report
 
 console = Console()
+
+
+def _run_memory_lint(project_dir: Path) -> None:
+    """Warn-only memory-lint pre-flight: scan project_memory/ for staleness and
+    surface findings to the console.  NEVER raises, NEVER blocks the build.
+    Writes project_memory/lint_report.json as a durable artifact (lint_project_memory
+    already does this internally)."""
+    try:
+        report = lint_project_memory(project_dir)
+        summary = _ml_format_report(report)
+        if report.get("total", 0):
+            console.print(f"  [yellow]{summary}[/yellow]")
+        else:
+            console.print(f"  [dim]{summary}[/dim]")
+    except Exception as _lint_exc:  # noqa: BLE001 — never block the build
+        console.print(f"  [dim]memory-lint skipped ({_lint_exc})[/dim]")
 
 
 def _write_failure_handoff(output_dir: Path, intent: str, phase: str, exc: Exception) -> None:
@@ -187,7 +204,15 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
         sw.on_dag_loaded(dag_response["tasks"])
 
         console.print(f"\n[bold]Executing {len(dag_response['tasks'])} new task(s)…[/bold]")
-        Scheduler(instance, orch).run()
+        # memory-lint pre-flight: warn about stale project_memory before tasks run.
+        # Doubly guard: _run_memory_lint is itself try/except, but wrap here too so
+        # that a future refactor of that helper cannot accidentally block a continuation.
+        try:
+            _run_memory_lint(project_dir)
+        except Exception:  # noqa: BLE001
+            pass
+        with Scheduler(instance, orch) as _sched:
+            _sched.run()
 
         # Save updated tasks
         (project_dir / "tasks_done.json").write_text(
@@ -561,7 +586,8 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
 
     phase["current"] = "execution"
     console.print(f"\n[bold]Executing {len(instance.tasks)} task(s)…[/bold]")
-    Scheduler(instance, orch).run()
+    with Scheduler(instance, orch) as _sched:
+        _sched.run()
     (output_dir / "tasks_done.json").write_text(
         _json.dumps(instance.tasks_as_list(), indent=2), encoding="utf-8"
     )
@@ -763,7 +789,8 @@ def _run_project_inner(intent: str, output_dir: Path, depth: int, manual: bool, 
             sw.on_tasks_added(followups)
             console.print(f"  Added {len(followups)} fix task(s). Re-running…\n")
             prev_issues = issues
-            Scheduler(instance, orch).run()
+            with Scheduler(instance, orch) as _sched:
+                _sched.run()
 
         handoff_path = write_handoff(output_dir, instance.spec, passed, heal_cycle)
         try_claude_stamp(handoff_path, output_dir)
@@ -892,6 +919,12 @@ def _handle_oversize(response: dict, base_dir: Path, depth: int, auto_accept: bo
 
         sp_dir.mkdir(parents=True, exist_ok=True)
         console.rule(f"[cyan]Sub-project: {name}[/cyan]")
+        # memory-lint pre-flight: scan sp_dir/project_memory/ for staleness before
+        # the sub-project runs.  Doubly guarded: never aborts a scene.
+        try:
+            _run_memory_lint(sp_dir)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             ok = run_project(sp["goal"], sp_dir, depth + 1, manual=manual,
                              auto_accept=auto_accept, wiring=wiring)

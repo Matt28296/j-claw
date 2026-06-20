@@ -4072,6 +4072,21 @@ if __name__ == "__main__":
         TestE2EGeneratorCeiling,
         TestOpenAICompatOrchestratorCeiling,
     )
+    # Wave 5 hardening regression modules (TestCase-based). tests/test_worktree_manager.py
+    # remains its own module (run via pytest).
+    from test_wave5_lifecycle import (
+        TestSchedulerContextManager,
+        TestWorktreeCleanupOnAbort,
+        TestMemoryLintContinuationPath,
+        TestMemoryLintOversizePath,
+        TestRunMemoryLintHelper,
+    )
+    from test_wave5_statewriter import TestWriteJsonAtomicRetry
+    from test_wave5_dryrun import (
+        TestForceFormat5OversizeRouting,
+        TestForceFormat5FlatAbort,
+        TestForceFormat5Disabled,
+    )
     for cls in [
         TestParseRetryDelay,
         TestOpenAICompatOrchestrator,
@@ -4125,6 +4140,16 @@ if __name__ == "__main__":
         TestStampCeiling,
         TestE2EGeneratorCeiling,
         TestOpenAICompatOrchestratorCeiling,
+        # Wave 5 hardening regressions
+        TestSchedulerContextManager,
+        TestWorktreeCleanupOnAbort,
+        TestMemoryLintContinuationPath,
+        TestMemoryLintOversizePath,
+        TestRunMemoryLintHelper,
+        TestWriteJsonAtomicRetry,
+        TestForceFormat5OversizeRouting,
+        TestForceFormat5FlatAbort,
+        TestForceFormat5Disabled,
     ]:
         suite.addTests(loader.loadTestsFromTestCase(cls))
 

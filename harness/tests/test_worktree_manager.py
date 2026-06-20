@@ -154,152 +154,6 @@ class TestWorktreeManagerCreate(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# WorktreeManager.merge_and_remove
-# ---------------------------------------------------------------------------
-
-class TestWorktreeManagerMergeAndRemove(unittest.TestCase):
-    def setUp(self):
-        self._tmp = Path(tempfile.mkdtemp(prefix="wt_test_"))
-        self._repo = _make_fake_repo(self._tmp)
-        self._wt = WorktreeManager(self._repo)
-
-    def tearDown(self):
-        shutil.rmtree(self._tmp, ignore_errors=True)
-
-    def _register_task(self, task_id: str, branch: str = "wt-task-abcd1234") -> Path:
-        """Directly insert a task into the manager's registry (bypassing create)."""
-        wt_path = self._repo.parent / ".jclaw_worktrees" / task_id
-        wt_path.mkdir(parents=True, exist_ok=True)
-        self._wt._worktrees[task_id] = (wt_path, branch)
-        return wt_path
-
-    def test_merge_and_remove_issues_correct_commands(self):
-        self._register_task("task_ok", "wt-task_ok-deadbeef")
-
-        def _side_effect(args, cwd, check=True):
-            if args[:3] == ["git", "rev-parse", "--abbrev-ref"]:
-                return _ok(stdout="main\n")
-            return _ok()
-
-        with patch("worktree_manager._run", side_effect=_side_effect) as mock_run:
-            self._wt.merge_and_remove("task_ok", into_branch="main")
-
-        all_args = [c.args[0] for c in mock_run.call_args_list]
-
-        # Must have: git add --all, git commit, git checkout <into_branch>,
-        # git merge --no-ff <branch>, git worktree remove --force, git branch -D
-        cmds = [tuple(a[:4]) for a in all_args]
-        self.assertIn(("git", "add", "--all"), [tuple(a[:3]) for a in all_args])
-        self.assertIn(("git", "commit", "-m"), [tuple(a[:3]) for a in all_args])
-        checkout_calls = [a for a in all_args if a[:2] == ["git", "checkout"]]
-        self.assertTrue(checkout_calls, "git checkout <into_branch> must be called")
-        self.assertIn(("git", "merge", "--no-ff", "wt-task_ok-deadbeef"), cmds)
-        self.assertIn(("git", "worktree", "remove", "--force"), cmds)
-        branch_deletes = [a for a in all_args if a[:2] == ["git", "branch"] and "-D" in a]
-        self.assertTrue(branch_deletes, "git branch -D must be called")
-
-    def test_merge_and_remove_clears_registry(self):
-        self._register_task("task_done", "wt-task_done-aabb1234")
-
-        def _side_effect(args, cwd, check=True):
-            if args[:3] == ["git", "rev-parse", "--abbrev-ref"]:
-                return _ok(stdout="main\n")
-            return _ok()
-
-        with patch("worktree_manager._run", side_effect=_side_effect):
-            self._wt.merge_and_remove("task_done")
-        self.assertNotIn("task_done", self._wt._worktrees)
-
-    def test_merge_and_remove_noop_for_unknown_task(self):
-        with patch("worktree_manager._run") as mock_run:
-            self._wt.merge_and_remove("ghost_task")
-        mock_run.assert_not_called()
-
-    def test_merge_failure_raises_and_still_cleans_up(self):
-        self._register_task("task_conflict", "wt-task_conflict-cafe4321")
-
-        def _side_effect(args, cwd, check=True):
-            if args[:3] == ["git", "rev-parse", "--abbrev-ref"]:
-                return _ok(stdout="main\n")
-            if args[:3] == ["git", "merge", "--no-ff"]:
-                return _fail("CONFLICT")
-            return _ok()
-
-        with patch("worktree_manager._run", side_effect=_side_effect):
-            with self.assertRaises(RuntimeError) as ctx:
-                self._wt.merge_and_remove("task_conflict")
-
-        self.assertIn("git merge failed", str(ctx.exception))
-        # Registry must be cleared even on merge failure.
-        self.assertNotIn("task_conflict", self._wt._worktrees)
-
-    def test_merge_restores_original_branch(self):
-        """After merging into a different branch, HEAD is restored to original."""
-        self._register_task("task_restore", "wt-task_restore-ffff0000")
-
-        checkouts_seen = []
-
-        def _side_effect(args, cwd, check=True):
-            if args[:3] == ["git", "rev-parse", "--abbrev-ref"]:
-                return _ok(stdout="feat/my-feature\n")
-            if args[:2] == ["git", "checkout"]:
-                checkouts_seen.append(args[2])
-            return _ok()
-
-        with patch("worktree_manager._run", side_effect=_side_effect):
-            self._wt.merge_and_remove("task_restore", into_branch="main")
-
-        self.assertIn("main", checkouts_seen, "must checkout into_branch before merging")
-        self.assertIn("feat/my-feature", checkouts_seen, "must restore original branch after merge")
-
-    def test_checkout_failure_raises_and_cleans_up(self):
-        """If git checkout <into_branch> fails, raises RuntimeError and cleans up."""
-        self._register_task("task_co_fail", "wt-task_co_fail-11223344")
-
-        def _side_effect(args, cwd, check=True):
-            if args[:3] == ["git", "rev-parse", "--abbrev-ref"]:
-                return _ok(stdout="main\n")
-            if args[:2] == ["git", "checkout"]:
-                return _fail("pathspec 'missing-branch' did not match")
-            return _ok()
-
-        with patch("worktree_manager._run", side_effect=_side_effect):
-            with self.assertRaises(RuntimeError) as ctx:
-                self._wt.merge_and_remove("task_co_fail", into_branch="missing-branch")
-
-        self.assertIn("git checkout", str(ctx.exception))
-        self.assertNotIn("task_co_fail", self._wt._worktrees)
-
-    def test_merge_lock_is_a_lock(self):
-        """WorktreeManager must expose _merge_lock as a threading.Lock."""
-        import threading
-        wt = WorktreeManager(self._repo)
-        self.assertIsInstance(wt._merge_lock, type(threading.Lock()))
-
-    def test_detached_head_does_not_restore_branch(self):
-        """Bug-1 regression: when HEAD is detached, git checkout 'HEAD' must NOT be called."""
-        self._register_task("task_detached", "wt-task_detached-00001111")
-
-        checkouts_seen = []
-
-        def _side_effect(args, cwd, check=True):
-            if args[:3] == ["git", "rev-parse", "--abbrev-ref"]:
-                # Simulate detached HEAD: git returns the literal string "HEAD".
-                return _ok(stdout="HEAD\n")
-            if args[:2] == ["git", "checkout"]:
-                checkouts_seen.append(args[2])
-            return _ok()
-
-        with patch("worktree_manager._run", side_effect=_side_effect):
-            self._wt.merge_and_remove("task_detached", into_branch="main")
-
-        # The checkout to *into_branch* is expected.
-        self.assertIn("main", checkouts_seen)
-        # But "HEAD" (the detached-state sentinel) must NEVER be checked out.
-        self.assertNotIn("HEAD", checkouts_seen, "must not git checkout 'HEAD' in detached state")
-
-
-# ---------------------------------------------------------------------------
 # WorktreeManager.remove
 # ---------------------------------------------------------------------------
 
@@ -418,6 +272,82 @@ class TestWorktreeManagerContextManager(unittest.TestCase):
             with wt as ctx:
                 self.assertIs(ctx, wt)
         # No uncaught exception means __enter__/__exit__ work.
+
+
+# ---------------------------------------------------------------------------
+# _cleanup_worktree: Windows read-only file regression
+# ---------------------------------------------------------------------------
+
+class TestCleanupReadOnly(unittest.TestCase):
+    """Regression: _cleanup_worktree must fully remove dirs containing read-only files.
+
+    On Windows, git objects and pack files are marked read-only.  The old
+    ``shutil.rmtree(path, ignore_errors=True)`` silently swallowed the
+    PermissionError and left the directory behind.  The onerror handler added
+    in task (1) chmods offending files writable before retrying the unlink so
+    the directory is actually deleted.
+    """
+
+    def setUp(self):
+        self._tmp = Path(tempfile.mkdtemp(prefix="wt_test_"))
+        self._repo = _make_fake_repo(self._tmp)
+        self._wt = WorktreeManager(self._repo)
+
+    def tearDown(self):
+        # Best-effort: make everything writable before cleanup in case the test
+        # left read-only artefacts behind (e.g. if the assertion failed).
+        for dirpath, dirnames, filenames in os.walk(str(self._tmp)):
+            for fname in filenames:
+                try:
+                    os.chmod(os.path.join(dirpath, fname), stat.S_IWRITE)
+                except Exception:
+                    pass
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_cleanup_removes_readonly_files(self):
+        """A worktree dir with a read-only file is fully deleted by _cleanup_worktree."""
+        import stat as _stat
+
+        # Build a fake worktree directory containing a read-only file.
+        wt_path = self._repo.parent / ".jclaw_worktrees" / "task_ro-abcd1234"
+        wt_path.mkdir(parents=True, exist_ok=True)
+        ro_file = wt_path / "pack-deadbeef.idx"  # simulates a read-only git pack file
+        ro_file.write_text("fake git object", encoding="utf-8")
+        # Mark the file read-only (same as git does on Windows for objects).
+        os.chmod(str(ro_file), _stat.S_IREAD)
+
+        branch = "wt-task_ro-abcd1234"
+        self._wt._worktrees["task_ro"] = (wt_path, branch)
+
+        # git commands are mocked — we're testing the filesystem behaviour only.
+        with patch("worktree_manager._run", return_value=_ok()):
+            self._wt._cleanup_worktree("task_ro", wt_path, branch)
+
+        self.assertFalse(
+            wt_path.exists(),
+            f"worktree dir must be fully removed even with read-only files inside; "
+            f"dir still exists: {wt_path}",
+        )
+
+    def test_cleanup_handler_does_not_raise_on_permission_error(self):
+        """The onerror handler must swallow exceptions and never propagate out of cleanup."""
+        import stat as _stat
+
+        wt_path = self._repo.parent / ".jclaw_worktrees" / "task_safe-cafe5678"
+        wt_path.mkdir(parents=True, exist_ok=True)
+        ro_file = wt_path / "readonly.idx"
+        ro_file.write_text("data", encoding="utf-8")
+        os.chmod(str(ro_file), _stat.S_IREAD)
+
+        branch = "wt-task_safe-cafe5678"
+        self._wt._worktrees["task_safe"] = (wt_path, branch)
+
+        # Even if git commands fail, _cleanup_worktree must not raise.
+        with patch("worktree_manager._run", return_value=_ok()):
+            try:
+                self._wt._cleanup_worktree("task_safe", wt_path, branch)
+            except Exception as exc:
+                self.fail(f"_cleanup_worktree raised unexpectedly: {exc}")
 
 
 # ---------------------------------------------------------------------------
