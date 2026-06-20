@@ -1930,8 +1930,23 @@ def _call_claude_cli(model: str, system: str, user: str) -> str:
                 cwd=scratch,
             )
         if result.returncode != 0:
-            tail = ((result.stderr or "") + (result.stdout or ""))[-300:]
-            raise RuntimeError(f"claude -p exited {result.returncode}: ...{tail}")
+            # `claude -p` exits non-zero on billing/auth/rate-limit failures too, but it still emits the
+            # JSON envelope whose `result`/`api_error_status` carry the REAL reason — and that reason sits
+            # at the FRONT of the object, so a blind stdout tail truncates it away (the whole point of the
+            # diagnosability fix). Parse the envelope first; fall back to the tail only when it isn't JSON.
+            reason = ""
+            try:
+                obj = json.loads((result.stdout or "").strip())
+                if isinstance(obj, dict):
+                    bits = [str(obj.get("result"))] if obj.get("result") else []
+                    if obj.get("api_error_status"):
+                        bits.append(f"api_error_status={obj.get('api_error_status')}")
+                    reason = "; ".join(b for b in bits if b and b != "None")
+            except (json.JSONDecodeError, ValueError):
+                pass
+            if not reason:
+                reason = "..." + ((result.stderr or "") + (result.stdout or ""))[-300:]
+            raise RuntimeError(f"claude -p exited {result.returncode}: {reason}")
         text, inp, out = _extract_claude_text(result.stdout or "")
         record_oauth_usage("claude_cli", success=True, latency_s=time.monotonic() - start,
                             tokens=inp + out)

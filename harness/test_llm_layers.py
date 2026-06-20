@@ -1682,6 +1682,31 @@ class TestClaudeCliWorkerRung(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
         self.assertNotIn("CLAUDE_CODE_USE_BEDROCK", env)
 
+    # ── 8. a non-zero exit surfaces the envelope's REAL reason, not a truncated stdout tail ──
+    def test_call_claude_cli_nonzero_exit_surfaces_envelope_reason(self):
+        # `claude -p` exits 1 on billing/auth/rate-limit failures but still emits the JSON envelope,
+        # whose `result`/`api_error_status` (at the FRONT of the object) carry the real reason. A blind
+        # stdout tail truncates that away — regression guard for the diagnosability fix.
+        w = self._w
+        envelope = json.dumps({"type": "result", "is_error": True, "api_error_status": 400,
+                               "result": "Credit balance is too low",
+                               # padding so a [-300:] tail would have hidden the reason at the front
+                               "usage": {"input_tokens": 0, "output_tokens": 0, "iterations": []},
+                               "filler": "x" * 400})
+
+        def fail_run(cmd, **kwargs):
+            m = MagicMock(); m.returncode = 1; m.stderr = ""; m.stdout = envelope
+            return m
+
+        with patch.object(w.subprocess, "run", side_effect=fail_run):
+            with self.assertRaises(RuntimeError) as ctx:
+                w._call_claude_cli("sonnet", "SYS", "USER")
+        msg = str(ctx.exception)
+        self.assertIn("Credit balance is too low", msg,
+                      "the real failure reason must survive into the raised error")
+        self.assertIn("api_error_status=400", msg)
+        self.assertNotIn("xxxxxxxxxx", msg, "must not dump the raw filler tail when the envelope parsed")
+
 
 class TestRoleMetrics(unittest.TestCase):
     """Phase-0 instrumentation baseline: per-role routing telemetry in cost.py.
