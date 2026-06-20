@@ -1739,16 +1739,23 @@ class TestPlanningCall(unittest.TestCase):
         import worker as w
         self._w = w
         self._orig_enabled = w.CODEX_CLI_ENABLED
+        # Disable the free Claude-CLI tier by default so the codex→anthropic boundary tests below
+        # don't shell to a real `claude -p`; the two CLI-tier tests re-enable it via _oauth_enabled.
+        self._orig_cli_enabled = w.CLAUDE_CLI_ENABLED
         w.CODEX_CLI_ENABLED = True
+        w.CLAUDE_CLI_ENABLED = False
         with w._oauth_lock:
             w._codex_disabled = False
+            w._claude_cli_disabled = False
             w._oauth_calls_made.clear()
 
     def tearDown(self):
         w = self._w
         w.CODEX_CLI_ENABLED = self._orig_enabled
+        w.CLAUDE_CLI_ENABLED = self._orig_cli_enabled
         with w._oauth_lock:
             w._codex_disabled = False
+            w._claude_cli_disabled = False
             w._oauth_calls_made.clear()
 
     def _ok(self, parsed):
@@ -1788,6 +1795,43 @@ class TestPlanningCall(unittest.TestCase):
         self.assertEqual(mc.call_count, 1, "unavailable codex must NOT retry — go straight to Anthropic")
         self.assertTrue(w._codex_disabled, "codex unavailability must latch the rung")
         ma.assert_called()
+        self.assertTrue(out["ok"])
+
+    def test_codex_unavailable_falls_to_free_cli_before_metered(self):
+        # The free Claude Max CLI tier must be tried BEFORE any metered Anthropic call:
+        # when Codex is down but claude_cli is available, planning stays $0 and never
+        # touches _call_anthropic.
+        w = self._w
+
+        def codex_unavail(model, system, user):
+            raise RuntimeError("not logged in")
+
+        with patch.object(w, "_oauth_enabled", return_value=True), \
+             patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "_call_codex", side_effect=codex_unavail) as mc, \
+             patch.object(w, "_call_claude_cli", return_value=json.dumps({"ok": True, "x": 7})) as mcli, \
+             patch.object(w, "_call_anthropic") as ma:
+            out = w.planning_call("s", "u", self._ok, role="creative")
+        mc.assert_called_once()
+        mcli.assert_called_once()
+        ma.assert_not_called()  # free CLI satisfied the call — no metered fallback
+        self.assertEqual(out["x"], 7)
+
+    def test_both_free_tiers_unavailable_then_metered(self):
+        # Only when BOTH free OAuth tiers are unavailable does planning fall to paid Anthropic.
+        w = self._w
+
+        def unavail(model, system, user):
+            raise RuntimeError("not logged in")
+
+        with patch.object(w, "_oauth_enabled", return_value=True), \
+             patch.object(w, "_reserve_oauth_call", return_value=True), \
+             patch.object(w, "_reserve_paid_orch_call", return_value=True), \
+             patch.object(w, "_call_codex", side_effect=unavail), \
+             patch.object(w, "_call_claude_cli", side_effect=unavail), \
+             patch.object(w, "_call_anthropic", return_value=json.dumps({"ok": True})) as ma:
+            out = w.planning_call("s", "u", self._ok)
+        ma.assert_called()  # both free rungs down → metered fallback reached
         self.assertTrue(out["ok"])
 
     def test_reservation_false_skips_codex_entirely(self):

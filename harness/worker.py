@@ -1519,7 +1519,10 @@ def planning_call(
     """Codex-first planning helper for strict-schema control-plane roles (Creative Director,
     Technical Architect, later the orchestrator). Tries the cheapest *reliable* tier first:
 
-        Codex (free OAuth) → one same-tier retry → Anthropic Sonnet → Anthropic Opus
+        Codex (free OAuth) → Claude Max CLI (free OAuth) → Anthropic Sonnet → Anthropic Opus
+
+    Both free OAuth tiers are exhausted BEFORE any metered Anthropic call, so a $0 rung is always
+    preferred while available (a latched/unavailable Codex no longer jumps straight to paid).
 
     Each candidate's parsed JSON is gated by `validate_fn(parsed)` — role-specific validation that
     raises on a bad shape — NOT mere parse success, so a plausible-but-wrong plan is rejected and
@@ -1539,9 +1542,18 @@ def planning_call(
         try:
             return _codex_tier(system, user, validate_fn, role=role, model=codex_model)
         except (_CodexTierUnavailable, _CodexTierInvalid) as exc:
-            last_err = exc  # Codex unavailable or failed validation → fall through to Anthropic
+            last_err = exc  # Codex unavailable or failed validation → fall through to the next FREE tier
 
-    # Tier 2/3 — Anthropic Sonnet → Opus (paid), validated. fallback=True marks the cross-tier hop.
+    # Tier 2 — Claude Max CLI (free OAuth), via the shared Claude-CLI tier helper. Tried BEFORE the
+    # metered Anthropic tiers so the second $0 rung is always exhausted first — when Codex is latched
+    # off, planning must NOT jump straight to paid while the free Claude Max CLI is available.
+    if _oauth_enabled("claude_cli"):
+        try:
+            return _claude_cli_tier(system, user, validate_fn, role=role)
+        except (_CodexTierUnavailable, _CodexTierInvalid) as exc:
+            last_err = exc  # CLI unavailable or failed validation → fall through to Anthropic
+
+    # Tier 3/4 — Anthropic Sonnet → Opus (paid), validated. fallback=True marks the cross-tier hop.
     for model in (sonnet_model, opus_model):
         # Control-plane paid budget: refuse the metered planning call once MAX_PAID_ORCH_CALLS is
         # spent (shared with the orchestrator emergency fallback). Fails closed — planning then
