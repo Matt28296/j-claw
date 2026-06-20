@@ -153,65 +153,74 @@ def run_continuation(new_intent: str, project_dir: Path, auto_accept: bool = Fal
     reset_paid_budget()
     reset_orchestrator_run()
 
-    orch = make_orchestrator()
+    # Guard the whole continuation the same way run_project does: any crash (incl. a fail-closed
+    # orchestrator / converted credit-balance RuntimeError when no usable rung exists) must leave a
+    # failure HANDOFF.md and a recorded project-failed event rather than a raw traceback. Previously
+    # this path was unguarded, so an orchestrator RuntimeError on --continue produced no handoff.
+    try:
+        orch = make_orchestrator()
 
-    sw.on_project_start(new_intent, str(project_dir))
+        sw.on_project_start(new_intent, str(project_dir))
 
-    console.print("\n[bold]Planning continuation tasks…[/bold]")
-    sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "CONTINUE")
-    dag_response = orch.call({
-        "system_state": "CONTINUE",
-        "existing_spec": spec,
-        "completed_tasks": completed,
-        "new_intent": new_intent,
-        "creative_brief": creative_brief,
-    })
-    sw.on_agent_done()
+        console.print("\n[bold]Planning continuation tasks…[/bold]")
+        sw.on_agent_call("orchestrator", _ORCH_DISPLAY, "CONTINUE")
+        dag_response = orch.call({
+            "system_state": "CONTINUE",
+            "existing_spec": spec,
+            "completed_tasks": completed,
+            "new_intent": new_intent,
+            "creative_brief": creative_brief,
+        })
+        sw.on_agent_done()
 
-    if not dag_response.get("tasks"):
-        console.print("[yellow]Orchestrator returned no new tasks.[/yellow]")
-        sw.on_no_continuation_tasks("Orchestrator returned no new continuation tasks")
-        return False
+        if not dag_response.get("tasks"):
+            console.print("[yellow]Orchestrator returned no new tasks.[/yellow]")
+            sw.on_no_continuation_tasks("Orchestrator returned no new continuation tasks")
+            return False
 
-    instance = ProjectInstance(project_dir)
-    instance.spec = spec
-    # Pre-populate with completed tasks so dependency references work
-    instance.load_tasks(completed)
-    # Load the new follow-up tasks
-    instance.apply_format4_followups(dag_response["tasks"])
-    sw.on_dag_loaded(dag_response["tasks"])
+        instance = ProjectInstance(project_dir)
+        instance.spec = spec
+        # Pre-populate with completed tasks so dependency references work
+        instance.load_tasks(completed)
+        # Load the new follow-up tasks
+        instance.apply_format4_followups(dag_response["tasks"])
+        sw.on_dag_loaded(dag_response["tasks"])
 
-    console.print(f"\n[bold]Executing {len(dag_response['tasks'])} new task(s)…[/bold]")
-    Scheduler(instance, orch).run()
+        console.print(f"\n[bold]Executing {len(dag_response['tasks'])} new task(s)…[/bold]")
+        Scheduler(instance, orch).run()
 
-    # Save updated tasks
-    (project_dir / "tasks_done.json").write_text(
-        _json.dumps(instance.tasks_as_list(), indent=2), encoding="utf-8"
-    )
+        # Save updated tasks
+        (project_dir / "tasks_done.json").write_text(
+            _json.dumps(instance.tasks_as_list(), indent=2), encoding="utf-8"
+        )
 
-    heal_cycle = 0
-    passed = run_final_review(project_dir, spec)
-    sw.on_final_review_result(passed, heal_cycle=heal_cycle)
-    handoff_path = write_handoff(project_dir, spec, passed, heal_cycle)
-    try_claude_stamp(handoff_path, project_dir)
-    git_commit_project(project_dir, {"goal": f"continuation: {new_intent}"})
-    deploy_url, deploy_note = deploy_project(project_dir, spec)
-    append_deploy_section(handoff_path, deploy_url, deploy_note)
-    sw.on_deploy(deploy_url, deploy_note)
-    _cost = cost_summary()
-    sw.on_cost(_cost)
-    sw.on_project_done("pass" if passed else "needs_followup", "Continuation final review complete")
-    notify_build_outcome(
-        project=f"continuation: {new_intent}"[:120],
-        passed=passed,
-        heal_cycles=heal_cycle,
-        max_heal=HEAL_MAX_CYCLES,
-        handoff_path=handoff_path,
-        cost_line=format_cost_line(),
-        stamp_issues=_handoff_has_stamp_issues(handoff_path),
-        deploy_url=deploy_url,
-    )
-    return passed
+        heal_cycle = 0
+        passed = run_final_review(project_dir, spec)
+        sw.on_final_review_result(passed, heal_cycle=heal_cycle)
+        handoff_path = write_handoff(project_dir, spec, passed, heal_cycle)
+        try_claude_stamp(handoff_path, project_dir)
+        git_commit_project(project_dir, {"goal": f"continuation: {new_intent}"})
+        deploy_url, deploy_note = deploy_project(project_dir, spec)
+        append_deploy_section(handoff_path, deploy_url, deploy_note)
+        sw.on_deploy(deploy_url, deploy_note)
+        _cost = cost_summary()
+        sw.on_cost(_cost)
+        sw.on_project_done("pass" if passed else "needs_followup", "Continuation final review complete")
+        notify_build_outcome(
+            project=f"continuation: {new_intent}"[:120],
+            passed=passed,
+            heal_cycles=heal_cycle,
+            max_heal=HEAL_MAX_CYCLES,
+            handoff_path=handoff_path,
+            cost_line=format_cost_line(),
+            stamp_issues=_handoff_has_stamp_issues(handoff_path),
+            deploy_url=deploy_url,
+        )
+        return passed
+    except Exception as exc:
+        _write_failure_handoff(project_dir, new_intent, "continuation", exc)
+        sw.on_project_failed(f"{type(exc).__name__}: {exc}", "continuation")
+        raise
 
 
 def _subproject_decomposition_allowed(depth: int) -> bool:

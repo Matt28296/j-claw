@@ -107,6 +107,16 @@ MAX_PAID_WORKER_CALLS: int = _int_env("MAX_PAID_WORKER_CALLS", 15, lo=0)
 # ceiling is a belt-and-suspenders backstop, not the primary defense. 0 = disabled (no cap).
 MAX_PAID_ORCH_CALLS: int = _int_env("MAX_PAID_ORCH_CALLS", 12, lo=0)
 
+# Master switch for the PAID (metered Anthropic) orchestrator rungs. Default FALSE: on this box the
+# metered ANTHROPIC_API_KEY account carries $0 credit (free-first / paid-last policy — real capacity
+# is the OAuth Max subscription + Codex), so a metered orchestrator call is GUARANTEED to fail with a
+# 400 "credit balance too low". In the 2026-06-19 D4 run that error was uncaught and crashed the whole
+# build (no honest verdict). When this is false, Orchestrator.call() refuses BEFORE the API call and
+# the paid rungs are never added to the emergency/difficulty chains, so the build fails CLOSED the
+# instant the free OAuth rungs are exhausted instead of attempting a doomed metered call. Set
+# PAID_ORCH_ENABLED=true ONLY on a box whose ANTHROPIC_API_KEY account actually has credit.
+PAID_ORCH_ENABLED: bool = os.getenv("PAID_ORCH_ENABLED", "false").lower() == "true"
+
 # Per-build HARD cost ceiling (USD). When cumulative METERED spend (cost._total_usd, which
 # counts only paid Anthropic dollars — $0 OAuth/local rungs never count) reaches this, the
 # build FAILS CLOSED: the next metered call is refused (cost.BuildCostCeilingExceeded) and the

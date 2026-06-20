@@ -244,6 +244,14 @@ class TestOpenAICompatOrchestrator(unittest.TestCase):
 
 class TestAnthropicOrchestrator(unittest.TestCase):
 
+    def setUp(self):
+        # These tests exercise the metered Anthropic API path, which is gated behind
+        # PAID_ORCH_ENABLED (default False). Enable it so the paid call actually runs;
+        # the disabled-path behaviour is covered by TestPaidOrchDisabled.
+        p = patch("orchestrator.PAID_ORCH_ENABLED", True)
+        p.start()
+        self.addCleanup(p.stop)
+
     def _make_orch(self):
         with patch("anthropic.Anthropic"):
             from orchestrator import Orchestrator
@@ -2571,17 +2579,20 @@ class TestDifficultyRouting(unittest.TestCase):
         return contextlib.ExitStack(), patches
 
     def _make_with_provider_anthropic(self, difficulty, *, extra_patches=None):
-        """Call make_orchestrator with provider forced to anthropic."""
+        """Call make_orchestrator with provider forced to anthropic + paid orchestration ENABLED.
+        These tests assert the paid-routing tiers (Haiku/Sonnet/Opus), so PAID_ORCH_ENABLED must be
+        on; the paid-disabled routing is covered by TestPaidOrchDisabled."""
+        import contextlib
         patches = [
             patch("config.ORCHESTRATOR_PROVIDER", "anthropic"),
             patch("orchestrator.ANTHROPIC_API_KEY", "sk-test"),
+            patch("orchestrator.PAID_ORCH_ENABLED", True),
             patch("orchestrator.ORCHESTRATOR_PROMPT_PATH",
                   MagicMock(read_text=MagicMock(return_value="sys"))),
         ] + (extra_patches or [])
-        with patches[0], patches[1], patches[2]:
-            if len(patches) > 3:
-                with patches[3]:
-                    return self._o.make_orchestrator(difficulty=difficulty)
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
             return self._o.make_orchestrator(difficulty=difficulty)
 
     def test_none_difficulty_returns_plain_orchestrator(self):
@@ -2660,6 +2671,207 @@ class TestDifficultyRouting(unittest.TestCase):
             orch = self._make_with_provider_anthropic("medium")
         self.assertIsInstance(orch, self._o.CompositeOrchestrator)
         self.assertIsInstance(orch._primary, self._o.CodexOrchestrator)
+
+
+class TestPaidOrchDisabled(unittest.TestCase):
+    """PAID_ORCH_ENABLED kill-switch + BadRequestError safety net (the 2026-06-19 D4 crash fix).
+
+    D4 crashed with an UNCAUGHT anthropic.BadRequestError 'credit balance too low' when the free
+    OAuth orchestrator rungs exhausted and the chain fell through to the metered Anthropic rung on a
+    $0 account. Two guards prevent it: (1) PAID_ORCH_ENABLED=false refuses the metered call BEFORE it
+    is made and keeps paid rungs out of the chains; (2) any BadRequestError that does occur (paid on,
+    but the account rejects) is caught and converted to a fall-through RuntimeError instead of crashing.
+    """
+
+    def setUp(self):
+        import orchestrator as o
+        import worker as w
+        self._o = o
+        self._w = w
+        w._codex_disabled = False
+        # Reset the per-run paid-orchestrator budget so tests that DO take the paid path
+        # (PAID_ORCH_ENABLED=True) are not order-dependent on reservations leaked by earlier
+        # test classes (_paid_orch_calls is module-global, capped by MAX_PAID_ORCH_CALLS).
+        w.reset_paid_budget()
+
+    def _make_orch(self):
+        with patch("anthropic.Anthropic"):
+            from orchestrator import Orchestrator
+        orch = Orchestrator.__new__(Orchestrator)
+        orch._client = MagicMock()
+        orch._system_prompt = "sys"
+        orch._pinned_model = None
+        return orch
+
+    def _make_md(self, difficulty, *, oauth, extra_patches=None):
+        """make_orchestrator(anthropic, difficulty) with PAID_ORCH_ENABLED forced OFF."""
+        import contextlib
+        patches = [
+            patch("config.ORCHESTRATOR_PROVIDER", "anthropic"),
+            patch("orchestrator.ANTHROPIC_API_KEY", "sk-test"),
+            patch("orchestrator.PAID_ORCH_ENABLED", False),
+            patch("orchestrator.ORCHESTRATOR_PROMPT_PATH",
+                  MagicMock(read_text=MagicMock(return_value="sys"))),
+            patch("worker._oauth_enabled", return_value=oauth),
+        ] + (extra_patches or [])
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            return self._o.make_orchestrator(difficulty=difficulty)
+
+    # ── (1) refuse-at-call: disabled paid rung never touches the API ───────────
+    def test_disabled_refuses_before_api_call(self):
+        orch = self._make_orch()
+        with patch("orchestrator.PAID_ORCH_ENABLED", False):
+            with patch("orchestrator.record_role_event"):
+                with self.assertRaises(RuntimeError) as cm:
+                    orch.call({"system_state": "INIT"}, max_retries=2)
+        self.assertIn("PAID_ORCH_ENABLED", str(cm.exception))
+        orch._client.messages.create.assert_not_called()
+
+    # ── (2) BadRequestError (paid ON) is caught, not retried, converted to RuntimeError ──
+    def test_badrequest_credit_balance_converted_not_crashed(self):
+        import anthropic as ant
+        orch = self._make_orch()
+        orch._client.messages.create.side_effect = ant.BadRequestError(
+            message="Your credit balance is too low to access the Anthropic API.",
+            response=MagicMock(status_code=400), body={})
+        with patch("orchestrator.PAID_ORCH_ENABLED", True):
+            with patch("time.sleep") as mock_sleep, patch("orchestrator.record_role_event"):
+                # Explicit: a raw BadRequestError must NEVER escape — it must be converted.
+                try:
+                    orch.call({"system_state": "INIT"}, max_retries=2)
+                    self.fail("expected RuntimeError")
+                except ant.BadRequestError:
+                    self.fail("raw anthropic.BadRequestError escaped Orchestrator.call")
+                except RuntimeError:
+                    pass
+        # NON-retryable: exactly one API call, no backoff sleep.
+        self.assertEqual(orch._client.messages.create.call_count, 1,
+                         "a 400 credit-balance error must NOT be retried")
+        mock_sleep.assert_not_called()
+
+    # ── (2b) any OTHER anthropic API error (e.g. 401 auth) is also caught, not crashed ──
+    def test_other_api_error_converted_not_crashed(self):
+        import anthropic as ant
+        orch = self._make_orch()
+        orch._client.messages.create.side_effect = ant.AuthenticationError(
+            message="invalid x-api-key",
+            response=MagicMock(status_code=401), body={})
+        with patch("orchestrator.PAID_ORCH_ENABLED", True):
+            with patch("time.sleep"), patch("orchestrator.record_role_event"):
+                with self.assertRaises(RuntimeError):
+                    orch.call({"system_state": "INIT"}, max_retries=2)
+        # Non-retryable: converted to RuntimeError, no raw anthropic error escapes.
+        self.assertEqual(orch._client.messages.create.call_count, 1,
+                         "a non-transient API error must NOT be retried")
+
+    # ── (3) a paid primary that refuses lets a CompositeOrchestrator fall through ──
+    def test_composite_falls_through_when_paid_primary_refuses(self):
+        from orchestrator import CompositeOrchestrator
+        paid = self._make_orch()  # real Orchestrator → refuse-at-call raises RuntimeError
+        free = MagicMock()
+        free.call.return_value = VALID_FORMAT2
+        c = CompositeOrchestrator(paid, [free])
+        with patch("orchestrator.PAID_ORCH_ENABLED", False):
+            with patch("orchestrator.record_role_event"), patch("orchestrator.console"):
+                result = c.call({"system_state": "INIT"})
+        self.assertEqual(result, VALID_FORMAT2)
+        paid._client.messages.create.assert_not_called()
+        free.call.assert_called_once()
+
+    # ── (4) make_orchestrator: paid disabled → free-first when an OAuth rung exists ──
+    def test_md_none_disabled_with_oauth_is_free_first(self):
+        orch = self._make_md(None, oauth=True)
+        self.assertIsInstance(orch, self._o.CompositeOrchestrator)
+        self.assertIsInstance(orch._primary, self._o.CodexOrchestrator)
+
+    def test_md_complex_disabled_has_no_paid_rung(self):
+        orch = self._make_md("complex", oauth=True)
+        self.assertIsInstance(orch, self._o.CompositeOrchestrator)
+        # No paid Anthropic Orchestrator anywhere in the chain when paid is disabled.
+        rungs = [orch._primary] + list(orch._emergency_chain)
+        self.assertFalse(any(isinstance(r, self._o.Orchestrator) for r in rungs),
+                         "no paid Orchestrator rung may appear when PAID_ORCH_ENABLED=false")
+
+    def test_md_simple_disabled_with_oauth_is_free_first(self):
+        orch = self._make_md("simple", oauth=True)
+        self.assertIsInstance(orch, (self._o.CompositeOrchestrator,
+                                     self._o.CodexOrchestrator, self._o.ClaudeCliOrchestrator))
+        rungs = ([orch._primary] + list(orch._emergency_chain)
+                 if isinstance(orch, self._o.CompositeOrchestrator) else [orch])
+        self.assertFalse(any(isinstance(r, self._o.Orchestrator) for r in rungs),
+                         "simple+disabled must have no paid Orchestrator rung")
+
+    def test_md_medium_disabled_with_oauth_is_free_first(self):
+        orch = self._make_md("medium", oauth=True)
+        self.assertIsInstance(orch, self._o.CompositeOrchestrator)
+        self.assertIsInstance(orch._primary, self._o.CodexOrchestrator)
+        rungs = [orch._primary] + list(orch._emergency_chain)
+        self.assertFalse(any(isinstance(r, self._o.Orchestrator) for r in rungs),
+                         "medium+disabled must have no paid Orchestrator rung")
+
+    def test_emergency_chain_has_no_paid_rung_when_disabled(self):
+        """Even with a key present + emergency provider=anthropic, paid rungs are omitted when
+        PAID_ORCH_ENABLED=False (guards orchestrator.py _emergency_chain directly)."""
+        with patch("orchestrator.PAID_ORCH_ENABLED", False), \
+             patch("orchestrator.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("orchestrator.ORCHESTRATOR_EMERGENCY_PROVIDER", "anthropic"), \
+             patch("worker._oauth_enabled", return_value=True):
+            chain = self._o._emergency_chain()
+        self.assertTrue(chain, "free rungs should still populate the chain")
+        self.assertFalse(any(isinstance(r, self._o.Orchestrator) for r in chain),
+                         "no paid Orchestrator rung may appear in the emergency chain when paid is off")
+
+    # ── (5) make_orchestrator: paid disabled AND no free rung → fail CLOSED (no bare paid) ──
+    def test_md_none_disabled_no_oauth_fails_closed(self):
+        orch = self._make_md(None, oauth=False)
+        self.assertIsInstance(orch, self._o._FailClosedOrchestrator)
+
+    def test_md_complex_disabled_no_oauth_fails_closed(self):
+        orch = self._make_md("complex", oauth=False)
+        self.assertIsInstance(orch, self._o._FailClosedOrchestrator)
+
+    def test_md_simple_disabled_no_oauth_fails_closed(self):
+        orch = self._make_md("simple", oauth=False)
+        self.assertIsInstance(orch, self._o._FailClosedOrchestrator)
+
+    def test_md_medium_disabled_no_oauth_fails_closed(self):
+        orch = self._make_md("medium", oauth=False)
+        self.assertIsInstance(orch, self._o._FailClosedOrchestrator)
+
+    # ── (6) the fail-closed rung raises a clear RuntimeError (→ failure handoff path) ──
+    def test_failclosed_orchestrator_raises_runtime_error(self):
+        fc = self._o._FailClosedOrchestrator("no rung for test")
+        with self.assertRaises(RuntimeError) as cm:
+            fc.call({"system_state": "INIT"})
+        self.assertIn("no rung for test", str(cm.exception))
+
+    # ── (7) END-TO-END (the D4 regression): run_project fails CLOSED with a HANDOFF.md ──
+    def test_run_project_fails_closed_with_handoff_when_no_usable_rung(self):
+        """The whole point of the fix. When make_orchestrator yields a _FailClosedOrchestrator
+        (paid disabled + no free rung) — or equally a real Orchestrator that refuses-at-call — the
+        WRAPPER run_project must terminate by writing a failure HANDOFF.md and re-raising, NOT crash
+        with a raw traceback and an empty project dir (the D4 failure)."""
+        import main, tempfile
+        fail_closed = self._o._FailClosedOrchestrator("no usable rung for e2e test")
+        with patch.object(main, "_start_dashboard"), \
+             patch.object(main, "sw"), \
+             patch.object(main, "console"), \
+             patch.object(main, "CreativeDirector") as _cd, \
+             patch.object(main, "TechnicalArchitect") as _ta, \
+             patch.object(main, "get_stack_lessons", return_value=[]), \
+             patch.object(main, "make_orchestrator", return_value=fail_closed):
+            _cd.return_value.interpret.return_value = {"scale": "mvp"}
+            _ta.return_value.review.return_value = {}
+            with tempfile.TemporaryDirectory() as d:
+                with self.assertRaises(RuntimeError):
+                    main.run_project("a tiny tool", Path(d), depth=0,
+                                     manual=False, auto_accept=True)
+                handoff = Path(d) / "HANDOFF.md"
+                self.assertTrue(handoff.exists(),
+                                "run_project must write a failure HANDOFF.md, not leave an empty dir")
+                self.assertIn("PIPELINE FAILURE", handoff.read_text(encoding="utf-8"))
 
 
 class TestPerRoleCodexSubCap(unittest.TestCase):
@@ -3741,6 +3953,7 @@ if __name__ == "__main__":
         TestOpenAICompatOrchestrator,
         TestAnthropicOrchestrator,
         TestCompositeOrchestrator,
+        TestPaidOrchDisabled,
         TestRoutedRung,
         TestPhase4IntegrationRouting,
         TestExecuteTask,

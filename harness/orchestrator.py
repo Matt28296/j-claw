@@ -13,6 +13,7 @@ from config import (
     GOOGLE_API_KEY, GEMINI_ORCHESTRATOR_MODEL,
     ORCHESTRATOR_EMERGENCY_PROVIDER, EMERGENCY_ORCHESTRATOR_MODEL,
     GEMINI_QUOTA_FAILFAST, CODEX_PLANNING_RESERVE, OPUS_MODEL, HAIKU_MODEL,
+    PAID_ORCH_ENABLED,
 )
 from validator import validate_response, OrchestratorOutputError
 from cache_telemetry import log_cache_usage
@@ -162,6 +163,19 @@ class Orchestrator:
         user_message = json.dumps(payload)
         last_error: Exception | None = None
 
+        # Master kill-switch for the metered Anthropic rung. When paid orchestration is disabled
+        # (default on a $0-credit box — see config.PAID_ORCH_ENABLED) refuse BEFORE spending the
+        # call: raise RuntimeError so any wrapping CompositeOrchestrator falls through to the next
+        # free rung, and a bare/last rung fails CLOSED with a clear message + failure handoff rather
+        # than crashing on the inevitable 400 "credit balance too low" (the 2026-06-19 D4 crash).
+        if not PAID_ORCH_ENABLED:
+            record_role_event(f"orch:{state}", provider="anthropic", model=self._pinned_model or "paid",
+                              success=False, latency_s=0.0)
+            raise RuntimeError(
+                f"Paid orchestrator disabled (PAID_ORCH_ENABLED=false) — refusing metered Anthropic "
+                f"orchestration (orch:{state}). Relying on free OAuth rungs; set PAID_ORCH_ENABLED=true "
+                f"only on a box whose ANTHROPIC_API_KEY account has credit.")
+
         for attempt in range(max_retries + 1):
             # Per-build cost circuit-breaker: refuse before spending if the ceiling
             # was crossed. Placed BEFORE the try so it fails closed (propagates out)
@@ -229,6 +243,35 @@ class Orchestrator:
                 )
                 if attempt < max_retries:
                     time.sleep(wait)
+
+            except anthropic.BadRequestError as exc:
+                # 400s are NON-retryable and NON-transient: the dominant case is "credit balance too
+                # low" (a $0 metered account), but also malformed-request bugs. Retrying just re-hits
+                # the same wall, and letting it propagate crashes the whole build (the 2026-06-19 D4
+                # failure). Record the failed attempt and convert to RuntimeError so a wrapping
+                # CompositeOrchestrator falls through to the next free rung and a bare/last rung fails
+                # CLOSED (failure handoff) instead of dumping a raw anthropic traceback.
+                record_role_event(f"orch:{state}", provider="anthropic", model=_model,
+                                  success=False, latency_s=time.monotonic() - _t0)
+                raise RuntimeError(
+                    f"Paid orchestrator rung unavailable (orch:{state}): {type(exc).__name__}: {exc}"
+                ) from exc
+
+            except anthropic.APIError as exc:
+                # Catch-all for every OTHER anthropic API error that is NOT one of the transient,
+                # already-retried families above (APITimeout / RateLimit / InternalServer / APIConnection)
+                # and not the BadRequest credit-balance case. This covers AuthenticationError (401),
+                # PermissionDeniedError (403), NotFoundError (404), UnprocessableEntityError (422), bare
+                # APIStatusError, etc. — all non-retryable here. Without this, such an error would escape
+                # Orchestrator.call as a raw anthropic.* exception (the same crash shape as the D4
+                # BadRequestError) and bypass CompositeOrchestrator (which only catches RuntimeError from
+                # the primary). Convert to RuntimeError so the chain falls through / the build fails closed.
+                # MUST stay AFTER the specific handlers — anthropic.APIError is their common base class.
+                record_role_event(f"orch:{state}", provider="anthropic", model=_model,
+                                  success=False, latency_s=time.monotonic() - _t0)
+                raise RuntimeError(
+                    f"Paid orchestrator rung unavailable (orch:{state}): {type(exc).__name__}: {exc}"
+                ) from exc
 
             except (json.JSONDecodeError, OrchestratorOutputError) as exc:
                 last_error = exc
@@ -557,11 +600,48 @@ def _emergency_chain() -> list:
             chain.append(ClaudeCliOrchestrator())
     except Exception:  # noqa: BLE001 — worker import/flag issues must not break orchestrator setup
         pass
-    if ORCHESTRATOR_EMERGENCY_PROVIDER == "anthropic" and ANTHROPIC_API_KEY:
+    if ORCHESTRATOR_EMERGENCY_PROVIDER == "anthropic" and ANTHROPIC_API_KEY and PAID_ORCH_ENABLED:
         # Sonnet first (the existing emergency tier), then Opus as the costliest last resort.
+        # Gated by PAID_ORCH_ENABLED: on a $0-credit box the metered rungs would only refuse-at-call,
+        # so omit them entirely and let the chain be free-only (fails closed when free rungs exhaust).
         chain.append(Orchestrator(model=EMERGENCY_ORCHESTRATOR_MODEL))
         chain.append(Orchestrator(model=OPUS_MODEL))
     return chain
+
+
+class _FailClosedOrchestrator:
+    """A terminal no-op rung returned by make_orchestrator when NO usable rung exists — i.e. paid
+    orchestration is disabled (PAID_ORCH_ENABLED=false) AND no free OAuth rung is enabled. Its .call()
+    raises RuntimeError so the build fails CLOSED with a clear, actionable message and the standard
+    failure-handoff path (main._write_failure_handoff) — never a raw anthropic credit-balance traceback.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self._reason = reason
+
+    def call(self, payload: dict, max_retries: int = 2) -> dict:
+        raise RuntimeError(f"No usable orchestrator rung: {self._reason}")
+
+
+def _free_only_or_failclosed(reason: str):
+    """Build a free-OAuth-only orchestrator (Codex $0 → Claude Max $0), or a _FailClosedOrchestrator
+    when no free rung is enabled. Used by the paid-disabled fall-throughs in make_orchestrator so the
+    None/simple/medium/complex paths still orchestrate on the subscription rungs and otherwise fail
+    closed honestly instead of returning a bare paid Orchestrator that can only refuse-at-call."""
+    free: list = []
+    try:
+        import worker
+        if worker._oauth_enabled("codex"):
+            free.append(CodexOrchestrator())
+        if worker._oauth_enabled("claude_cli"):
+            free.append(ClaudeCliOrchestrator())
+    except Exception:  # noqa: BLE001 — worker import/flag issues must not break orchestrator setup
+        pass
+    if not free:
+        return _FailClosedOrchestrator(reason)
+    if len(free) == 1:
+        return free[0]
+    return CompositeOrchestrator(free[0], free[1:])
 
 
 def make_orchestrator(provider: str | None = None, *, manual: bool = False,
@@ -598,11 +678,15 @@ def make_orchestrator(provider: str | None = None, *, manual: bool = False,
     if difficulty == "simple":
         # Prototype builds: Haiku is sufficient for JSON orchestration at this scale.
         # Emergency chain (Codex $0 → Sonnet → Opus) handles Haiku outages.
-        primary = Orchestrator(model=HAIKU_MODEL)
-        chain = _emergency_chain()
-        if chain:
-            return CompositeOrchestrator(primary, chain)
-        return primary
+        if PAID_ORCH_ENABLED and ANTHROPIC_API_KEY:
+            primary = Orchestrator(model=HAIKU_MODEL)
+            chain = _emergency_chain()
+            if chain:
+                return CompositeOrchestrator(primary, chain)
+            return primary
+        # Paid disabled: drop the paid Haiku primary and lead with the free OAuth rungs.
+        return _free_only_or_failclosed(
+            "simple build: paid orchestrator disabled (PAID_ORCH_ENABLED=false) and no free OAuth rung enabled")
 
     if difficulty == "medium":
         # MVP builds: free-first ($0 OAuth) primary with a paid Anthropic backstop. Mirrors the
@@ -617,13 +701,17 @@ def make_orchestrator(provider: str | None = None, *, manual: bool = False,
             if worker._oauth_enabled("claude_cli"):
                 free_rungs.append(ClaudeCliOrchestrator())
             if free_rungs:
-                paid_fallback = [Orchestrator(model=EMERGENCY_ORCHESTRATOR_MODEL),
-                                 Orchestrator(model=OPUS_MODEL)]
+                paid_fallback = ([Orchestrator(model=EMERGENCY_ORCHESTRATOR_MODEL),
+                                  Orchestrator(model=OPUS_MODEL)]
+                                 if (PAID_ORCH_ENABLED and ANTHROPIC_API_KEY) else [])
                 return CompositeOrchestrator(free_rungs[0], free_rungs[1:] + paid_fallback)
         except Exception:  # noqa: BLE001 — worker import issues fall through to Sonnet
             pass
-        # No $0 OAuth rung enabled: fall through to Sonnet (same as None but explicit)
-        return Orchestrator()
+        # No $0 OAuth rung enabled: fall through to paid Sonnet, or fail closed if paid is disabled.
+        if PAID_ORCH_ENABLED and ANTHROPIC_API_KEY:
+            return Orchestrator()
+        return _free_only_or_failclosed(
+            "medium build: paid orchestrator disabled (PAID_ORCH_ENABLED=false) and no free OAuth rung enabled")
 
     if difficulty == "complex":
         # Production builds: maximum capability, but STILL free-first (operator directive
@@ -640,17 +728,26 @@ def make_orchestrator(provider: str | None = None, *, manual: bool = False,
                 free_rungs.append(ClaudeCliOrchestrator())
             if free_rungs:
                 paid_fallback = ([Orchestrator(model=ORCHESTRATOR_MODEL),
-                                  Orchestrator(model=OPUS_MODEL)] if ANTHROPIC_API_KEY else [])
+                                  Orchestrator(model=OPUS_MODEL)]
+                                 if (PAID_ORCH_ENABLED and ANTHROPIC_API_KEY) else [])
                 return CompositeOrchestrator(free_rungs[0], free_rungs[1:] + paid_fallback)
         except Exception:  # noqa: BLE001 — worker import issues fall through to the paid ladder
             pass
-        if ANTHROPIC_API_KEY:
+        if PAID_ORCH_ENABLED and ANTHROPIC_API_KEY:
             sonnet = Orchestrator(model=ORCHESTRATOR_MODEL)
             opus_fallback = Orchestrator(model=OPUS_MODEL)
             return CompositeOrchestrator(sonnet, [opus_fallback])
-        return Orchestrator()
+        return _free_only_or_failclosed(
+            "complex build: paid orchestrator disabled (PAID_ORCH_ENABLED=false) and no free OAuth rung enabled")
 
-    return Orchestrator()  # anthropic default (difficulty=None)
+    # anthropic default (difficulty=None): paid Sonnet when enabled, else free-first / fail closed.
+    # The legacy bare Orchestrator() here was paid-only — a latent bypass of available $0 rungs; the
+    # paid-disabled branch now routes the CONTINUE path (_continue_run calls make_orchestrator()) and
+    # any None-difficulty caller onto the free OAuth rungs.
+    if PAID_ORCH_ENABLED and ANTHROPIC_API_KEY:
+        return Orchestrator()
+    return _free_only_or_failclosed(
+        "default orchestrator: paid orchestrator disabled (PAID_ORCH_ENABLED=false) and no free OAuth rung enabled")
 
 
 def _parse_retry_delay(exc: Exception, attempt: int) -> int:
