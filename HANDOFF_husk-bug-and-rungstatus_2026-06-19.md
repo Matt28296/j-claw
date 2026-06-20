@@ -1,10 +1,40 @@
 # Session Handoff — Reliability Hardening Wave (2026-06-19, updated EOD)
 
-Branch: `run/moba-monitored`. Operator: Matthew. **PUSHED & IN SYNC with `origin/run/moba-monitored`** (`github.com/Matt28296/j-claw`) — head `eaf654e`, `0 0` vs origin, working tree clean, suite **221 green** (skipped=1). (The earlier "UNCOMMITTED Wave 4" caveat is superseded — Wave 4 shipped as `236965d`.)
+Branch: `run/moba-monitored`. Operator: Matthew. Repo `github.com/Matt28296/j-claw`. **`origin/main` and `origin/run/moba-monitored` are both at `2eb2c05`** (Waves 1–5 are ON MAIN). **Local is 1 ahead = `33b451a` (free-CLI planning tier) — committed but NOT YET PUSHED**, and this handoff + README have uncommitted edits (push pending operator OK). Canonical suite **275 OK** (skipped=1) + worktree_manager 24 + standalone wave scripts.
 
 ---
 
-## ⏩⏩⏩⏩⏩ LATEST (2026-06-19, late night) — D3 ran (OAuth-bypass bug found+FIXED), D4 re-run proving it, + FORCE_FORMAT5 knob + memory_lint shipped
+## ⏩⏩⏩⏩⏩⏩ LATEST (2026-06-19, deep night) — Wave 5 hardening DONE+MERGED, free-CLI planning gap fixed, FORMAT-5 HK2 smoke RUNNING
+
+Head: **`33b451a`** (`0 0` vs origin; main == branch). Commits since `eaf654e`:
+`d750508` (PAID_ORCH_ENABLED kill-switch + D4 crash catch) → `f15cbc0` (3 metered-orch leaks gated) →
+`2eb2c05` (**Wave 5**) → `33b451a` (**free-CLI planning tier**).
+
+**Wave 5 — pre-MOBA hardening (`2eb2c05`), 3-wave orchestration (build → adversarial review → integration), disjoint file lanes, no worktree isolation:**
+- **A** (`main.py`, `scheduler.py`): Scheduler is now a context manager → SIGINT / crash / `BuildCostCeilingExceeded` can't leave orphaned worktrees; `memory_lint` auto-wired warn-only on `--continue` + each FORMAT-5 sub-project start (doubly guarded, never blocks).
+- **B** (`state_writer.py`): `_write_json_atomic` retries `os.replace` with backoff (~0.18s) on Windows `[WinError 5]` under concurrent writers; degrades gracefully + **warns on exhaustion** (diagnosability).
+- **C** (`worktree_manager.py`): `_cleanup_worktree` + `create()` stale-dir both use an `onerror` chmod-retry handler (read-only git objects actually deleted on Windows); removed dead `merge_and_remove` (no live caller; husk fix uses copy-then-remove).
+- **D** (`test_wave5_dryrun.py`): zero-network proof that `FORCE_FORMAT5=1` routes to the decomposing path and aborts honestly on a stubborn flat spec.
+- Review wave: all 4 lanes **PASS, no blockers** (2 substantive nits applied by hand: B warn-on-exhaustion, C `create()` handler). Integration: all wired into the canonical runner, **275 OK**. Committed + **merged to main (fast-forward)**.
+
+**Free-CLI planning gap — FIXED (`33b451a`).** Found live during the smoke: `planning_call` went Codex (free) → Anthropic (paid), skipping the existing `_claude_cli_tier`. So when Codex latched off, the Creative Director jumped straight to the metered Anthropic API (observed `400 credit balance too low` on the $0 box) instead of the free Claude Max CLI. Inserted **Tier 2 = `_claude_cli_tier`** between Codex and the paid tiers — both $0 rungs are now exhausted before any metered call. +2 regression tests (`TestPlanningCall` 8/8).
+
+**FORMAT-5 HK2 smoke — COMPLETED (supervised, $0-enforced), HK2 INCONCLUSIVE / blocked on free-tier capacity.** Ran `FORCE_FORMAT5=1 MAX_PAID_WORKER_CALLS=0 PAID_ORCH_ENABLED=false` on intent "URL shortener: FastAPI backend + React/TS frontend + Python CLI" → `projects/_fmt5_smoke` (gitignored; dir since removed, log `harness/_fmt5_smoke.log` is the surviving record).
+- ✅ **Decomposition TRIGGERED live** ("Oversize project — decomposing … must decompose via FORMAT 5") into 3 sub-projects (`backend_api`, `frontend_react`, `cli_client`) — first real proof of FORCE_FORMAT5 on the decomposing path (beyond the dry-run test).
+- ✅ **Fail-closed proven.** With paid capped at $0 and both free tiers down, the pipeline spent **$0** and crashed honestly rather than reaching for the metered key. The cost guardrails worked as designed.
+- ❌ **All 3 sub-projects CRASHED at spec generation** — every free orchestrator/planning tier was unavailable: (a) **Codex latched off** (OAuth/quota exhausted), and (b) **ClaudeCliOrchestrator failed validation: `claude -p exited 1`** — note the captured envelope shows `terminal_reason":"completed"` with empty `iterations:[]`/`modelUsage:{}`, i.e. the CLI process ran but returned no usable spec and/or the validator rejected it. Anthropic paid disabled → "credit balance too low" on the $0 box. CD was *skipped* (planning_call exhausted all tiers) for the same reason.
+- ⏳ **HK2 NOT PROVEN** — builds died at spec generation before producing real code/`api_contracts.md`, so there was nothing to inspect for husk survival. Output dir is gitignored + now gone, so no post-hoc check possible. HK2 remains open; needs a re-run where at least one free orchestrator tier actually plans.
+- 🔴 **NEW BLOCKER surfaced: the free-first chain has no working rung right now.** `33b451a` correctly *inserts* the Claude Max CLI tier, but the `ClaudeCliOrchestrator` (`claude -p`) rung itself fails validation in this env (exit 1 despite terminal_reason=completed). Combined with Codex latched, any $0-enforced build currently crashes at planning/spec. This — not reliability code — is what blocks HK2/MOBA.
+
+**NEXT (operator decision needed):**
+1. **Unblock a free orchestrator tier** — either (a) diagnose/fix `ClaudeCliOrchestrator` `claude -p exited 1` (likely invocation/output-format or validator mismatch — the CLI completes but returns empty content), or (b) wait for Codex OAuth quota to reset, then re-run the $0 smoke.
+2. **OR** authorize a *budget-capped paid* run (`PAID_ORCH_ENABLED=true` + Anthropic credits) to prove HK2 once on the decomposing path — costs money, needs go-ahead.
+3. Once a build actually generates specs + code → confirm HK2 (files survive in EVERY sub-project dir + `api_contracts.md` present+non-empty) → MOBA unblocked solo+supervised. HK1 concurrent-pair proof only needed before allowing two concurrent builds.
+4. Housekeeping: `33b451a` (free-CLI planning tier + tests) is committed but **NOT pushed**; this handoff + README edits are uncommitted. Push pending operator OK. Plan: `~/.claude/plans/what-is-the-steps-virtual-sketch.md`.
+
+---
+
+## ⏩⏩⏩⏩⏩ EARLIER (2026-06-19, late night) — D3 ran (OAuth-bypass bug found+FIXED), D4 re-run proving it, + FORCE_FORMAT5 knob + memory_lint shipped
 
 Head of branch: **`eaf654e`** (`0 0` vs origin, tree clean, suite **221 green**). Three commits since `85a9e81`: **`38baff1`** (OAuth fix), **`3498b2f`** (FORCE_FORMAT5), **`eaf654e`** (memory_lint). Supersedes the "NEXT: D3" plan below.
 

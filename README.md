@@ -2,11 +2,11 @@
 
 J-Claw is a fully autonomous local-first AI software factory. Describe what you want in plain English — a game, app, website, or film — and the pipeline interprets the creative intent, designs the architecture, plans the full build, writes all the code and media, verifies every output, self-heals any issues, and delivers a production-ready artifact with no human in the loop.
 
-Four layers of intelligence (each with a verified fallback path):
-- **Creative Director** (Codex-first — free OAuth; falls back to Anthropic Sonnet→Opus) — interprets intent, determines output type, produces a creative brief *(WHAT)*
-- **Technical Architect** (Codex-first — free OAuth; falls back to Anthropic Sonnet→Opus) — chooses stack, file structure, ADRs, seeds persistent project memory *(HOW)*
-- **Orchestrator** (Gemini 2.5 Flash, free tier — falls back flash→flash-lite with backoff; Anthropic Sonnet available as provider) — translates spec into a task DAG, drives the pipeline, self-heals
-- **Worker** (local-first ladder: `qwen3:8b → deepseek-coder-v2:16b` → two $0 flat-rate OAuth rungs `grok-build → codex::gpt-5.5` → `claude-sonnet-4-6` then `claude-opus-4-8` as a budget-capped last resort) — writes all code and runs all generation tasks, local-first; the free OAuth tiers (Grok via SuperGrok, Codex via ChatGPT) absorb escalations before any Anthropic dollars are spent
+Four layers of intelligence (each with a verified, free-first fallback path — both $0 OAuth tiers are exhausted before any metered Anthropic call):
+- **Creative Director** (free-first: Codex → Claude Max CLI, both $0 OAuth; metered Anthropic Sonnet→Opus only as a budget-capped last resort) — interprets intent, determines output type, produces a creative brief *(WHAT)*
+- **Technical Architect** (same free-first ladder: Codex → Claude Max CLI → metered Anthropic last) — chooses stack, file structure, ADRs, seeds persistent project memory *(HOW)*
+- **Orchestrator** (`ORCHESTRATOR_PROVIDER=anthropic`, difficulty-routed; free-first emergency chain Codex → Claude Max CLI, with metered Anthropic Sonnet→Opus as a budget-capped last resort gated by the `PAID_ORCH_ENABLED` kill-switch) — translates spec into a task DAG, drives the pipeline, self-heals
+- **Worker** (local-first ladder: `qwen3:8b → deepseek-coder-v2:16b` → three $0 flat-rate OAuth rungs `grok-build → codex::gpt-5.5 → claude (Max CLI)` → `claude-sonnet-4-6` then `claude-opus-4-8` as a budget-capped last resort, capped by `MAX_PAID_WORKER_CALLS`) — writes all code and runs all generation tasks, local-first; the free OAuth tiers (Grok via SuperGrok, Codex via ChatGPT, Claude via Max subscription) absorb escalations before any Anthropic dollars are spent
 
 ---
 
@@ -25,8 +25,9 @@ Four layers of intelligence (each with a verified fallback path):
     Seeds project_memory/ with architecture.md, coding_standards.md,
     api_contracts.md, known_issues.md, decision_log.jsonl, ADR files
             │
-            ▼  INIT (Orchestrator — Gemini 2.5 Flash, free tier)
+            ▼  INIT (Orchestrator — free-first: Codex → Claude Max CLI → metered Anthropic last)
     Reads CREATIVE_BRIEF + TECH_SPEC → generates project spec (FORMAT 1)
+            │  oversized full-stack/game intents decompose into sub-projects (FORMAT 5)
             │  (auto-accepted with --yes, or you review and revise)
             ▼  SPEC_ACCEPTED
     Generates task DAG (FORMAT 2) — up to 75 tasks
@@ -45,7 +46,7 @@ Four layers of intelligence (each with a verified fallback path):
     MEMORY VALIDATOR checks version + operation rules → PASS/WARN/REJECT
     PASS/WARN → ProjectMemory.apply_patch() → increment version
             │
-            ▼  Final Review (Claude Haiku, fails closed)
+            ▼  Final Review (CLI-first: free Claude Max OAuth `claude -p`; metered API only as fallback when paid is enabled; fails closed)
     Reads all outputs — code stubs, broken imports, media quality
             │
             ├─ VERDICT: PASS → write HANDOFF.md, done
