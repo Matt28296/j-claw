@@ -112,29 +112,61 @@ two `VERDICT: PASS` units (`_verify_tipcalc`, `_fmt5_smoke_run1/cli_tool`); 64 t
 (57 `missing_output_file` from crashed builds, 5 `no_pass_review`, 2 `empty_output`). `requirements.txt`
 confirmed un-polluted.
 
-## 5. Deferred (not built here)
-- **Phase 1B — `harness/node_agent.py`** (runs on the 3060 Ti): CLI `running|offline|train|status|
-  heartbeat`; the hardened train sequence is `DRAINING` → wait inflight→0 → **stop Ollama serving**
-  (not just `keep_alive:0`) → `TRAINING` → run `TRAINING_COMMAND` → `EXPORTING`→`RETURNING`→`RUNNING`
-  only after a live generation probe; `TRAINING_FAILED` keeps the node out of routing until an explicit
-  `running`.
-- **LoRA pipeline (`training/` at repo root):** `train_worker.py` (Unsloth QLoRA, 8 GB defaults, WSL2),
-  `eval_worker.py` (comparative A/B + verify-in-disposable-workspace + "no paid provider called"
-  invariant), `promote_worker.py` (`--apply` gate; `PROMOTION_STATUS.json` with hashes + rollback tag).
+## 5. Eval + Promote (9070 XT) — BUILT (2026-06-24)
 
-## 6. How to run / test (9070 XT)
+The 9070-XT half of the LoRA pipeline now exists, built **high-fidelity** after a deep read of the
+harness (and two Codex second-opinion rounds). Key decision: eval/promote live in **`harness/training/`**
+(NOT the repo-root `training/` the first plan suggested) so eval can reuse the LIVE worker behaviour
+instead of a low-fidelity reimplementation.
+
+- **`harness/evaluation_contract.py` (new)** — a small VERSIONED public surface so eval never imports
+  harness privates directly (refactor-drift guard): `task_from_dataset_row` (fail-closed on missing
+  type/objective/files), `build_worker_prompt` (exact `_SYSTEM_PROMPT + _STACK_PROMPTS[stack]` + the
+  structured user payload), `parse_worker_output` (the real tolerant `_parse_and_validate`, incl.
+  single-file salvage), `verify_task` (`run_verification`; `auto-passed:` ⇒ *skipped*, not *pass*),
+  `ollama_version`, `versions()`. Pinned by golden tests.
+- **`harness/training/eval_worker.py` (new)** — deterministic (temp 0 + seed) local-Ollama generation,
+  **local-host enforced** (no-paid). **Two tiers:** *fast* (default — parse + path-safety + static
+  AST/stub, executes nothing) caps at `smoke_passed`; *deep* (`--deep`) runs the real verifier with
+  **red/green discrimination controls** (`verify(before)` must fail, `verify(before+gold)` must pass,
+  `verify(before+candidate)` is the score). Promotion gates on **effective evidence**:
+  `verify_attempted_n ≥ MIN_ATTEMPTED_N` (20), bounded `skip_rate`, paired per-row wins vs base on
+  *attempted* rows, no parse regression, no per-stack collapse, no regression past budget vs a previous
+  adapter. Verdicts: `no_candidate`/`smoke_passed`/`insufficient_evidence`/`compared{promotable}`. Writes
+  `eval_<ts>.json` with full provenance.
+- **`harness/training/promote_worker.py` (new)** — refuses unless verdict `promotable` AND the eval's
+  `candidate_hash` matches a **canonical** adapter/GGUF hash (allowlist / `ARTIFACT_MANIFEST.json`,
+  ignores Syncthing junk; `.sync_complete` guard). Writes a Modelfile, **prints** `ollama create`, runs
+  it only with `--apply`; `PROMOTION_STATUS.json` carries hashes + provenance + rollback command.
+- **Tests (all green, harness venv):** `test_eval_contract.py` (7 golden) + `test_eval_worker.py`
+  (10 logic). No regression in `test_node_registry.py` (13) / `test_export_dataset.py` (5).
+
+**Why deep eval is gated/opt-in:** it executes candidate-produced code via the real build/test
+toolchain. Run it only in a hardened/hermetic env (network off, no secrets, resource limits). True
+**container isolation** and a frozen **canary eval pack** (so deep eval isn't permanently
+`insufficient_evidence` on the ~1–2-row live corpus) are documented **before-trust** work, not yet built.
+
+## 6. Still deferred — 3060 Ti work (build when that machine is set up)
+- **Phase 1B — `harness/node_agent.py`** (runs on the 3060 Ti): CLI `running|offline|train|status|
+  heartbeat`; hardened train sequence `DRAINING` → wait inflight→0 → **stop Ollama serving** (not just
+  `keep_alive:0`) → `TRAINING` → run `TRAINING_COMMAND` → `EXPORTING`→`RETURNING`→`RUNNING` only after a
+  live generation probe; `TRAINING_FAILED` keeps the node out of routing until an explicit `running`.
+- **`training/train_worker.py`** (Unsloth QLoRA, 8 GB defaults, WSL2) + `training/requirements-wsl.txt`
+  + a trainer `sample_config.json`. Must emit `ARTIFACT_MANIFEST.json` + a `.sync_complete` marker last
+  (so promote can hash a stable identity).
+
+## 7. How to run / test (9070 XT)
 ```powershell
 cd harness
-# Phase 1A routing + no-paid invariant (13 tests)
-python test_node_registry.py
-# Dataset export gates + scrubbing (5 tests) + scrubber self-test
-python test_export_dataset.py
-python -m training.secret_scrub
-# Build the dataset from current verified projects
-python -m training.export_dataset
-# Compile check for everything touched
+python test_node_registry.py        # Phase 1A routing + no-paid invariant (13)
+python test_export_dataset.py        # dataset export gates (5)
+python test_eval_contract.py         # eval contract golden tests (7)
+python test_eval_worker.py           # eval logic tests (10)
+python -m training.export_dataset    # build the dataset from current verified projects
+python -m training.eval_worker --candidate-model jclaw-worker:cand          # fast smoke
 python -m py_compile config.py node_registry.py worker.py state_writer.py scheduler.py `
-  training/secret_scrub.py training/export_dataset.py
+  evaluation_contract.py training/secret_scrub.py training/export_dataset.py `
+  training/eval_worker.py training/promote_worker.py
 ```
 Single-machine default (no sidecar configured) behaves exactly as before: every Ollama call routes to the
 primary (`OLLAMA_HOST`), uncapped.
