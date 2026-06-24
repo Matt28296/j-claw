@@ -1,0 +1,37 @@
+# j-claw trainer dependencies — install ONLY inside WSL2 on the 3060 Ti
+# Never add these to harness/requirements.txt (no ML stack in the harness venv)
+#
+# Install:
+#   pip install -r requirements-wsl.txt
+#
+# Requires: Python 3.11+, CUDA toolkit (WSL), GPU visible (nvidia-smi inside WSL)
+# Disk: ~15 GB for torch + unsloth + models; 8 GB VRAM minimum (3060 Ti fits at rank 8, 4-bit)
+
+# Core ML stack
+torch>=2.1.0
+torchvision
+torchaudio
+
+# Unsloth — fast QLoRA fine-tuning (installs matching torch CUDA kernels)
+# Use the nightly build for latest optimizations:
+#   pip install "unsloth[cu121-torch240] @ git+https://github.com/unslothai/unsloth.git"
+# Or stable:
+unsloth[cu121]>=2024.11
+
+# Hugging Face ecosystem
+transformers>=4.45.0
+datasets>=2.20.0
+peft>=0.12.0
+trl>=0.11.0
+accelerate>=0.34.0
+
+# Quantization backend (required for 4-bit)
+bitsandbytes>=0.43.0
+
+# Tokenization
+sentencepiece>=0.2.0
+protobuf>=3.20.0
+
+# Utilities (pure Python, no CUDA)
+huggingface_hub>=0.24.0
+safetensors>=0.4.0
