@@ -1028,7 +1028,7 @@ def execute_task(
                 continue
         try:
             _t0 = time.monotonic()
-            raw = _call_provider(provider, model, system_prompt, user_message)
+            raw = _call_provider(provider, model, system_prompt, user_message, task=task)
             parsed = _parse_and_validate(raw, task)
             label = model if provider == "ollama" else f"{provider}/{model}"
             parsed["model_used"] = label
@@ -1581,9 +1581,9 @@ def planning_call(
     raise RuntimeError(f"planning_call({role}) exhausted all tiers. Last error: {last_err}") from last_err
 
 
-def _call_provider(provider: str, model: str, system: str, user: str) -> str:
+def _call_provider(provider: str, model: str, system: str, user: str, task=None) -> str:
     if provider == "ollama":
-        return _call_ollama(model, system, user)
+        return _call_ollama(model, system, user, task=task)
     if provider == "anthropic":
         return _call_anthropic(model, system, user)
     if provider == "openrouter":
@@ -1597,26 +1597,49 @@ def _call_provider(provider: str, model: str, system: str, user: str) -> str:
     raise ValueError(f"Unknown worker provider: {provider!r}")
 
 
-def _call_ollama(model: str, system: str, user: str) -> str:
+def _call_ollama(model: str, system: str, user: str, task=None) -> str:
+    """Route the call across the local node pool (Phase 1A). The registry may pick the 3060 Ti
+    sidecar for allowed task types; if that node fails with an INFRASTRUCTURE error we retry once
+    on the primary. Only when EVERY local node fails does the infra error propagate — the caller's
+    no-escalation guard turns that into a hard failure, never a paid-cloud call. (Capability errors,
+    e.g. bad/non-JSON output, propagate immediately so the existing ladder can escalate.)"""
+    import node_registry
+    node_id, base_url = node_registry.choose_ollama_node(task)
+    try:
+        return _ollama_call_on(node_id, base_url, model, system, user)
+    except Exception as exc:  # noqa: BLE001
+        if _is_ollama_unavailable(exc) and node_id != node_registry.primary_id():
+            # Sidecar infra failure — fall back to the primary once before giving up.
+            pid, purl = node_registry.choose_ollama_node(task, force_primary=True)
+            return _ollama_call_on(pid, purl, model, system, user)
+        raise
+
+
+def _ollama_call_on(node_id: str, base_url: str, model: str, system: str, user: str) -> str:
+    """One Ollama chat call against a specific node; releases the node's inflight slot on every path."""
+    import node_registry
     from permissions import observe
-    observe("llm_local", detail=f"ollama chat ({model})")  # roadmap #6: observe-only
-    # Bound the request so a hung local generation can't stall the pipeline indefinitely.
-    client = ollama.Client(host=OLLAMA_HOST, timeout=WORKER_TASK_TIMEOUT)
-    response = client.chat(
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        format="json",
-        options={"temperature": 0.15, "num_predict": 8192},
-    )
-    from cost import record_ollama_usage
-    prompt_toks = getattr(response, "prompt_eval_count", None) or 0
-    eval_toks   = getattr(response, "eval_count", None) or 0
-    record_ollama_usage(prompt_tokens=prompt_toks, eval_tokens=eval_toks)
-    _set_call_tokens(prompt_toks, eval_toks)
-    return response.message.content.strip()
+    observe("llm_local", detail=f"ollama chat ({model} @ {node_id})")  # roadmap #6: observe-only
+    try:
+        # Bound the request so a hung local generation can't stall the pipeline indefinitely.
+        client = ollama.Client(host=base_url, timeout=WORKER_TASK_TIMEOUT)
+        response = client.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            format="json",
+            options={"temperature": 0.15, "num_predict": 8192},
+        )
+        from cost import record_ollama_usage
+        prompt_toks = getattr(response, "prompt_eval_count", None) or 0
+        eval_toks   = getattr(response, "eval_count", None) or 0
+        record_ollama_usage(prompt_tokens=prompt_toks, eval_tokens=eval_toks)
+        _set_call_tokens(prompt_toks, eval_toks)
+        return response.message.content.strip()
+    finally:
+        node_registry.release_ollama_node(node_id)
 
 
 def _call_anthropic(model: str, system: str, user: str, label: str = "worker-esc") -> str:

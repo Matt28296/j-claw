@@ -32,6 +32,7 @@ class StateWriter:
             "active_agent": None,
             "agent_nodes": {},
             "worker_ladder": [],
+            "llm_nodes": {},
             "events": [],
             "output_files": [],
             "started_at": None,
@@ -606,6 +607,27 @@ class StateWriter:
             self._state["worker_ladder"] = ladder_status_snapshot()
         except Exception:  # noqa: BLE001 — telemetry only; never block a state write
             pass
+
+    def refresh_llm_nodes(self) -> None:
+        """Pull a local-LLM node snapshot (node_registry) into mission state for the dashboard.
+        Best-effort: node_registry is lazy-imported and any failure is swallowed — node telemetry
+        must never block a build or a state write. Mirrors _refresh_worker_ladder's contract."""
+        try:
+            import node_registry
+            snapshot = node_registry.node_snapshot()
+        except Exception:  # noqa: BLE001 — telemetry only
+            return
+        self._state["llm_nodes"] = snapshot
+        self._write()
+
+    def on_node_update(self, node_id: str, state: dict) -> None:
+        """Merge a single node's state into llm_nodes (e.g. an explicit push from node_agent)."""
+        try:
+            nodes = self._state.setdefault("llm_nodes", {})
+            nodes[node_id] = {**(nodes.get(node_id) or {}), **(state or {})}
+        except Exception:  # noqa: BLE001
+            return
+        self._write()
 
     def _write(self) -> None:
         self._refresh_worker_ladder()

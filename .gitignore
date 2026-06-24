@@ -4,6 +4,11 @@ projects/
 # Runtime pipeline state
 mission_control.json
 harness/mission_control.json
+
+# Two-machine local-LLM node state + training artifacts (Phase 1A/2)
+node_state/
+harness/node_state/
+jclaw-training/
 cc_state.json
 orchestrator_input.json
 orchestrator_response.json

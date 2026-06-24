@@ -277,6 +277,17 @@ body::before {
 .panel-subtitle { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; font-weight: bold; }
 .ladder-legend { font-size: 8px; color: var(--muted); letter-spacing: .2px; }
 .worker-ladder { display: flex; flex-wrap: wrap; align-items: stretch; gap: 3px; }
+.llm-nodes { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.llm-node { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px;
+  background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.07); font-size: 11px; }
+.llm-node .nd-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.llm-node .nd-name { font-weight: bold; }
+.llm-node .nd-mode { font-size: 10px; letter-spacing: .4px; }
+.llm-node .nd-meta { color: var(--muted); margin-left: auto; font-size: 10px; text-align: right; }
+.llm-node.n-green .nd-dot { background: #3fb950; } .llm-node.n-green .nd-mode { color: #3fb950; }
+.llm-node.n-yellow .nd-dot { background: #d29922; } .llm-node.n-yellow .nd-mode { color: #d29922; }
+.llm-node.n-red .nd-dot { background: #f47067; } .llm-node.n-red .nd-mode { color: #f47067; }
+.llm-node.n-gray .nd-dot { background: #6e7681; } .llm-node.n-gray .nd-mode { color: #6e7681; }
 .ladder-rung {
   position: relative; border: 1px solid var(--border); border-radius: 5px;
   padding: 5px 7px; background: rgba(1,10,5,.72); min-width: 0; flex: 1 1 auto;
@@ -799,6 +810,10 @@ body::before {
         <span id="ladder-legend" class="ladder-legend"></span>
       </div>
       <div id="worker-ladder" class="worker-ladder"><div class="empty">No ladder telemetry.</div></div>
+      <div class="ladder-head">
+        <span class="panel-subtitle">Local LLM Nodes</span>
+      </div>
+      <div id="llm-nodes" class="llm-nodes"><div class="empty">No node telemetry yet.</div></div>
     </div>
     <div class="tasks-section">
       <div class="panel-title">Tasks</div>
@@ -1346,6 +1361,38 @@ function renderWorkerLadder(d) {
   }
 }
 
+const NODE_COLOR = {
+  RUNNING: 'green',
+  DRAINING: 'yellow', TRAINING: 'yellow', EXPORTING: 'yellow', EVALUATING: 'yellow', RETURNING: 'yellow',
+  OFFLINE: 'red', TRAINING_FAILED: 'red', UNKNOWN: 'gray',
+};
+function renderLlmNodes(d) {
+  const el = document.getElementById('llm-nodes');
+  if (!el) return;
+  const nodes = (d.llm_nodes && typeof d.llm_nodes === 'object') ? Object.values(d.llm_nodes) : [];
+  if (!nodes.length) { el.innerHTML = '<div class="empty">No node telemetry yet.</div>'; return; }
+  nodes.sort((a, b) => (b.is_primary ? 1 : 0) - (a.is_primary ? 1 : 0));
+  el.innerHTML = nodes.map(n => {
+    const mode = String(n.mode || 'UNKNOWN').toUpperCase();
+    const color = NODE_COLOR[mode] || 'gray';
+    const age = n.updated_at ? Math.max(0, Math.round(Date.now() / 1000 - Number(n.updated_at))) + 's ago' : '';
+    const meta = [
+      n.is_primary ? 'primary' : 'sidecar',
+      (n.inflight != null ? n.inflight + '/' + (n.max_inflight != null ? n.max_inflight : '?') : ''),
+      n.model_hint || '',
+      n.healthy === false ? 'unhealthy' : '',
+      n.stale ? 'stale' : '',
+      age,
+    ].filter(Boolean).join(' · ');
+    return `<div class="llm-node n-${color}" title="${esc(n.endpoint || '')}">
+      <span class="nd-dot"></span>
+      <span class="nd-name">${esc(n.node_id || '?')}</span>
+      <span class="nd-mode">${esc(mode)}</span>
+      <span class="nd-meta">${esc(meta)}</span>
+    </div>`;
+  }).join('');
+}
+
 function projectBaseUrl(d) {
   const base = d.project?.output_url;
   if (!base) return null;
@@ -1775,6 +1822,7 @@ function render(d) {
   renderBuildHealth(d);
   renderAgentNetwork(d);
   renderWorkerLadder(d);
+  renderLlmNodes(d);
 
   // Tasks
   const tasks = d.tasks || [];

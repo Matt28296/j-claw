@@ -140,6 +140,12 @@ class Scheduler:
                             )
                         return  # stalled/deadlocked — not actually done, skip review
 
+                    # Refresh local-LLM node telemetry at the batch boundary (best-effort; the
+                    # registry also re-checks lease+capacity at the moment of each sidecar dispatch).
+                    try:
+                        sw.refresh_llm_nodes()
+                    except Exception:  # noqa: BLE001 — telemetry must never stall dispatch
+                        pass
                     self._dispatch_batch(ready)
 
                 # All tasks done. Run PROJECT_REVIEW once; if it added follow-ups, loop to run them.

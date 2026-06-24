@@ -372,6 +372,25 @@ MIN_SUBPROJECT_COUNT: int = _int_env("MIN_SUBPROJECT_COUNT", 3, lo=2)
 OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 EXPERIENCE_LOG: str = os.getenv("EXPERIENCE_LOG", "experience.jsonl")
 
+# ── Two-machine local-LLM node pool (Phase 1A) ───────────────────────────────────────────────
+# The 9070 XT box is the PRIMARY always-on runner + Ollama worker; the 3060 Ti box can be an
+# OPTIONAL sidecar Ollama worker (only while RUNNING) or a LoRA trainer (then removed from routing).
+# IMPORTANT: local routing assumes a SINGLE j-claw runner process — per-process inflight is the
+# authoritative capacity signal (no shared/SQLite lock). Do not run two routers against one sidecar.
+# The PRIMARY node always serves OLLAMA_HOST (above), so existing single-machine setups are unchanged;
+# LOCAL_LLM_NODES is parsed mainly for the non-primary (sidecar) endpoint(s).
+LOCAL_LLM_NODES: str = os.getenv("LOCAL_LLM_NODES", "amd_9070xt=http://localhost:11434")
+PRIMARY_LLM_NODE: str = os.getenv("PRIMARY_LLM_NODE", "amd_9070xt")
+TRAINER_NODE: str = os.getenv("TRAINER_NODE", "nvidia_3060ti")
+NODE_STATE_DIR: Path = Path(os.getenv("NODE_STATE_DIR", str(Path(__file__).parent / "node_state")))
+NODE_HEALTH_TIMEOUT_S: float = _float_env("NODE_HEALTH_TIMEOUT_S", 2.0, lo=0.1)
+NODE_STATE_TTL_S: float = _float_env("NODE_STATE_TTL_S", 10.0, lo=2.0)  # stale state file -> OFFLINE
+NODE_MAX_INFLIGHT_DEFAULT: int = _int_env("NODE_MAX_INFLIGHT_DEFAULT", 1, lo=1)
+# Start with ONE low-risk sidecar task class; widen via env once the logs show good behaviour.
+SIDECAR_ALLOWED_TASK_TYPES: set = {
+    t.strip() for t in os.getenv("SIDECAR_ALLOWED_TASK_TYPES", "documentation").split(",") if t.strip()
+}
+
 # Path to the orchestrator system prompt (one level up from this file)
 ORCHESTRATOR_PROMPT_PATH: Path = Path(__file__).parent.parent / "orchestrator.txt"
 
