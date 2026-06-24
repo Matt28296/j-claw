@@ -147,6 +147,9 @@ toolchain. Run it only in a hardened/hermetic env (network off, no secrets, reso
 `insufficient_evidence` on the ~1–2-row live corpus) are documented **before-trust** work, not yet built.
 
 ## 6. Still deferred — 3060 Ti work (build when that machine is set up)
+> **Setting up the 3060 Ti? Follow `SETUP_3060TI.md` at the repo root** — the full machine/environment
+> walkthrough (Ollama, WSL2+CUDA, Syncthing, routing wiring) plus the two scripts to build below.
+
 - **Phase 1B — `harness/node_agent.py`** (runs on the 3060 Ti): CLI `running|offline|train|status|
   heartbeat`; hardened train sequence `DRAINING` → wait inflight→0 → **stop Ollama serving** (not just
   `keep_alive:0`) → `TRAINING` → run `TRAINING_COMMAND` → `EXPORTING`→`RETURNING`→`RUNNING` only after a
