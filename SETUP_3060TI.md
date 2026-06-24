@@ -4,6 +4,22 @@
 > export + eval + promote, on branch `feat/two-machine-llm`). This doc is the machine/environment prep
 > plus the two scripts still to build. Full design rationale: `DEV_NOTES_two_machine_llm.md`.
 
+## Status as of 2026-06-24 (twelfth session)
+
+| Step | Status | Notes |
+|------|--------|-------|
+| Scripts (§F) | ✅ Done | `node_agent.py`, `train_worker.py`, `requirements-wsl.txt`, `sample_config.json` committed on `feat/two-machine-llm` |
+| GPU / driver (§A) | ✅ Done | NVIDIA 3060 Ti 8 GB, driver 595.95, CUDA 13.2 |
+| Ollama (§B) | ✅ Done | Installed, running on `0.0.0.0:11434`, `OLLAMA_HOST` persisted via `setx` |
+| qwen3:8b | ✅ Done | Pulled and ready (5.2 GB, Q4_K_M) |
+| Firewall port 11434 | ✅ Done | Inbound TCP 11434 from `100.64.0.0/10` (Tailscale CGNAT). Tighten to `100.77.200.46/32` (9070xt exact IP) when admin available |
+| Tailscale (§E connectivity) | ✅ Done | IP `100.76.236.124`, hostname `nvidia3060ti`, tailnet `Matt28296@` |
+| Syncthing (§D) | ✅ Done | Device ID `2H2Y7RC-JYJMNVS-TEUJGBG-SCRTWGB-NF3C5OU-IQ5FU4Y-BQBD5I4-XGNANQV`, paired with 9070xt (`ZOWZTAD-6TZUVQ2-VSKVPT6-W3VMJBL-CQV7RLX-HP7LGUE-4RCHNIJ-R2Z5WAR`), both folders syncing |
+| Routing wired (§E) | ✅ Done | 9070xt curl-verified our Ollama; `LOCAL_LLM_NODES=amd_9070xt=http://localhost:11434,nvidia_3060ti=http://100.76.236.124:11434` + `TRAINER_NODE=nvidia_3060ti` in `harness/.env` on 9070xt |
+| WSL2 + CUDA (§C) | ✅ Done | AMD-V/SVM enabled in BIOS; Ubuntu-22.04 WSL2; nvidia-smi inside WSL shows 3060 Ti, CUDA 13.2 |
+| Unsloth pip install | ✅ Done | training/.venv (Python 3.11.15); torch 2.5.1+cu121; unsloth[cu121-torch250] from git; full HF stack |
+| `nvidia-smi` inside WSL | ✅ Done | NVIDIA GeForce RTX 3060 Ti, 8192 MiB, CUDA 13.2 confirmed |
+
 The 3060 Ti has **two roles, never both at once**: a **serving sidecar** (extra Ollama capacity for
 low-risk tasks while j-claw runs) **or** a **LoRA trainer** (WSL2). The serving lease + `node_agent.py`
 enforce the exclusion. Hard invariant carried from the 9070 XT: a local-Ollama failure must **never**
