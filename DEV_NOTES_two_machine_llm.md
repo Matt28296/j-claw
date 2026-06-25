@@ -1,10 +1,18 @@
 # Dev Notes — Two-Machine Local-LLM Support (Phase 1A + Dataset Export)
 
-> Status as of this commit: **Phase 1A (routing) and the 9070-XT dataset-export pipeline are built,
-> tested, and green. Not yet committed.** Phase 1B (sidecar train/serve lifecycle) and the LoRA
-> train/eval/promote scripts are **deferred** (they run on / are only testable on the 3060 Ti box).
-> Full design rationale (incl. the Codex second-opinion that shaped it) lives in the plan file
-> `~/.claude/plans/i-am-currently-talking-calm-eclipse.md`.
+> Status (updated 2026-06-25): **LOOP FULLY CLOSED end-to-end across both machines.** Committed on this
+> branch (`feat/two-machine-llm`): Phase 1A routing, dataset export, `harness/training/` eval/promote +
+> `evaluation_contract.py`, and **`harness/training/stage_candidate.py`** (LoRA→GGUF→Ollama candidate
+> staging that bridges train_worker's adapter output to eval_worker's Ollama-tag input). The 3060 Ti ran
+> `node_agent.py` + `train_worker.py` (QLoRA, WSL2). A real run executed
+> export → Syncthing → QLoRA train → adapter → Syncthing → merge→GGUF (`stage_candidate`) →
+> `eval_worker --deep` (A/B vs qwen2.5-coder:7b-instruct, local Ollama, RED/GREEN verifier) → gated promote.
+> Deep-eval verdict on the 8-row smoke corpus: **`insufficient_evidence` / not-promotable**
+> (`verify_attempted_n=0 < MIN_ATTEMPTED_N=20`), `no_paid_provider_called=true` — the evidence gate
+> correctly refusing on thin data. For a REAL promotion: a larger curated dataset (≥20 attempted held-out
+> rows) and prefer Path A (torch 2.6.0+cu124 + CURRENT unsloth, which matches train_worker's API — the
+> older-unsloth pin caused serial API-drift fixes: get_tokenizer/FP8BackendType/xformers/triton).
+> Full design rationale lives in the plan file `~/.claude/plans/i-am-currently-talking-calm-eclipse.md`.
 
 ## 1. Why this exists / goal
 Let j-claw use a **second PC** for local LLM work without spending money or weakening safety:
