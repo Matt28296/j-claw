@@ -10,6 +10,27 @@ Four layers of intelligence (each with a verified, free-first fallback path — 
 
 ---
 
+## Two-Machine Setup (Optional)
+
+J-Claw supports offloading Ollama serving and LoRA training to a second PC over Tailscale:
+
+- **9070 XT** (primary) — orchestrator, scheduler, routing, dataset export, eval/promote
+- **3060 Ti** (trainer + sidecar) — extra Ollama serving capacity **or** QLoRA training, never both
+
+The full pipeline (export_dataset → train → GGUF → eval_worker → promote_worker) has been proven
+end-to-end. Both machines communicate via Tailscale + Syncthing (`jclaw-training/` and `node_state/`).
+
+| Machine | Setup reference |
+|---|---|
+| 3060 Ti (trainer + sidecar) | `SETUP_3060TI.md` — full operations reference |
+| 9070 XT (orchestrator) | `DEV_NOTES_two_machine_llm.md` — design rationale + run commands |
+| Both machines | `Matt28296/jclaw-coord` repo — inter-machine messaging |
+
+Security invariant: a local-Ollama failure must **never** escalate to a paid cloud provider.
+Firewall: inbound TCP 11434 scoped to `100.64.0.0/10` (Tailscale CGNAT) only — never public.
+
+---
+
 ## What It Does
 
 ```

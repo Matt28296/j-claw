@@ -1,17 +1,14 @@
-# Dev Notes — Two-Machine Local-LLM Support (Phase 1A + Dataset Export)
+# Dev Notes — Two-Machine Local-LLM Support (Phase 1A + 1B — COMPLETE)
 
-> Status (updated 2026-06-25): **LOOP FULLY CLOSED end-to-end across both machines.** Committed on this
-> branch (`feat/two-machine-llm`): Phase 1A routing, dataset export, `harness/training/` eval/promote +
-> `evaluation_contract.py`, and **`harness/training/stage_candidate.py`** (LoRA→GGUF→Ollama candidate
-> staging that bridges train_worker's adapter output to eval_worker's Ollama-tag input). The 3060 Ti ran
-> `node_agent.py` + `train_worker.py` (QLoRA, WSL2). A real run executed
-> export → Syncthing → QLoRA train → adapter → Syncthing → merge→GGUF (`stage_candidate`) →
+> Status (updated 2026-06-25): **LOOP FULLY CLOSED end-to-end across both machines.** All phases
+> complete: Phase 1A routing + dataset export (9070 XT), Phase 1B node agent + QLoRA trainer + GGUF
+> export + eval pipeline (3060 Ti). The full run was proven:
+> export_dataset → Syncthing → QLoRA train → adapter → Syncthing → merge→GGUF (`stage_candidate`) →
 > `eval_worker --deep` (A/B vs qwen2.5-coder:7b-instruct, local Ollama, RED/GREEN verifier) → gated promote.
 > Deep-eval verdict on the 8-row smoke corpus: **`insufficient_evidence` / not-promotable**
-> (`verify_attempted_n=0 < MIN_ATTEMPTED_N=20`), `no_paid_provider_called=true` — the evidence gate
-> correctly refusing on thin data. For a REAL promotion: a larger curated dataset (≥20 attempted held-out
-> rows) and prefer Path A (torch 2.6.0+cu124 + CURRENT unsloth, which matches train_worker's API — the
-> older-unsloth pin caused serial API-drift fixes: get_tokenizer/FP8BackendType/xformers/triton).
+> (`verify_attempted_n=0 < MIN_ATTEMPTED_N=20`), `no_paid_provider_called=true` — gate correctly refusing
+> on thin data. For a real promotion: ≥20 held-out rows + prefer Path A (torch 2.6.0+cu124 + current
+> unsloth — the older-unsloth pin caused serial API-drift fixes: get_tokenizer/FP8BackendType/xformers/triton).
 > Full design rationale lives in the plan file `~/.claude/plans/i-am-currently-talking-calm-eclipse.md`.
 
 ## 1. Why this exists / goal
@@ -30,13 +27,13 @@ never escalate to a paid cloud provider.** Adding a second node must not open a 
 |---|---|---|
 | Routing registry, scheduler, dashboard, worker calls | 9070 XT | ✅ Phase 1A done |
 | Dataset export (`harness/training/`) | 9070 XT | ✅ done |
-| `node_agent.py` train/serve lifecycle | 3060 Ti | ⏳ deferred (Phase 1B) |
-| `train_worker.py` (Unsloth QLoRA) | 3060 Ti (WSL2) | ⏳ deferred |
-| `eval_worker.py` / `promote_worker.py` | 9070 XT | ⏳ deferred |
+| `node_agent.py` train/serve lifecycle | 3060 Ti | ✅ Phase 1B done (2026-06-24) |
+| `train_worker.py` (Unsloth QLoRA) | 3060 Ti (WSL2) | ✅ done — end-to-end trained (2026-06-24) |
+| `eval_worker.py` / `promote_worker.py` | 9070 XT / 3060 Ti | ✅ done — ran deep eval (2026-06-25) |
 
-The 3060 Ti has **not been touched** — it currently exists only as a default hostname in config. The
-sidecar stays dormant until (a) `LOCAL_LLM_NODES` points at its real endpoint and (b) it writes a
-`RUNNING` state file (which `node_agent.py`, not yet built, will do).
+The 3060 Ti is fully wired. Both machines are on Matt28296's Tailscale tailnet; Syncthing syncs
+`jclaw-training/` and `node_state/` bidirectionally. For 3060 Ti day-to-day operations see
+`SETUP_3060TI.md` at the repo root.
 
 ## 3. Phase 1A — local-LLM node routing (9070 XT)
 
@@ -154,19 +151,45 @@ toolchain. Run it only in a hardened/hermetic env (network off, no secrets, reso
 **container isolation** and a frozen **canary eval pack** (so deep eval isn't permanently
 `insufficient_evidence` on the ~1–2-row live corpus) are documented **before-trust** work, not yet built.
 
-## 6. Still deferred — 3060 Ti work (build when that machine is set up)
+## 6. Phase 1B — COMPLETE (2026-06-25)
+
 > **Setting up the 3060 Ti? Follow `SETUP_3060TI.md` at the repo root** — the full machine/environment
-> walkthrough (Ollama, WSL2+CUDA, Syncthing, routing wiring) plus the two scripts to build below.
+> walkthrough and day-to-day operations reference.
 
-- **Phase 1B — `harness/node_agent.py`** (runs on the 3060 Ti): CLI `running|offline|train|status|
-  heartbeat`; hardened train sequence `DRAINING` → wait inflight→0 → **stop Ollama serving** (not just
-  `keep_alive:0`) → `TRAINING` → run `TRAINING_COMMAND` → `EXPORTING`→`RETURNING`→`RUNNING` only after a
-  live generation probe; `TRAINING_FAILED` keeps the node out of routing until an explicit `running`.
-- **`training/train_worker.py`** (Unsloth QLoRA, 8 GB defaults, WSL2) + `training/requirements-wsl.txt`
-  + a trainer `sample_config.json`. Must emit `ARTIFACT_MANIFEST.json` + a `.sync_complete` marker last
-  (so promote can hash a stable identity).
+All components are built and committed on `feat/two-machine-llm`. The full pipeline was proven end-to-end on 2026-06-24/25:
 
-## 7. How to run / test (9070 XT)
+**`harness/node_agent.py`** (3060 Ti) — CLI `running|offline|train|status|heartbeat`; hardened train
+sequence `DRAINING` → wait inflight→0 → `TRAINING` → run `TRAINING_COMMAND` → `EXPORTING` → `RETURNING`
+→ `RUNNING` only after a live generation probe; `TRAINING_FAILED` keeps the node out of routing until
+an explicit `running`. Heartbeat loop (`/tmp/hb_loop.sh`, every 4s) keeps the 45s TTL alive; does NOT
+survive WSL restarts — see `SETUP_3060TI.md` for the restart recipe.
+
+**`training/train_worker.py`** (Unsloth QLoRA, 8 GB 3060 Ti defaults, WSL2) + `training/requirements-wsl.txt`
++ `training/sample_config.json`. Emits `ARTIFACT_MANIFEST.json` + `.sync_complete` last. Syncthing
+pushes the adapter back to the 9070 XT automatically.
+
+**GGUF export pipeline** (`convert_gguf.sh` + `run_stage.py`) — merges LoRA adapter into base model,
+quantizes to `q4_k_m` via llama.cpp, stages as `jclaw-worker:cand` in Ollama. Uses WSL-native `/tmp/`
+for intermediate files (DrvFS `safetensors` atomic rename fails on `/mnt/c/`).
+
+**Version stack (3060 Ti WSL2 training venv):**
+```
+torch 2.5.0+cu121
+unsloth 2024.12.12  (--no-deps)    unsloth-zoo 2024.12.7  (--no-deps)
+transformers 4.47.1                trl 0.14.0
+accelerate 1.2.0                   triton 3.1.0  (3.2.0 breaks WSL2)
+xformers 0.0.28.post2              python-dotenv 1.2.2
+ollama 0.6.2
+```
+
+**Eval result (2026-06-25):** `eval_worker --deep` on the v001 adapter → `insufficient_evidence`
+(`verify_attempted_n=0 < MIN_ATTEMPTED_N=20`). Gate working correctly — only 1 held-out row in the
+8-row training set. To get a promotable verdict: 9070 XT runs `export_dataset` with ≥20 passing
+projects, pushes via Syncthing, 3060 Ti re-trains + re-evals.
+
+## 7. How to run / test
+
+### 9070 XT (orchestrator)
 ```powershell
 cd harness
 python test_node_registry.py        # Phase 1A routing + no-paid invariant (13)
@@ -181,3 +204,33 @@ python -m py_compile config.py node_registry.py worker.py state_writer.py schedu
 ```
 Single-machine default (no sidecar configured) behaves exactly as before: every Ollama call routes to the
 primary (`OLLAMA_HOST`), uncapped.
+
+### 3060 Ti (trainer + sidecar) — see `SETUP_3060TI.md` for full detail
+
+```bash
+# Start heartbeat (run from Git Bash or WSL after each WSL restart):
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu-22.04 -- bash -c "
+  nohup bash -c 'while true; do cd /mnt/c/Users/Matthew/j-claw && python harness/node_agent.py heartbeat 2>/dev/null; sleep 4; done' > /tmp/hb_loop.log 2>&1 &
+  echo Heartbeat PID \$!"
+
+# Run training:
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu-22.04 -- bash -c "
+  cd /mnt/c/Users/Matthew/j-claw
+  source training/.venv/bin/activate
+  python training/train_worker.py --config training/sample_config.json 2>&1"
+
+# Export GGUF + stage as Ollama candidate:
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu-22.04 -- bash /mnt/c/Users/Matthew/j-claw/convert_gguf.sh
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu-22.04 -- bash -c "cd /mnt/c/Users/Matthew/j-claw && source training/.venv/bin/activate && python run_stage.py"
+
+# Run deep eval (must run from harness/ dir):
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu-22.04 -- bash -c "
+  cd /mnt/c/Users/Matthew/j-claw/harness &&
+  OLLAMA_HOST=http://172.23.240.1:11434
+  /mnt/c/Users/Matthew/j-claw/training/.venv/bin/python -m training.eval_worker --deep \
+    --candidate-model jclaw-worker:cand \
+    --candidate-hash <HASH_FROM_RUN_STAGE> \
+    --base-model qwen2.5-coder:7b-instruct \
+    --dataset /mnt/c/Users/Matthew/j-claw/jclaw-training/datasets/curated_v001.jsonl \
+    --out-dir /mnt/c/Users/Matthew/j-claw/jclaw-training/evals 2>&1"
+```
